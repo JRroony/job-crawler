@@ -6,6 +6,13 @@ import {
   runSearchFromFilters,
 } from "@/lib/server/crawler/service";
 
+const postSearchLogPrefix = "[api/searches][POST]";
+
+type FlattenedValidationErrors = {
+  formErrors: string[];
+  fieldErrors: Record<string, string[] | undefined>;
+};
+
 export async function GET() {
   try {
     const searches = await listRecentSearches();
@@ -22,19 +29,32 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const payload = await request.json();
+    const payload: unknown = await request.json();
+    console.info(`${postSearchLogPrefix} incoming payload`, payload);
+
     const result = await runSearchFromFilters(payload);
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
     if (isInputValidationError(error)) {
+      const details = error.flatten();
+      const readableErrors = buildReadableErrors(details);
+
+      console.error(
+        `${postSearchLogPrefix} validation failure`,
+        details,
+      );
+
       return NextResponse.json(
         {
           error: "Invalid search filters.",
-          details: error.flatten(),
+          details,
+          readableErrors,
         },
         { status: 400 },
       );
     }
+
+    console.error(`${postSearchLogPrefix} unexpected failure`, error);
 
     return NextResponse.json(
       {
@@ -43,4 +63,16 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
+}
+
+function buildReadableErrors(details: FlattenedValidationErrors) {
+  const fieldErrors = Object.entries(details.fieldErrors).flatMap(([field, messages]) =>
+    (messages ?? [])
+      .filter((message) => message.trim().length > 0)
+      .map((message) => `${field}: ${message}`),
+  );
+
+  const formErrors = details.formErrors.filter((message) => message.trim().length > 0);
+
+  return [...fieldErrors, ...formErrors];
 }

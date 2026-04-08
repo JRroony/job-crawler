@@ -30,7 +30,16 @@ import type {
   SearchDocument,
   SearchFilters,
 } from "@/lib/types";
-import { activeCrawlerPlatforms } from "@/lib/types";
+import {
+  activeCrawlerPlatforms,
+  crawlModes,
+  crawlerPlatforms,
+  experienceLevels,
+  experienceMatchModes,
+  normalizeCrawlerPlatforms,
+  normalizeExperienceLevels,
+  searchFiltersSchema,
+} from "@/lib/types";
 import { formatRelativeMoment, labelForExperience } from "@/lib/utils";
 
 type JobCrawlerAppProps = {
@@ -45,6 +54,35 @@ type ZeroResultState = {
   description: string;
   highlights?: string[];
 };
+
+type AppErrorKind = "initial_load" | "validation" | "runtime";
+
+type ValidationErrorDetails = {
+  fieldErrors?: Record<string, string[] | undefined>;
+  formErrors?: string[];
+};
+
+type ValidationErrorPayload = {
+  details?: unknown;
+  readableErrors?: unknown;
+};
+
+type BlockingErrorState = {
+  title: string;
+  description: string;
+  actionLabel?: string;
+  actionType?: "reload" | "retry";
+};
+
+type SearchPayloadResult =
+  | {
+      ok: true;
+      payload: SearchFilters;
+    }
+  | {
+      ok: false;
+      message: string;
+    };
 
 type ResultNotice = {
   title: string;
@@ -71,11 +109,24 @@ export function JobCrawlerApp({
   const [activeResult, setActiveResult] = useState<CrawlResponse | null>(null);
   const [viewState, setViewState] = useState<ViewState>(initialError ? "error" : "idle");
   const [message, setMessage] = useState(initialError ?? "");
+  const [errorKind, setErrorKind] = useState<AppErrorKind | null>(
+    initialError ? "initial_load" : null,
+  );
   const [revalidatingIds, setRevalidatingIds] = useState<string[]>([]);
 
   async function submitSearch(nextFilters: SearchFilters) {
+    const payloadResult = buildSearchRequestPayload(nextFilters);
+
+    if (!payloadResult.ok) {
+      setViewState("error");
+      setErrorKind("validation");
+      setMessage(payloadResult.message);
+      return;
+    }
+
     setViewState("loading");
     setMessage("");
+    setErrorKind(null);
 
     try {
       const response = await fetch("/api/searches", {
@@ -83,18 +134,39 @@ export function JobCrawlerApp({
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(nextFilters),
+        body: JSON.stringify(payloadResult.payload),
       });
 
-      const payload = (await response.json()) as CrawlResponse & { error?: string; details?: unknown };
+      const payload = (await response.json()) as CrawlResponse & {
+        error?: string;
+        details?: unknown;
+        readableErrors?: unknown;
+      };
       if (!response.ok) {
-        throw new Error(payload.error ?? "The crawl request failed.");
+        if (response.status === 400) {
+          throw createClassifiedClientError(
+            "validation",
+            buildValidationErrorMessage(
+              {
+                details: payload.details,
+                readableErrors: payload.readableErrors,
+              },
+              payload.error ?? "Invalid search filters.",
+            ),
+          );
+        }
+
+        throw createClassifiedClientError(
+          "runtime",
+          payload.error ?? "The crawl request failed.",
+        );
       }
 
       applyLoadedResult(payload);
       setRecentSearches((current) => dedupeSearches([payload.search, ...current]));
     } catch (error) {
       setViewState("error");
+      setErrorKind(resolveErrorKind(error));
       setMessage(error instanceof Error ? error.message : "The crawl request failed.");
     }
   }
@@ -108,6 +180,7 @@ export function JobCrawlerApp({
 
     setViewState("loading");
     setMessage("");
+    setErrorKind(null);
 
     try {
       const response = await fetch(`/api/searches/${id}/rerun`, {
@@ -115,13 +188,17 @@ export function JobCrawlerApp({
       });
       const payload = (await response.json()) as CrawlResponse & { error?: string };
       if (!response.ok) {
-        throw new Error(payload.error ?? "The rerun request failed.");
+        throw createClassifiedClientError(
+          "runtime",
+          payload.error ?? "The rerun request failed.",
+        );
       }
 
       applyLoadedResult(payload);
       setRecentSearches((current) => dedupeSearches([payload.search, ...current]));
     } catch (error) {
       setViewState("error");
+      setErrorKind(resolveErrorKind(error));
       setMessage(error instanceof Error ? error.message : "The rerun request failed.");
     }
   }
@@ -129,17 +206,22 @@ export function JobCrawlerApp({
   async function loadSearch(searchId: string) {
     setViewState("loading");
     setMessage("");
+    setErrorKind(null);
 
     try {
       const response = await fetch(`/api/searches/${searchId}`);
       const payload = (await response.json()) as CrawlResponse & { error?: string };
       if (!response.ok) {
-        throw new Error(payload.error ?? "The search could not be loaded.");
+        throw createClassifiedClientError(
+          "runtime",
+          payload.error ?? "The search could not be loaded.",
+        );
       }
 
       applyLoadedResult(payload);
     } catch (error) {
       setViewState("error");
+      setErrorKind(resolveErrorKind(error));
       setMessage(error instanceof Error ? error.message : "The search could not be loaded.");
     }
   }
@@ -177,6 +259,7 @@ export function JobCrawlerApp({
     setActiveResult(payload);
     setFilters(toUiFilters(payload.search.filters));
     setViewState(resolveViewState(payload));
+    setErrorKind(null);
   }
 
   const visibleSourceResults = useMemo(
@@ -192,6 +275,10 @@ export function JobCrawlerApp({
     activeResult && activeResult.jobs.length === 0
       ? describeZeroResultState(activeResult)
       : null;
+  const blockingErrorState =
+    viewState === "error" && !activeResult
+      ? describeBlockingErrorState(errorKind, message)
+      : null;
 
   return (
     <main className="min-h-screen bg-[linear-gradient(180deg,#f5f2eb_0%,#eef3f8_100%)] text-ink">
@@ -204,13 +291,13 @@ export function JobCrawlerApp({
             setFilters={setFilters}
             onSubmit={(event) => {
               event.preventDefault();
-              void submitSearch(cleanFilters(filters));
+              void submitSearch(filters);
             }}
             onReset={() => setFilters(initialFilters)}
           />
 
           <div className="space-y-6">
-            {message ? (
+            {message && !blockingErrorState ? (
               <MessageBanner message={message} />
             ) : null}
 
@@ -277,10 +364,19 @@ export function JobCrawlerApp({
 
           {viewState === "error" && !activeResult ? (
             <StatePanel
-              title="The crawl could not complete"
-              description="Check that MongoDB is available and that your environment can reach the configured public job sources, then retry."
-              actionLabel="Retry"
-              onAction={() => void rerunActiveSearch()}
+              title={blockingErrorState?.title ?? "The crawl could not complete"}
+              description={
+                blockingErrorState?.description ??
+                "The crawl could not complete. Please retry."
+              }
+              actionLabel={blockingErrorState?.actionLabel}
+              onAction={
+                blockingErrorState?.actionType === "reload"
+                  ? () => window.location.reload()
+                  : blockingErrorState?.actionType === "retry"
+                    ? () => void rerunActiveSearch()
+                    : undefined
+              }
               tone="red"
             />
           ) : null}
@@ -457,25 +553,6 @@ function buildOperationalHighlights(
   return highlights.slice(0, 4);
 }
 
-function cleanFilters(filters: SearchFilters): SearchFilters {
-  return {
-    title: filters.title.trim(),
-    country: filters.country?.trim() || undefined,
-    state: filters.state?.trim() || undefined,
-    city: filters.city?.trim() || undefined,
-    platforms: filters.platforms?.length ? filters.platforms : undefined,
-    crawlMode: resolveCrawlMode(filters.crawlMode),
-    experienceLevels: filters.experienceLevels?.length
-      ? filters.experienceLevels
-      : undefined,
-    experienceMatchMode: filters.experienceMatchMode ?? "balanced",
-    includeUnspecifiedExperience:
-      filters.experienceMatchMode === "broad"
-        ? true
-        : filters.includeUnspecifiedExperience || undefined,
-  };
-}
-
 function toUiFilters(filters: SearchFilters): SearchFilters {
   return {
     ...filters,
@@ -626,4 +703,248 @@ function jobComparator(left: CrawlResponse["jobs"][number], right: CrawlResponse
   }
 
   return left.title.localeCompare(right.title);
+}
+
+function buildValidationErrorMessage(
+  validationPayload: ValidationErrorPayload | unknown,
+  fallbackMessage: string,
+) {
+  const readableErrors = extractReadableErrors(validationPayload);
+  if (readableErrors.length > 0) {
+    return `${fallbackMessage.replace(/\.$/, "")} — ${readableErrors.join("; ")}`;
+  }
+
+  const details = extractValidationErrorDetails(validationPayload);
+  if (!details) {
+    return fallbackMessage;
+  }
+
+  const fieldMessages = Object.entries(details.fieldErrors ?? {})
+    .flatMap(([field, messages]) =>
+      (messages ?? [])
+        .filter((message) => message.trim().length > 0)
+        .map((message) => `${field}: ${message}`),
+    );
+
+  const formMessages = (details.formErrors ?? []).filter(
+    (message) => message.trim().length > 0,
+  );
+
+  const messages = [...fieldMessages, ...formMessages];
+  return messages.length > 0
+    ? `${fallbackMessage.replace(/\.$/, "")} — ${messages.join("; ")}`
+    : fallbackMessage;
+}
+
+function extractValidationErrorDetails(
+  value: ValidationErrorPayload | unknown,
+): ValidationErrorDetails | null {
+  if (isValidationErrorPayload(value) && isValidationErrorDetails(value.details)) {
+    return value.details;
+  }
+
+  return isValidationErrorDetails(value) ? value : null;
+}
+
+function extractReadableErrors(value: ValidationErrorPayload | unknown) {
+  if (!isValidationErrorPayload(value) || !isStringArray(value.readableErrors)) {
+    return [];
+  }
+
+  return value.readableErrors.filter((message) => message.trim().length > 0);
+}
+
+function isValidationErrorPayload(value: unknown): value is ValidationErrorPayload {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+
+  if ("readableErrors" in candidate && !isStringArray(candidate.readableErrors)) {
+    return false;
+  }
+
+  if ("details" in candidate && !isValidationErrorDetails(candidate.details)) {
+    return false;
+  }
+
+  return true;
+}
+
+function isValidationErrorDetails(value: unknown): value is ValidationErrorDetails {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+
+  if ("fieldErrors" in candidate && !isFieldErrorMap(candidate.fieldErrors)) {
+    return false;
+  }
+
+  if ("formErrors" in candidate && !isStringArray(candidate.formErrors)) {
+    return false;
+  }
+
+  return true;
+}
+
+function isFieldErrorMap(value: unknown): value is Record<string, string[] | undefined> {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  return Object.values(value).every(
+    (messages) => typeof messages === "undefined" || isStringArray(messages),
+  );
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function buildSearchRequestPayload(filters: SearchFilters): SearchPayloadResult {
+  const experienceMatchMode = normalizeEnumValue(
+    filters.experienceMatchMode,
+    experienceMatchModes,
+  );
+  const candidate = {
+    title: filters.title.trim(),
+    country: normalizeOptionalString(filters.country),
+    state: normalizeOptionalString(filters.state),
+    city: normalizeOptionalString(filters.city),
+    platforms: normalizeCrawlerPlatforms(
+      normalizeEnumArray(filters.platforms, crawlerPlatforms),
+    ),
+    crawlMode: normalizeEnumValue(filters.crawlMode, crawlModes),
+    experienceLevels: normalizeExperienceLevels(
+      normalizeEnumArray(filters.experienceLevels, experienceLevels),
+    ),
+    experienceMatchMode,
+    includeUnspecifiedExperience:
+      experienceMatchMode === "broad"
+        ? true
+        : filters.includeUnspecifiedExperience === true
+          ? true
+          : undefined,
+  };
+
+  const clientValidationMessage = validateSearchFiltersForClient(candidate);
+  if (clientValidationMessage) {
+    return {
+      ok: false,
+      message: clientValidationMessage,
+    };
+  }
+
+  const parsed = searchFiltersSchema.safeParse(candidate);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      message: buildValidationErrorMessage(
+        parsed.error.flatten(),
+        "Invalid search filters.",
+      ),
+    };
+  }
+
+  return {
+    ok: true,
+    payload: parsed.data,
+  };
+}
+
+function validateSearchFiltersForClient(filters: Pick<SearchFilters, "title">) {
+  const title = filters.title.trim();
+
+  if (!title) {
+    return "Invalid search filters — title: Please enter a target title.";
+  }
+
+  if (title.length < 2) {
+    return "Invalid search filters — title: Title must contain at least 2 characters.";
+  }
+
+  return null;
+}
+
+function normalizeOptionalString(value: string | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function normalizeEnumValue<T extends string>(
+  value: string | undefined,
+  allowedValues: readonly T[],
+) {
+  return value && allowedValues.includes(value as T) ? (value as T) : undefined;
+}
+
+function normalizeEnumArray<T extends string>(
+  values: readonly string[] | undefined,
+  allowedValues: readonly T[],
+) {
+  if (!values?.length) {
+    return undefined;
+  }
+
+  const normalized = allowedValues.filter((value) => values.includes(value));
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+type ClassifiedClientError = Error & {
+  kind: Exclude<AppErrorKind, "initial_load">;
+};
+
+function createClassifiedClientError(
+  kind: ClassifiedClientError["kind"],
+  message: string,
+) {
+  const error = new Error(message) as ClassifiedClientError;
+  error.kind = kind;
+  return error;
+}
+
+function resolveErrorKind(error: unknown): Exclude<AppErrorKind, "initial_load"> {
+  return isClassifiedClientError(error) ? error.kind : "runtime";
+}
+
+function isClassifiedClientError(error: unknown): error is ClassifiedClientError {
+  return (
+    error instanceof Error &&
+    "kind" in error &&
+    (error.kind === "validation" || error.kind === "runtime")
+  );
+}
+
+function describeBlockingErrorState(
+  errorKind: AppErrorKind | null,
+  message: string,
+): BlockingErrorState {
+  if (errorKind === "validation") {
+    return {
+      title: "Search filters need attention",
+      description:
+        message || "One or more search filters are invalid. Update the form and try again.",
+    };
+  }
+
+  if (errorKind === "initial_load") {
+    return {
+      title: "The crawler could not load",
+      description:
+        message || "Check that MongoDB is available, then reload the page and try again.",
+      actionLabel: "Reload page",
+      actionType: "reload",
+    };
+  }
+
+  return {
+    title: "The crawl could not complete",
+    description:
+      message || "The crawl request failed before results could be returned.",
+    actionLabel: "Retry",
+    actionType: "retry",
+  };
 }
