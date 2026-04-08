@@ -222,6 +222,35 @@ describe("JobCrawlerRepository", () => {
     });
   });
 
+  it("normalizes legacy null location filters when searches are read back", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+
+    await db.collection(collectionNames.searches).insertOne({
+      _id: "search-null-location",
+      filters: {
+        title: "Software Engineer",
+        country: "United States",
+        state: null,
+        city: null,
+      },
+      createdAt: "2026-03-29T00:00:00.000Z",
+      updatedAt: "2026-03-29T00:00:00.000Z",
+    });
+
+    const search = await repository.getSearch("search-null-location");
+    const searches = await repository.listRecentSearches();
+
+    expect(search?.filters).toEqual({
+      title: "Software Engineer",
+      country: "United States",
+    });
+    expect(searches[0]?.filters).toEqual({
+      title: "Software Engineer",
+      country: "United States",
+    });
+  });
+
   it("normalizes legacy crawl runs with missing crawler metadata on read", async () => {
     const db = new FakeDb();
     const repository = new JobCrawlerRepository(db);

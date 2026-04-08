@@ -27,4 +27,18 @@ describe("search intent normalization", () => {
       platforms: ["lever"],
     });
   });
+
+  it("normalizes nullable optional location fields before validation", () => {
+    expect(
+      normalizeSearchIntentInput({
+        title: "Software Engineer",
+        country: " United States ",
+        state: null,
+        city: "   ",
+      }),
+    ).toEqual({
+      title: "Software Engineer",
+      country: "United States",
+    });
+  });
 });

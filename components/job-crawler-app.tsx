@@ -38,6 +38,7 @@ import {
   experienceMatchModes,
   normalizeCrawlerPlatforms,
   normalizeExperienceLevels,
+  normalizeOptionalSearchString,
   searchFiltersSchema,
 } from "@/lib/types";
 import { formatRelativeMoment, labelForExperience } from "@/lib/utils";
@@ -566,9 +567,9 @@ function buildOperationalHighlights(
 function toUiFilters(filters: SearchFilters): SearchFilters {
   return {
     ...filters,
-    country: filters.country ?? "",
-    state: filters.state ?? "",
-    city: filters.city ?? "",
+    country: toUiOptionalString(filters.country),
+    state: toUiOptionalString(filters.state),
+    city: toUiOptionalString(filters.city),
     experienceMatchMode: filters.experienceMatchMode ?? "balanced",
     crawlMode: filters.crawlMode ?? "fast",
   };
@@ -828,16 +829,16 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
-function buildSearchRequestPayload(filters: SearchFilters): SearchPayloadResult {
+export function buildSearchRequestPayload(filters: SearchFilters): SearchPayloadResult {
   const experienceMatchMode = normalizeEnumValue(
     filters.experienceMatchMode,
     experienceMatchModes,
   );
   const candidate = {
     title: filters.title.trim(),
-    country: normalizeOptionalString(filters.country),
-    state: normalizeOptionalString(filters.state),
-    city: normalizeOptionalString(filters.city),
+    country: normalizeOptionalSearchString(filters.country),
+    state: normalizeOptionalSearchString(filters.state),
+    city: normalizeOptionalSearchString(filters.city),
     platforms: normalizeCrawlerPlatforms(
       normalizeEnumArray(filters.platforms, crawlerPlatforms),
     ),
@@ -893,13 +894,9 @@ function validateSearchFiltersForClient(filters: Pick<SearchFilters, "title">) {
   return null;
 }
 
-function normalizeOptionalString(value: unknown) {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
+function toUiOptionalString(value: unknown) {
+  const normalized = normalizeOptionalSearchString(value);
+  return typeof normalized === "string" ? normalized : "";
 }
 
 function normalizeEnumValue<T extends string>(

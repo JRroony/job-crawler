@@ -22,6 +22,74 @@ function createStubProvider(
 }
 
 describe("crawl diagnostics", () => {
+  it("accepts nullable optional location fields on incoming search requests", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-03-29T12:00:00.000Z");
+
+    const provider = createStubProvider("greenhouse", async () => {
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: 1,
+        fetchedCount: 1,
+        matchedCount: 1,
+        warningCount: 0,
+        jobs: [
+          {
+            title: "Software Engineer",
+            company: "Acme",
+            country: "United States",
+            locationText: "Remote, United States",
+            sourcePlatform: "greenhouse",
+            sourceJobId: "role-1",
+            sourceUrl: "https://example.com/jobs/role-1",
+            applyUrl: "https://example.com/jobs/role-1/apply",
+            canonicalUrl: "https://example.com/jobs/role-1",
+            discoveredAt: now.toISOString(),
+            rawSourceMetadata: {},
+          },
+        ],
+      };
+    });
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/openai",
+            token: "openai",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+
+    const result = await runSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        state: null,
+        city: null,
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    expect(result.search.filters).toEqual({
+      title: "Software Engineer",
+      country: "United States",
+      platforms: ["greenhouse"],
+    });
+    expect(result.jobs).toHaveLength(1);
+  });
+
   it("tracks discovery, filter exclusions, dedupe, and deferred validation separately", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const now = new Date("2026-03-29T12:00:00.000Z");

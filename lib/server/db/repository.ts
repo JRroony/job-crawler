@@ -26,6 +26,7 @@ import {
   crawlSourceResultSchema,
   jobListingSchema,
   linkValidationResultSchema,
+  normalizeOptionalSearchFilterFields,
   persistableJobSchema,
   searchDocumentSchema,
 } from "@/lib/types";
@@ -375,7 +376,10 @@ function dedupeProvenance(records: JobListing["sourceProvenance"]) {
 }
 
 function parseStoredSearch(document: Record<string, unknown>) {
-  return searchDocumentSchema.parse(document);
+  return searchDocumentSchema.parse({
+    ...document,
+    filters: normalizeOptionalSearchFilterFields(document.filters),
+  });
 }
 
 function parseStoredCrawlRun(document: Record<string, unknown>) {

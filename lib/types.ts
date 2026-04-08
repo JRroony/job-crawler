@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const optionalTrimmedString = z.preprocess((value) => {
+export function normalizeOptionalSearchString(value: unknown) {
   if (value == null) {
     return undefined;
   }
@@ -11,7 +11,33 @@ const optionalTrimmedString = z.preprocess((value) => {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
-}, z.string().min(1).max(160).optional());
+}
+
+export function normalizeOptionalSearchFilterFields(rawFilters: unknown) {
+  if (!rawFilters || typeof rawFilters !== "object" || Array.isArray(rawFilters)) {
+    return rawFilters;
+  }
+
+  const candidate = { ...(rawFilters as Record<string, unknown>) };
+
+  for (const field of ["country", "state", "city"] as const) {
+    const normalized = normalizeOptionalSearchString(candidate[field]);
+
+    if (typeof normalized === "undefined") {
+      delete candidate[field];
+      continue;
+    }
+
+    candidate[field] = normalized;
+  }
+
+  return candidate;
+}
+
+const optionalTrimmedString = z.preprocess(
+  normalizeOptionalSearchString,
+  z.string().min(1).max(160).optional(),
+);
 
 export const experienceLevels = [
   "intern",

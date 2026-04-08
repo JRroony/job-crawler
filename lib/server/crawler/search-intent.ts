@@ -1,6 +1,9 @@
 import "server-only";
 
-import type { CrawlerPlatform } from "@/lib/types";
+import {
+  normalizeOptionalSearchFilterFields,
+  type CrawlerPlatform,
+} from "@/lib/types";
 
 type SearchIntentNormalization = {
   title: string;
@@ -47,14 +50,19 @@ const leadingTrailingNoisePatterns = [
 ];
 
 export function normalizeSearchIntentInput(rawFilters: unknown) {
-  if (!rawFilters || typeof rawFilters !== "object" || Array.isArray(rawFilters)) {
-    return rawFilters;
+  const normalizedFilters = normalizeOptionalSearchFilterFields(rawFilters);
+  if (
+    !normalizedFilters ||
+    typeof normalizedFilters !== "object" ||
+    Array.isArray(normalizedFilters)
+  ) {
+    return normalizedFilters;
   }
 
-  const candidate = { ...(rawFilters as Record<string, unknown>) };
+  const candidate = { ...(normalizedFilters as Record<string, unknown>) };
   const rawTitle = typeof candidate.title === "string" ? candidate.title.trim() : "";
   if (!rawTitle) {
-    return rawFilters;
+    return candidate;
   }
 
   const normalized = normalizeSearchIntent(rawTitle);

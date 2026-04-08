@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildSearchRequestPayload,
   describeZeroResultState,
   resolveViewState,
 } from "@/components/job-crawler-app";
-import type { CrawlResponse } from "@/lib/types";
+import type { CrawlResponse, SearchFilters } from "@/lib/types";
 
 function createResult(
   status: CrawlResponse["crawlRun"]["status"],
@@ -72,6 +73,29 @@ function createResult(
 }
 
 describe("job crawler app result state", () => {
+  it("strips nullable optional filters from the submit payload", () => {
+    const result = buildSearchRequestPayload({
+      title: "Software Engineer",
+      country: " United States ",
+      state: null as unknown as SearchFilters["state"],
+      city: "   ",
+      platforms: ["greenhouse"],
+      experienceMatchMode: "balanced",
+      crawlMode: "fast",
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      payload: {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+        experienceMatchMode: "balanced",
+        crawlMode: "fast",
+      },
+    });
+  });
+
   it("treats failed zero-job crawls as provider failures", () => {
     const result = createResult("failed");
 
