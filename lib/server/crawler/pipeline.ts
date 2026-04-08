@@ -91,6 +91,44 @@ export async function executeCrawlPipeline(
     const providerSources = selectedProviders.map((provider) =>
       discoveredSources.filter((source) => provider.supportsSource(source)),
     );
+    const providerRouting = selectedProviders.map((provider, index) => ({
+      provider: provider.provider,
+      sourceCount: providerSources[index].length,
+      sources: providerSources[index].map((source) => ({
+        id: source.id,
+        platform: source.platform,
+        token: source.token,
+        companyHint: source.companyHint,
+        discoveryMethod: source.discoveryMethod,
+      })),
+    }));
+
+    console.info("[crawl:provider-routing]", {
+      searchId: search._id,
+      normalizedFilters,
+      discoveredSources: discoveredSources.map((source) => ({
+        id: source.id,
+        platform: source.platform,
+        token: source.token,
+        companyHint: source.companyHint,
+        discoveryMethod: source.discoveryMethod,
+      })),
+      selectedProviders: selectedProviders.map((provider) => provider.provider),
+      providerRouting,
+    });
+
+    if (discoveredSources.length === 0) {
+      console.warn("[crawl:provider-routing]", {
+        searchId: search._id,
+        reason: "Discovery returned zero runnable sources before provider routing began.",
+      });
+    } else if (providerRouting.every((entry) => entry.sourceCount === 0)) {
+      console.warn("[crawl:provider-routing]", {
+        searchId: search._id,
+        reason: "Sources were discovered, but no provider accepted them.",
+      });
+    }
+
     const diagnostics = createEmptyDiagnostics({
       discoveredSources: discoveredSources.length,
       crawledSources: providerSources.reduce((total, sources) => total + sources.length, 0),

@@ -14,6 +14,7 @@ export const discoveryConfidenceLevels = ["high", "medium", "low"] as const;
 export const discoveryMethods = [
   "configured_env",
   "manual_config",
+  "curated_catalog",
   "future_search",
 ] as const;
 

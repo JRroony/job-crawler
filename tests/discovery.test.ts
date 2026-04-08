@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import { discoverSourcesFromPublicSearch } from "@/lib/server/discovery/public-search";
-import { discoverConfiguredSources } from "@/lib/server/discovery/service";
+import { discoverConfiguredSources, discoverSources } from "@/lib/server/discovery/service";
 
 describe("source discovery", () => {
   it("classifies known ATS URLs and generic career pages", () => {
@@ -190,5 +191,67 @@ describe("source discovery", () => {
       ]),
     );
     expect(sources.every((source) => source.platform === "greenhouse")).toBe(true);
+  });
+
+  it("falls back to the curated greenhouse catalog when env seeds are empty", async () => {
+    const sources = await discoverSources({
+      filters: {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      now: new Date("2026-04-08T00:00:00.000Z"),
+      fetchImpl: (async () =>
+        new Response("", {
+          status: 500,
+        })) as unknown as typeof fetch,
+      env: {
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
+        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
+      },
+    });
+
+    expect(sources.length).toBeGreaterThan(0);
+    expect(sources.every((source) => source.platform === "greenhouse")).toBe(true);
+    expect(sources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          platform: "greenhouse",
+          token: "openai",
+          discoveryMethod: "curated_catalog",
+        }),
+      ]),
+    );
+  });
+
+  it("keeps explicit greenhouse platform selection active for curated fallback sources", () => {
+    const greenhouseOnly = discoverCatalogSources(["greenhouse"]);
+
+    expect(greenhouseOnly.length).toBeGreaterThan(0);
+    expect(greenhouseOnly.every((source) => source.platform === "greenhouse")).toBe(true);
+  });
+
+  it("returns zero sources only when no supported platform remains in scope", async () => {
+    const sources = await discoverSources({
+      filters: {
+        title: "Software Engineer",
+        platforms: ["workday"],
+      },
+      now: new Date("2026-04-08T00:00:00.000Z"),
+      env: {
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
+        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
+      },
+    });
+
+    expect(sources).toEqual([]);
   });
 });

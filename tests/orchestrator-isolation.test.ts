@@ -5,6 +5,8 @@ import { collectionNames } from "@/lib/server/db/indexes";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
+import { discoverSources } from "@/lib/server/discovery/service";
+import { createGreenhouseProvider } from "@/lib/server/providers/greenhouse";
 import { normalizeGreenhouseJob } from "@/lib/server/providers/greenhouse";
 import type { CrawlProvider } from "@/lib/server/providers/types";
 import type { JobListing } from "@/lib/types";
@@ -152,6 +154,62 @@ describe("crawl orchestration", () => {
     expect(leverCrawl).toHaveBeenCalledTimes(1);
   });
 
+  it("routes curated greenhouse fallback sources into the greenhouse provider", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-08T12:00:00.000Z");
+    const seenTokens: string[] = [];
+
+    const greenhouseProvider = createStubProvider("greenhouse", async (_context, sources) => {
+      seenTokens.push(
+        ...sources
+          .map((source) => source.token)
+          .filter((token): token is string => Boolean(token)),
+      );
+
+      return {
+        provider: "greenhouse",
+        status: "success",
+        fetchedCount: 0,
+        matchedCount: 0,
+        jobs: [],
+      };
+    });
+
+    const discovery: DiscoveryService = {
+      async discover(input) {
+        return discoverSources({
+          ...input,
+          env: {
+            greenhouseBoardTokens: [],
+            leverSiteTokens: [],
+            ashbyBoardTokens: [],
+            companyPageSources: [],
+            PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
+            PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
+          },
+        });
+      },
+    };
+
+    await runSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [greenhouseProvider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    expect(seenTokens.length).toBeGreaterThan(0);
+    expect(seenTokens).toContain("openai");
+  });
+
   it("normalizes query-like role input before discovery runs", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const now = new Date("2026-03-29T12:00:00.000Z");
@@ -189,6 +247,92 @@ describe("crawl orchestration", () => {
       title: "software engineer",
       country: "United States",
       platforms: ["greenhouse"],
+    });
+  });
+
+  it("returns jobs in the crawl response when curated greenhouse fallback sources are available", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-08T12:00:00.000Z");
+    const discovery: DiscoveryService = {
+      async discover(input) {
+        return discoverSources({
+          ...input,
+          env: {
+            greenhouseBoardTokens: [],
+            leverSiteTokens: [],
+            ashbyBoardTokens: [],
+            companyPageSources: [],
+            PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
+            PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
+          },
+        });
+      },
+    };
+    const fetchImpl = vi.fn(async (request: RequestInfo | URL) => {
+      const url = String(request);
+
+      if (url.includes("/openai/")) {
+        return new Response(
+          JSON.stringify({
+            jobs: [
+              {
+                id: "software-engineer-1",
+                title: "Software Engineer",
+                absolute_url: "https://boards.greenhouse.io/openai/jobs/software-engineer-1",
+                first_published: "2026-04-01T00:00:00.000Z",
+                company_name: "OpenAI",
+                location: {
+                  name: "San Francisco, CA",
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          jobs: [],
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await runSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+        crawlMode: "fast",
+        experienceMatchMode: "balanced",
+      },
+      {
+        repository,
+        providers: [createGreenhouseProvider()],
+        discovery,
+        fetchImpl,
+        now,
+      },
+    );
+
+    expect(result.diagnostics.discoveredSources).toBeGreaterThan(0);
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0]).toMatchObject({
+      title: "Software Engineer",
+      company: "OpenAI",
+      country: "United States",
+      sourcePlatform: "greenhouse",
     });
   });
 

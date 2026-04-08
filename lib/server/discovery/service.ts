@@ -1,6 +1,7 @@
 import "server-only";
 
 import { slugToLabel } from "@/lib/server/crawler/helpers";
+import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import { discoverSourcesFromPublicSearch } from "@/lib/server/discovery/public-search";
 import { resolveOperationalCrawlerPlatforms } from "@/lib/types";
@@ -31,17 +32,40 @@ export const defaultDiscoveryService: DiscoveryService = {
 };
 
 export async function discoverSources(input: DiscoveryInput & { env: DiscoveryEnvSnapshot }) {
+  const selectedPlatforms = input.filters.platforms
+    ? new Set<string>(resolveOperationalCrawlerPlatforms(input.filters.platforms))
+    : null;
   const configuredSources = discoverConfiguredSources(input);
-  if (!input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED) {
-    return configuredSources;
-  }
+  const curatedSources = filterDiscoveredSources(
+    discoverCatalogSources(input.filters.platforms),
+    selectedPlatforms,
+  );
+  const publicSources = input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED
+    ? await discoverSourcesFromPublicSearch(input.filters, {
+        fetchImpl: input.fetchImpl,
+        maxResultsPerQuery: input.env.PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS,
+      })
+    : [];
+  const discoveredBeforeFiltering = dedupeDiscoveredSources([
+    ...configuredSources,
+    ...curatedSources,
+    ...publicSources,
+  ]);
+  const discoveredSources = filterDiscoveredSources(
+    discoveredBeforeFiltering,
+    selectedPlatforms,
+  );
 
-  const publicSources = await discoverSourcesFromPublicSearch(input.filters, {
-    fetchImpl: input.fetchImpl,
-    maxResultsPerQuery: input.env.PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS,
+  logDiscoveryTrace(input.filters, {
+    configuredSources,
+    curatedSources,
+    publicSources,
+    discoveredBeforeFiltering,
+    discoveredSources,
+    publicSearchEnabled: input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED,
   });
 
-  return dedupeDiscoveredSources([...configuredSources, ...publicSources]);
+  return discoveredSources;
 }
 
 export function discoverConfiguredSources(input: DiscoveryInput & { env: DiscoveryEnvSnapshot }) {
@@ -96,7 +120,7 @@ export function discoverConfiguredSources(input: DiscoveryInput & { env: Discove
     return discoveredSources;
   }
 
-  return discoveredSources.filter((source) => selectedPlatforms.has(source.platform));
+  return filterDiscoveredSources(discoveredSources, selectedPlatforms);
 }
 
 function dedupeDiscoveredSources(sources: DiscoveredSource[]) {
@@ -109,4 +133,65 @@ function dedupeDiscoveredSources(sources: DiscoveredSource[]) {
   }
 
   return Array.from(deduped.values());
+}
+
+function filterDiscoveredSources(
+  sources: DiscoveredSource[],
+  selectedPlatforms: Set<string> | null,
+) {
+  if (!selectedPlatforms) {
+    return sources;
+  }
+
+  return sources.filter((source) => selectedPlatforms.has(source.platform));
+}
+
+function logDiscoveryTrace(
+  filters: DiscoveryInput["filters"],
+  trace: {
+    configuredSources: DiscoveredSource[];
+    curatedSources: DiscoveredSource[];
+    publicSources: DiscoveredSource[];
+    discoveredBeforeFiltering: DiscoveredSource[];
+    discoveredSources: DiscoveredSource[];
+    publicSearchEnabled: boolean;
+  },
+) {
+  console.info("[discovery:trace]", {
+    filters,
+    configuredSources: summarizeSources(trace.configuredSources),
+    curatedSources: summarizeSources(trace.curatedSources),
+    publicSources: summarizeSources(trace.publicSources),
+    discoveredBeforeFiltering: summarizeSources(trace.discoveredBeforeFiltering),
+    discoveredAfterFiltering: summarizeSources(trace.discoveredSources),
+    publicSearchEnabled: trace.publicSearchEnabled,
+  });
+
+  if (trace.discoveredSources.length > 0) {
+    return;
+  }
+
+  const reason =
+    trace.discoveredBeforeFiltering.length > 0
+      ? "Selected platforms filtered every discovered source before provider routing."
+      : trace.publicSearchEnabled
+        ? "Configured sources, curated catalog sources, and public ATS search all returned zero runnable sources."
+        : "Configured sources and curated catalog sources returned zero runnable sources while public ATS search was disabled.";
+
+  console.warn("[discovery:zero-sources]", {
+    filters,
+    reason,
+  });
+}
+
+function summarizeSources(sources: DiscoveredSource[]) {
+  return sources.map((source) => ({
+    id: source.id,
+    platform: source.platform,
+    token: source.token,
+    companyHint: source.companyHint,
+    discoveryMethod: source.discoveryMethod,
+    confidence: source.confidence,
+    url: source.url,
+  }));
 }

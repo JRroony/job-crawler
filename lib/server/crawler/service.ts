@@ -53,6 +53,7 @@ export async function runSearchFromFilters(
   runtime: Runtime = {},
 ) {
   const filters = searchFiltersSchema.parse(normalizeSearchIntentInput(rawFilters));
+  console.info("[crawl:normalized-filters]", filters);
   const repository = await resolveRepository(runtime.repository);
   const now = runtime.now ?? new Date();
   const search = await repository.createSearch(filters, now.toISOString());
