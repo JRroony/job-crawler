@@ -2,26 +2,38 @@ import "server-only";
 
 import {
   buildLocationText,
-  matchesFiltersWithoutExperience,
+  inferExperienceLevel,
   normalizeComparableText,
   runWithConcurrency,
 } from "@/lib/server/crawler/helpers";
-import { getEnv } from "@/lib/server/env";
 import {
-  buildExperiencePrompt,
+  type CompanyPageDiscoveredSource,
+  isCompanyPageSource,
+} from "@/lib/server/discovery/types";
+import {
+  safeFetchJson,
+  safeFetchText,
+  type SafeFetchResult,
+} from "@/lib/server/net/fetcher";
+import {
   buildSeed,
   collectJsonLdJobPostings,
   collectJsonScriptPayloads,
   companyFromJsonLd,
   coercePostedAt,
   deepCollect,
+  filterProviderSeeds,
   finalizeProviderResult,
   firstString,
   locationFromJsonLd,
   resolveUrl,
   stripHtml,
+  unsupportedProviderResult,
 } from "@/lib/server/providers/shared";
-import type { CrawlProvider, NormalizedJobSeed } from "@/lib/server/providers/types";
+import {
+  defineProvider,
+  type NormalizedJobSeed,
+} from "@/lib/server/providers/types";
 import type { CompanyPageSourceConfig } from "@/lib/types";
 
 type CompanyPageHtmlSource = Extract<
@@ -48,61 +60,95 @@ function isDefined<T>(value: T | undefined): value is T {
   return value !== undefined;
 }
 
-export function createCompanyPageProvider(
-  sources = getEnv().companyPageSources,
-): CrawlProvider {
-  return {
+export function createCompanyPageProvider() {
+  return defineProvider({
     provider: "company_page",
-    async crawl(context) {
+    supportsSource: isCompanyPageSource,
+    async crawlSources(context, sources) {
       if (sources.length === 0) {
-        return {
-          provider: "company_page",
-          status: "unsupported",
-          jobs: [],
-          fetchedCount: 0,
-          matchedCount: 0,
-          errorMessage:
-            "Company-page crawling is supported, but no JSON feed, JSON-LD, or public HTML career pages are configured.",
-        };
+        return unsupportedProviderResult(
+          "company_page",
+          "Company-page crawling is supported, but no JSON feed, JSON-LD, or public HTML career pages are configured.",
+          sources.length,
+        );
       }
 
       const warnings: string[] = [];
-      let fetchedCount = 0;
-
       const sourceJobs = await runWithConcurrency(
         sources,
         async (source) => {
           try {
-            if (source.type === "json_feed") {
-              const jobs = await crawlJsonFeed(source, context.fetchImpl, context.now.toISOString());
-              fetchedCount += jobs.length;
-              return jobs.filter((job) => matchesFiltersWithoutExperience(job, context.filters));
+            const config = toCompanyPageSourceConfig(source);
+
+            if (config.type === "json_feed") {
+              const jobs = await crawlJsonFeed(
+                config,
+                context.fetchImpl,
+                context.now.toISOString(),
+              );
+              return {
+                fetchedCount: jobs.length,
+                ...filterProviderSeeds(jobs, context.filters),
+              };
             }
 
-            const jobs = await crawlHtmlPage(source, context.fetchImpl, context.now.toISOString());
-            fetchedCount += jobs.length;
-            return jobs.filter((job) => matchesFiltersWithoutExperience(job, context.filters));
+            const jobs = await crawlHtmlPage(
+              config,
+              context.fetchImpl,
+              context.now.toISOString(),
+            );
+            return {
+              fetchedCount: jobs.length,
+              ...filterProviderSeeds(jobs, context.filters),
+            };
           } catch (error) {
             warnings.push(
               error instanceof Error
                 ? error.message
-                : `Company page source ${source.company} failed unexpectedly.`,
+                : `Company page source ${source.companyHint} failed unexpectedly.`,
             );
-            return [];
+            return {
+              fetchedCount: 0,
+              jobs: [],
+              excludedByTitle: 0,
+              excludedByLocation: 0,
+            };
           }
         },
         2,
       );
 
-      const jobs = sourceJobs.flat();
+      const fetchedCount = sourceJobs.reduce((total, source) => total + source.fetchedCount, 0);
+      const jobs = sourceJobs.flatMap((source) => source.jobs);
+      const excludedByTitle = sourceJobs.reduce(
+        (total, source) => total + source.excludedByTitle,
+        0,
+      );
+      const excludedByLocation = sourceJobs.reduce(
+        (total, source) => total + source.excludedByLocation,
+        0,
+      );
 
       return finalizeProviderResult({
         provider: "company_page",
         jobs,
+        sourceCount: sources.length,
         fetchedCount,
         warnings,
+        excludedByTitle,
+        excludedByLocation,
       });
     },
+  });
+}
+
+function toCompanyPageSourceConfig(
+  source: CompanyPageDiscoveredSource,
+): CompanyPageSourceConfig {
+  return {
+    type: source.pageType,
+    company: source.companyHint,
+    url: source.url,
   };
 }
 
@@ -111,7 +157,8 @@ async function crawlJsonFeed(
   fetchImpl: typeof fetch,
   discoveredAt: string,
 ) {
-  const response = await fetchImpl(source.url, {
+  const result = await safeFetchJson(source.url, {
+    fetchImpl,
     method: "GET",
     headers: {
       Accept: "application/json",
@@ -119,12 +166,11 @@ async function crawlJsonFeed(
     cache: "no-store",
   });
 
-  if (!response.ok) {
-    throw new Error(`Company JSON feed ${source.company} returned ${response.status}.`);
+  if (!result.ok) {
+    throw new Error(formatCompanyPageFetchError("JSON feed", source.company, result));
   }
 
-  const payload = (await response.json()) as unknown;
-  const records = extractFeedRecords(payload);
+  const records = extractFeedRecords(result.data);
 
   return records
     .map((record, index) => normalizeCompanyFeedJob(source.company, discoveredAt, record, index))
@@ -136,7 +182,8 @@ async function crawlHtmlPage(
   fetchImpl: typeof fetch,
   discoveredAt: string,
 ) {
-  const response = await fetchImpl(source.url, {
+  const result = await safeFetchText(source.url, {
+    fetchImpl,
     method: "GET",
     headers: {
       Accept: "text/html,application/xhtml+xml",
@@ -144,15 +191,14 @@ async function crawlHtmlPage(
     cache: "no-store",
   });
 
-  if (!response.ok) {
-    throw new Error(`Company page ${source.company} returned ${response.status}.`);
+  if (!result.ok) {
+    throw new Error(formatCompanyPageFetchError("page", source.company, result));
   }
 
-  const html = await response.text();
   return extractCompanyHtmlJobs({
     company: source.company,
     sourcePageUrl: source.url,
-    html,
+    html: result.data ?? "",
     discoveredAt,
   });
 }
@@ -280,12 +326,15 @@ function normalizeStructuredHtmlJob(
       companyPageExtraction: "embedded_json",
     },
     discoveredAt,
-    experienceHint: buildExperiencePrompt(
-      title,
-      firstString(record, ["level", "experienceLevel", "seniority", "careerLevel"]),
-      firstString(record, ["employmentType", "department", "team"]),
-      description,
-    ),
+    explicitExperienceLevel: resolveStructuredExplicitExperienceLevel(record),
+    explicitExperienceSource: resolveStructuredExplicitExperienceLevel(record)
+      ? "structured_metadata"
+      : undefined,
+    explicitExperienceReasons: resolveStructuredExplicitExperienceLevel(record)
+      ? ["Structured company-page metadata explicitly indicates the experience level."]
+      : undefined,
+    structuredExperienceHints: collectStructuredExperienceHints(record),
+    descriptionExperienceHints: [description],
   });
 }
 
@@ -338,7 +387,7 @@ function normalizeAnchorJob(input: {
       companyPageExtraction: "html_anchor",
     },
     discoveredAt: input.discoveredAt,
-    experienceHint: buildExperiencePrompt(...segments.slice(0, 8)),
+    descriptionExperienceHints: segments.slice(0, 8),
   });
 }
 
@@ -393,13 +442,15 @@ function normalizeCompanyFeedJob(
       companyFeedJob: record,
     },
     discoveredAt,
-    experienceHint: buildExperiencePrompt(
-      title,
-      firstString(record, ["level", "experienceLevel", "seniority"]),
-      firstString(record, ["experienceRequirements", "requirements", "qualifications"]),
-      firstString(record, ["description", "jobDescription", "summary"]),
-      firstString(record, ["employmentType"]),
-    ),
+    explicitExperienceLevel: resolveStructuredExplicitExperienceLevel(record),
+    explicitExperienceSource: resolveStructuredExplicitExperienceLevel(record)
+      ? "structured_metadata"
+      : undefined,
+    explicitExperienceReasons: resolveStructuredExplicitExperienceLevel(record)
+      ? ["Structured company feed metadata explicitly indicates the experience level."]
+      : undefined,
+    structuredExperienceHints: collectStructuredExperienceHints(record),
+    descriptionExperienceHints: collectDescriptionExperienceHints(record),
   });
 }
 
@@ -432,13 +483,37 @@ function normalizeJsonLdJob(
       companyPageExtraction: "json_ld",
     },
     discoveredAt,
-    experienceHint: buildExperiencePrompt(
-      title,
-      firstString(record, ["experienceRequirements"]),
-      firstString(record, ["description", "jobDescription", "qualifications"]),
-      firstString(record, ["employmentType"]),
-    ),
+    explicitExperienceLevel: resolveStructuredExplicitExperienceLevel(record),
+    explicitExperienceSource: resolveStructuredExplicitExperienceLevel(record)
+      ? "structured_metadata"
+      : undefined,
+    explicitExperienceReasons: resolveStructuredExplicitExperienceLevel(record)
+      ? ["Structured JSON-LD metadata explicitly indicates the experience level."]
+      : undefined,
+    structuredExperienceHints: collectStructuredExperienceHints(record),
+    descriptionExperienceHints: collectDescriptionExperienceHints(record),
   });
+}
+
+function resolveStructuredExplicitExperienceLevel(record: Record<string, unknown>) {
+  return inferExperienceLevel(
+    firstString(record, ["level", "experienceLevel", "seniority", "careerLevel"]),
+    firstString(record, ["employmentType"]),
+  );
+}
+
+function collectStructuredExperienceHints(record: Record<string, unknown>) {
+  return [
+    firstString(record, ["level", "experienceLevel", "seniority", "careerLevel"]),
+    firstString(record, ["employmentType", "department", "team"]),
+  ].filter((value): value is string => Boolean(value?.trim()));
+}
+
+function collectDescriptionExperienceHints(record: Record<string, unknown>) {
+  return [
+    firstString(record, ["experienceRequirements", "requirements", "qualifications"]),
+    firstString(record, ["description", "descriptionPlain", "descriptionHtml", "jobDescription", "summary", "overview"]),
+  ].filter((value): value is string => Boolean(value?.trim()));
 }
 
 function dedupeJobsBySource(jobs: NormalizedJobSeed[]) {
@@ -663,6 +738,21 @@ function dedupeStrings(values: Array<string | undefined>) {
   }
 
   return results;
+}
+
+function formatCompanyPageFetchError(
+  target: "JSON feed" | "page",
+  company: string,
+  result: Extract<SafeFetchResult, { ok: false }>,
+) {
+  if (
+    (result.errorType === "http" || result.errorType === "rate_limit") &&
+    result.statusCode !== undefined
+  ) {
+    return `Company ${target} ${company} returned ${result.statusCode}.`;
+  }
+
+  return `Company ${target} ${company} failed: ${result.message}`;
 }
 
 function extractAttributeValue(attributes: string, name: string) {

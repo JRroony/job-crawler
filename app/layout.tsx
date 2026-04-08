@@ -16,7 +16,7 @@ const monoFont = IBM_Plex_Mono({
 
 export const metadata: Metadata = {
   title: "Job Crawler",
-  description: "Search public job boards, normalize the results, validate links, and persist crawl runs into local MongoDB.",
+  description: "Search public job boards, normalize the results, save crawl runs quickly, and revalidate links separately in local MongoDB.",
 };
 
 export default function RootLayout({

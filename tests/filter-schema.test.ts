@@ -10,6 +10,7 @@ describe("searchFiltersSchema", () => {
       state: " California ",
       city: " San Francisco ",
       experienceLevels: ["mid", "senior"],
+      experienceMatchMode: "balanced",
     });
 
     expect(parsed).toEqual({
@@ -18,6 +19,7 @@ describe("searchFiltersSchema", () => {
       state: "California",
       city: "San Francisco",
       experienceLevels: ["mid", "senior"],
+      experienceMatchMode: "balanced",
     });
   });
 
@@ -38,6 +40,47 @@ describe("searchFiltersSchema", () => {
     });
 
     expect(parsed.experienceLevels).toEqual(["mid", "senior", "staff"]);
+  });
+
+  it("treats broad mode as including unspecified experience", () => {
+    const parsed = searchFiltersSchema.parse({
+      title: "Software Engineer",
+      experienceLevels: ["mid"],
+      experienceMatchMode: "broad",
+    });
+
+    expect(parsed).toEqual({
+      title: "Software Engineer",
+      experienceLevels: ["mid"],
+      experienceMatchMode: "broad",
+      includeUnspecifiedExperience: true,
+    });
+  });
+
+  it("accepts active platform scope and crawl mode selections", () => {
+    const parsed = searchFiltersSchema.parse({
+      title: "Software Engineer",
+      platforms: ["greenhouse", "ashby"],
+      crawlMode: "deep",
+    });
+
+    expect(parsed).toEqual({
+      title: "Software Engineer",
+      platforms: ["greenhouse", "ashby"],
+      crawlMode: "deep",
+    });
+  });
+
+  it("accepts disabled platform values so saved searches stay compatible", () => {
+    const parsed = searchFiltersSchema.parse({
+      title: "Software Engineer",
+      platforms: ["workday"],
+    });
+
+    expect(parsed).toEqual({
+      title: "Software Engineer",
+      platforms: ["workday"],
+    });
   });
 
   it("rejects titles that are too short", () => {

@@ -48,6 +48,10 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
       name: "jobs_listing_by_run_and_sort",
     },
     {
+      key: { sourcePlatform: 1, postedAt: -1, companyNormalized: 1, titleNormalized: 1 },
+      name: "jobs_export_by_platform_and_postedAt",
+    },
+    {
       key: { sourceLookupKeys: 1 },
       name: "jobs_source_lookup_keys",
     },
@@ -62,8 +66,16 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
       sparse: true,
     },
     {
+      key: { applyUrl: 1 },
+      name: "jobs_apply_url",
+    },
+    {
       key: { contentFingerprint: 1 },
       name: "jobs_content_fingerprint",
+    },
+    {
+      key: { linkStatus: 1, lastValidatedAt: -1 },
+      name: "jobs_linkStatus_lastValidatedAt_desc",
     },
   ]);
 
@@ -75,6 +87,10 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     {
       key: { status: 1, startedAt: -1 },
       name: "crawlRuns_status_startedAt_desc",
+    },
+    {
+      key: { validationMode: 1, startedAt: -1 },
+      name: "crawlRuns_validationMode_startedAt_desc",
     },
   ]);
 

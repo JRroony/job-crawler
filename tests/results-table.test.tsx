@@ -69,4 +69,23 @@ describe("ResultsTable", () => {
     expect(html).not.toContain('href="https://example.com/jobs/1/apply"');
     expect(html).toContain("View Post");
   });
+
+  it("shows pending validation state for newly crawled unknown links", () => {
+    const html = renderToStaticMarkup(
+      <ResultsTable
+        jobs={[
+          createJob({
+            linkStatus: "unknown",
+            lastValidatedAt: undefined,
+            resolvedUrl: undefined,
+          }),
+        ]}
+        onRevalidate={vi.fn(async () => undefined)}
+        revalidatingIds={[]}
+      />,
+    );
+
+    expect(html).toContain("Pending validation");
+    expect(html).toContain("Validate");
+  });
 });

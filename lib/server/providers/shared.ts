@@ -1,14 +1,14 @@
 import "server-only";
 
+import type { ExperienceClassification, SearchFilters } from "@/lib/types";
 import type { NormalizedJobSeed, ProviderResult } from "@/lib/server/providers/types";
 
 import {
-  buildExperienceInferencePrompt,
   buildLocationText,
   canonicalizeUrl,
-  inferExperienceLevel,
+  classifyExperience,
+  evaluateSearchFilters,
   parseLocationText,
-  resolveJobExperienceLevel,
   slugToLabel,
 } from "@/lib/server/crawler/helpers";
 
@@ -45,10 +45,27 @@ export function buildSeed(input: {
   explicitCountry?: string;
   explicitState?: string;
   explicitCity?: string;
-  experienceHint?: string;
+  explicitExperienceLevel?: NormalizedJobSeed["experienceLevel"];
+  explicitExperienceSource?: ExperienceClassification["source"];
+  explicitExperienceReasons?: string[];
+  structuredExperienceHints?: Array<string | undefined>;
+  descriptionExperienceHints?: Array<string | undefined>;
+  pageFetchExperienceHints?: Array<string | undefined>;
 }) {
   const locationText = input.locationText?.trim() || "Location unavailable";
   const parsedLocation = parseLocationText(locationText);
+  const experienceClassification = classifyExperience({
+    title: input.title.trim(),
+    explicitExperienceLevel: input.explicitExperienceLevel,
+    explicitExperienceSource: input.explicitExperienceSource,
+    explicitExperienceReasons: input.explicitExperienceReasons,
+    structuredExperienceHints: input.structuredExperienceHints,
+    descriptionExperienceHints: input.descriptionExperienceHints,
+    pageFetchExperienceHints: input.pageFetchExperienceHints,
+    rawSourceMetadata: input.rawSourceMetadata,
+  });
+  const experienceLevel =
+    experienceClassification.explicitLevel ?? experienceClassification.inferredLevel;
 
   return {
     title: input.title.trim(),
@@ -57,11 +74,8 @@ export function buildSeed(input: {
     state: input.explicitState ?? parsedLocation.state,
     city: input.explicitCity ?? parsedLocation.city,
     locationText,
-    experienceLevel: resolveJobExperienceLevel({
-      title: input.title.trim(),
-      experienceLevel: inferExperienceLevel(input.title, input.experienceHint),
-      rawSourceMetadata: input.rawSourceMetadata,
-    }),
+    experienceLevel,
+    experienceClassification,
     sourcePlatform: input.sourcePlatform,
     sourceJobId: input.sourceJobId,
     sourceUrl: input.sourceUrl,
@@ -76,22 +90,83 @@ export function buildSeed(input: {
   };
 }
 
-export function finalizeProviderResult(input: {
-  provider: ProviderResult["provider"];
+export function finalizeProviderResult<P extends ProviderResult["provider"]>(input: {
+  provider: P;
   jobs: NormalizedJobSeed[];
+  sourceCount: number;
   fetchedCount: number;
   warnings: string[];
-}) {
+  excludedByTitle?: number;
+  excludedByLocation?: number;
+}): ProviderResult<P> {
   const hasWarnings = input.warnings.length > 0;
 
   return {
     provider: input.provider,
     status: hasWarnings ? (input.jobs.length > 0 ? "partial" : "failed") : "success",
     jobs: input.jobs,
+    sourceCount: input.sourceCount,
     fetchedCount: input.fetchedCount,
     matchedCount: input.jobs.length,
+    warningCount: input.warnings.length,
+    excludedByTitle: input.excludedByTitle ?? 0,
+    excludedByLocation: input.excludedByLocation ?? 0,
     errorMessage: hasWarnings ? input.warnings.join(" ") : undefined,
-  } satisfies ProviderResult;
+  } satisfies ProviderResult<P>;
+}
+
+export function unsupportedProviderResult<P extends ProviderResult["provider"]>(
+  provider: P,
+  message: string,
+  sourceCount = 0,
+): ProviderResult<P> {
+  return {
+    provider,
+    status: "unsupported",
+    jobs: [],
+    sourceCount,
+    fetchedCount: 0,
+    matchedCount: 0,
+    warningCount: 0,
+    excludedByTitle: 0,
+    excludedByLocation: 0,
+    errorMessage: message,
+  };
+}
+
+export function filterProviderSeeds(
+  seeds: NormalizedJobSeed[],
+  filters: SearchFilters,
+) {
+  const matchedSeeds: NormalizedJobSeed[] = [];
+  let excludedByTitle = 0;
+  let excludedByLocation = 0;
+
+  for (const seed of seeds) {
+    // Providers only prefilter on title and location so the pipeline can own the
+    // final experience-stage accounting and keep each exclusion bucket single-purpose.
+    const evaluation = evaluateSearchFilters(seed, filters, {
+      includeExperience: false,
+    });
+
+    if (evaluation.matches) {
+      matchedSeeds.push(seed);
+      continue;
+    }
+
+    if (evaluation.reason === "title") {
+      excludedByTitle += 1;
+      continue;
+    }
+
+    excludedByLocation += 1;
+  }
+
+  return {
+    jobs: matchedSeeds,
+    excludedByTitle,
+    excludedByLocation,
+  };
 }
 
 export function collectJsonLdJobPostings(html: string) {
@@ -280,10 +355,6 @@ export function firstString(record: Record<string, unknown>, keys: string[]) {
   }
 
   return undefined;
-}
-
-export function buildExperiencePrompt(...values: Array<string | undefined>) {
-  return buildExperienceInferencePrompt(...values);
 }
 
 export function resolveUrl(value: string | undefined, baseUrl: string) {

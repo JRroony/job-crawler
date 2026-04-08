@@ -29,6 +29,10 @@ function isDuplicate(left: DedupeCandidate, right: DedupeCandidate) {
     return true;
   }
 
+  if (left.applyUrl === right.applyUrl) {
+    return true;
+  }
+
   return left.contentFingerprint === right.contentFingerprint;
 }
 

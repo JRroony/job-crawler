@@ -3,6 +3,11 @@ import "server-only";
 import type { LinkStatus, LinkValidationResult } from "@/lib/types";
 
 import { canonicalizeUrl, createId } from "@/lib/server/crawler/helpers";
+import {
+  safeFetch,
+  safeFetchText,
+  type SafeFetchResult,
+} from "@/lib/server/net/fetcher";
 
 export type LinkValidationDraft = Omit<LinkValidationResult, "_id" | "jobId">;
 
@@ -36,78 +41,86 @@ export async function validateJobLink(
     };
   }
 
-  try {
-    const headResponse = await fetchImpl(parsed.toString(), {
+  const headResult = await safeFetch(parsed.toString(), {
+    fetchImpl,
+    method: "HEAD",
+    redirect: "follow",
+    cache: "no-store",
+  });
+
+  if (!headResult.ok && shouldTreatHeadFailureAsInvalid(headResult)) {
+    return buildDraftFromFailure({
+      applyUrl,
+      result: headResult,
+      checkedAt,
       method: "HEAD",
-      redirect: "follow",
-      cache: "no-store",
+      status: "invalid",
     });
+  }
 
-    if (headResponse.status >= 400) {
-      return buildDraft({
-        applyUrl,
-        response: headResponse,
-        checkedAt,
-        method: "HEAD",
-        status: "invalid",
-      });
-    }
+  const getResult = await safeFetchText(parsed.toString(), {
+    fetchImpl,
+    method: "GET",
+    redirect: "follow",
+    cache: "no-store",
+    headers: {
+      Accept: "text/html,application/xhtml+xml",
+    },
+  });
 
-    const getResponse = await fetchImpl(parsed.toString(), {
+  if (!getResult.ok) {
+    return buildDraftFromFailure({
+      applyUrl,
+      result: getResult,
+      checkedAt,
       method: "GET",
-      redirect: "follow",
-      cache: "no-store",
-      headers: {
-        Accept: "text/html,application/xhtml+xml",
-      },
+      status: resolveLinkStatusFromFailure(getResult),
     });
+  }
 
-    const body = await safeReadBody(getResponse);
-    const detectedMarkers = staleMarkers.filter((marker) =>
-      body.toLowerCase().includes(marker),
-    );
+  const body = (getResult.data ?? "").toLowerCase();
+  const detectedMarkers = staleMarkers.filter((marker) => body.includes(marker));
 
-    if (getResponse.status >= 400) {
-      return buildDraft({
-        applyUrl,
-        response: getResponse,
-        checkedAt,
-        method: "GET",
-        status: "invalid",
-      });
-    }
-
-    if (detectedMarkers.length > 0) {
-      return buildDraft({
-        applyUrl,
-        response: getResponse,
-        checkedAt,
-        method: "GET",
-        status: "stale",
-        staleMarkers: detectedMarkers,
-      });
-    }
-
+  if (detectedMarkers.length > 0) {
     return buildDraft({
       applyUrl,
-      response: getResponse,
+      response: getResult.response,
       checkedAt,
       method: "GET",
-      status: "valid",
+      status: "stale",
+      staleMarkers: detectedMarkers,
     });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Validation failed.";
-    const status: LinkStatus = /redirect/i.test(message) ? "invalid" : "unknown";
-
-    return {
-      applyUrl,
-      status,
-      method: "GET",
-      checkedAt,
-      errorMessage: message,
-      canonicalUrl: canonicalizeUrl(applyUrl),
-    };
   }
+
+  return buildDraft({
+    applyUrl,
+    response: getResult.response,
+    checkedAt,
+    method: "GET",
+    status: "valid",
+  });
+}
+
+function shouldTreatHeadFailureAsInvalid(result: Extract<SafeFetchResult, { ok: false }>) {
+  return (
+    result.errorType === "http" &&
+    (result.statusCode === 404 || result.statusCode === 410)
+  );
+}
+
+function resolveLinkStatusFromFailure(
+  result: Extract<SafeFetchResult, { ok: false }>,
+) {
+  if (
+    result.errorType === "http" &&
+    result.statusCode !== undefined &&
+    result.statusCode >= 400 &&
+    result.statusCode < 500
+  ) {
+    return "invalid" satisfies LinkStatus;
+  }
+
+  return "unknown" satisfies LinkStatus;
 }
 
 export function toStoredValidation(
@@ -141,10 +154,21 @@ function buildDraft(input: {
   } satisfies LinkValidationDraft;
 }
 
-async function safeReadBody(response: Response) {
-  try {
-    return await response.text();
-  } catch {
-    return "";
-  }
+function buildDraftFromFailure(input: {
+  applyUrl: string;
+  result: Extract<SafeFetchResult, { ok: false }>;
+  checkedAt: string;
+  method: "HEAD" | "GET";
+  status: LinkStatus;
+}) {
+  return {
+    applyUrl: input.applyUrl,
+    resolvedUrl: input.result.response?.url || undefined,
+    canonicalUrl: canonicalizeUrl(input.result.response?.url || input.applyUrl),
+    status: input.status,
+    method: input.method,
+    httpStatus: input.result.statusCode,
+    checkedAt: input.checkedAt,
+    errorMessage: input.result.message,
+  } satisfies LinkValidationDraft;
 }

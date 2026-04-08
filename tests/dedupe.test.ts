@@ -88,4 +88,36 @@ describe("dedupeJobs", () => {
 
     expect(result).toHaveLength(1);
   });
+
+  it("dedupes by apply URL when validation metadata is still unknown", () => {
+    const result = dedupeJobs([
+      createCandidate({
+        resolvedUrl: undefined,
+        canonicalUrl: undefined,
+        linkStatus: "unknown",
+        lastValidatedAt: undefined,
+      }),
+      createCandidate({
+        resolvedUrl: undefined,
+        canonicalUrl: undefined,
+        linkStatus: "unknown",
+        lastValidatedAt: undefined,
+        sourcePlatform: "lever",
+        sourceJobId: "2",
+        sourceLookupKeys: ["lever:2"],
+        sourceProvenance: [
+          {
+            sourcePlatform: "lever",
+            sourceJobId: "2",
+            sourceUrl: "https://example.com/job",
+            applyUrl: "https://example.com/job/apply",
+            discoveredAt: "2026-03-29T00:00:00.000Z",
+            rawSourceMetadata: {},
+          },
+        ],
+      }),
+    ]);
+
+    expect(result).toHaveLength(1);
+  });
 });

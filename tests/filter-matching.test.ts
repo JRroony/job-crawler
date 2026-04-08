@@ -9,7 +9,15 @@ import type { JobListing, SearchFilters } from "@/lib/types";
 
 type FilterableJob = Pick<
   JobListing,
-  "title" | "company" | "country" | "state" | "city" | "locationText" | "experienceLevel" | "rawSourceMetadata"
+  | "title"
+  | "company"
+  | "country"
+  | "state"
+  | "city"
+  | "locationText"
+  | "experienceLevel"
+  | "experienceClassification"
+  | "rawSourceMetadata"
 >;
 
 function createJob(overrides: Partial<FilterableJob> = {}): FilterableJob {
@@ -21,6 +29,7 @@ function createJob(overrides: Partial<FilterableJob> = {}): FilterableJob {
     city: "San Francisco",
     locationText: "San Francisco, California, United States",
     experienceLevel: "mid",
+    experienceClassification: undefined,
     rawSourceMetadata: {},
     ...overrides,
   };
@@ -548,6 +557,127 @@ describe("matchesFilters experience matching", () => {
         }),
       ),
     ).toBe(false);
+  });
+
+  it("keeps strict mode limited to explicit classifications", () => {
+    expect(
+      matchesFilters(
+        createJob({
+          title: "Software Engineer",
+          experienceLevel: undefined,
+          experienceClassification: {
+            inferredLevel: "senior",
+            confidence: "high",
+            source: "description",
+            reasons: ["Detected senior markers in description."],
+            isUnspecified: false,
+          },
+        }),
+        createFilters({
+          experienceLevels: ["senior"],
+          experienceMatchMode: "strict",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("lets balanced mode match medium and high confidence inferred levels", () => {
+    expect(
+      matchesFilters(
+        createJob({
+          title: "Software Engineer",
+          experienceLevel: undefined,
+          experienceClassification: {
+            inferredLevel: "senior",
+            confidence: "medium",
+            source: "description",
+            reasons: ["Detected senior markers in description."],
+            isUnspecified: false,
+          },
+        }),
+        createFilters({
+          experienceLevels: ["senior"],
+          experienceMatchMode: "balanced",
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps low-confidence inferred levels out of balanced mode but includes them in broad mode", () => {
+    const job = createJob({
+      title: "Software Engineer",
+      experienceLevel: undefined,
+      experienceClassification: {
+        inferredLevel: "senior",
+        confidence: "low",
+        source: "page_fetch",
+        reasons: ["Mapped years of experience from a deep page fetch."],
+        isUnspecified: false,
+      },
+    });
+
+    expect(
+      matchesFilters(
+        job,
+        createFilters({
+          experienceLevels: ["senior"],
+          experienceMatchMode: "balanced",
+        }),
+      ),
+    ).toBe(false);
+
+    expect(
+      matchesFilters(
+        job,
+        createFilters({
+          experienceLevels: ["senior"],
+          experienceMatchMode: "broad",
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("includes unspecified jobs only when explicitly requested or when broad mode is used", () => {
+    const job = createJob({
+      title: "Software Engineer",
+      experienceLevel: undefined,
+      experienceClassification: {
+        confidence: "none",
+        source: "unknown",
+        reasons: [],
+        isUnspecified: true,
+      },
+      rawSourceMetadata: {},
+    });
+
+    expect(
+      matchesFilters(
+        job,
+        createFilters({
+          experienceLevels: ["mid"],
+        }),
+      ),
+    ).toBe(false);
+
+    expect(
+      matchesFilters(
+        job,
+        createFilters({
+          experienceLevels: ["mid"],
+          includeUnspecifiedExperience: true,
+        }),
+      ),
+    ).toBe(true);
+
+    expect(
+      matchesFilters(
+        job,
+        createFilters({
+          experienceLevels: ["mid"],
+          experienceMatchMode: "broad",
+        }),
+      ),
+    ).toBe(true);
   });
 
   it.each([

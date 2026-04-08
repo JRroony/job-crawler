@@ -20,6 +20,55 @@ export const experienceLevels = [
 
 export const experienceLevelSchema = z.enum(experienceLevels);
 
+export const experienceInferenceConfidences = [
+  "high",
+  "medium",
+  "low",
+  "none",
+] as const;
+
+export const experienceInferenceConfidenceSchema = z.enum(
+  experienceInferenceConfidences,
+);
+
+export const experienceClassificationSources = [
+  "title",
+  "structured_metadata",
+  "description",
+  "page_fetch",
+  "unknown",
+] as const;
+
+export const experienceClassificationSourceSchema = z.enum(
+  experienceClassificationSources,
+);
+
+export const experienceMatchModes = ["strict", "balanced", "broad"] as const;
+
+export const experienceMatchModeSchema = z.enum(experienceMatchModes);
+
+export const crawlModes = ["fast", "balanced", "deep"] as const;
+
+export const crawlModeSchema = z.enum(crawlModes);
+
+export const crawlValidationModes = [
+  "deferred",
+  "inline_top_n",
+  "full_inline",
+] as const;
+
+export const crawlValidationModeSchema = z.enum(crawlValidationModes);
+
+export const crawlerPlatforms = [
+  "greenhouse",
+  "lever",
+  "ashby",
+  "company_page",
+  "workday",
+] as const;
+
+export const crawlerPlatformSchema = z.enum(crawlerPlatforms);
+
 export function normalizeExperienceLevels(
   value?: ExperienceLevel | ExperienceLevel[] | null,
 ) {
@@ -32,6 +81,44 @@ export function normalizeExperienceLevels(
 
   return normalized.length > 0 ? normalized : undefined;
 }
+
+export function normalizeCrawlerPlatforms(
+  value?: CrawlerPlatform[] | null,
+) {
+  const candidates = Array.isArray(value) ? value : [];
+  const normalized = crawlerPlatforms.filter((platform) =>
+    candidates.includes(platform),
+  );
+
+  if (normalized.length === 0) {
+    return undefined;
+  }
+
+  const matchesDefaultImplementedScope =
+    normalized.length === activeCrawlerPlatforms.length &&
+    activeCrawlerPlatforms.every((platform, index) => normalized[index] === platform);
+
+  return matchesDefaultImplementedScope ? undefined : normalized;
+}
+
+export function resolveOperationalCrawlerPlatforms(
+  value?: CrawlerPlatform[] | null,
+) {
+  if (!value) {
+    return [...activeCrawlerPlatforms];
+  }
+
+  return activeCrawlerPlatforms.filter((platform) => value.includes(platform));
+}
+
+export const experienceClassificationSchema = z.object({
+  explicitLevel: experienceLevelSchema.optional(),
+  inferredLevel: experienceLevelSchema.optional(),
+  confidence: experienceInferenceConfidenceSchema,
+  source: experienceClassificationSourceSchema,
+  reasons: z.array(z.string().min(1)).default([]),
+  isUnspecified: z.boolean(),
+});
 
 export const linkStatuses = ["valid", "invalid", "stale", "unknown"] as const;
 
@@ -47,6 +134,18 @@ export const providerPlatforms = [
 ] as const;
 
 export const providerPlatformSchema = z.enum(providerPlatforms);
+
+// Only these platform families are runnable in the current discovery-first pipeline.
+// The wider provider platform enum is kept so stored provenance and UI labels can
+// still represent limited historical or future-only platform values honestly.
+export const activeCrawlerPlatforms = [
+  "greenhouse",
+  "lever",
+  "ashby",
+  "company_page",
+] as const;
+
+export const activeCrawlerPlatformSchema = z.enum(activeCrawlerPlatforms);
 
 export const crawlRunStatuses = [
   "running",
@@ -66,20 +165,60 @@ export const crawlSourceStatuses = [
 
 export const crawlSourceStatusSchema = z.enum(crawlSourceStatuses);
 
+export const crawlDiagnosticsSchema = z.object({
+  discoveredSources: z.number().int().nonnegative().default(0),
+  crawledSources: z.number().int().nonnegative().default(0),
+  providerFailures: z.number().int().nonnegative().default(0),
+  excludedByTitle: z.number().int().nonnegative().default(0),
+  excludedByLocation: z.number().int().nonnegative().default(0),
+  excludedByExperience: z.number().int().nonnegative().default(0),
+  dedupedOut: z.number().int().nonnegative().default(0),
+  validationDeferred: z.number().int().nonnegative().default(0),
+});
+
+export const crawlProviderSummarySchema = z.object({
+  provider: providerPlatformSchema,
+  status: crawlSourceStatusSchema,
+  sourceCount: z.number().int().nonnegative().default(0),
+  fetchedCount: z.number().int().nonnegative().default(0),
+  matchedCount: z.number().int().nonnegative().default(0),
+  savedCount: z.number().int().nonnegative().default(0),
+  warningCount: z.number().int().nonnegative().default(0),
+  errorMessage: z.string().optional(),
+});
+
 export const searchFiltersSchema = z
   .object({
     title: z.string().trim().min(2).max(160),
     country: optionalTrimmedString,
     state: optionalTrimmedString,
     city: optionalTrimmedString,
+    platforms: z.array(crawlerPlatformSchema).max(crawlerPlatforms.length).optional(),
+    crawlMode: crawlModeSchema.optional(),
     experienceLevel: experienceLevelSchema.optional(),
     experienceLevels: z.array(experienceLevelSchema).max(experienceLevels.length).optional(),
+    experienceMatchMode: experienceMatchModeSchema.optional(),
+    includeUnspecifiedExperience: z.boolean().optional(),
   })
-  .transform(({ experienceLevel, experienceLevels, ...filters }) => {
+  .transform(
+    ({
+      platforms,
+      crawlMode,
+      experienceLevel,
+      experienceLevels,
+      experienceMatchMode,
+      includeUnspecifiedExperience,
+      ...filters
+    }) => {
     const normalizedExperienceLevels = normalizeExperienceLevels([
       ...(experienceLevels ?? []),
       ...(experienceLevel ? [experienceLevel] : []),
     ]);
+    const normalizedPlatforms = normalizeCrawlerPlatforms(platforms);
+    const normalizedIncludeUnspecified =
+      includeUnspecifiedExperience || experienceMatchMode === "broad"
+        ? true
+        : undefined;
 
     return {
       ...filters,
@@ -88,8 +227,29 @@ export const searchFiltersSchema = z
             experienceLevels: normalizedExperienceLevels,
           }
         : {}),
+      ...(normalizedPlatforms
+        ? {
+            platforms: normalizedPlatforms,
+          }
+        : {}),
+      ...(crawlMode
+        ? {
+            crawlMode,
+          }
+        : {}),
+      ...(experienceMatchMode
+        ? {
+            experienceMatchMode,
+          }
+        : {}),
+      ...(normalizedIncludeUnspecified
+        ? {
+            includeUnspecifiedExperience: true,
+          }
+        : {}),
     };
-  });
+    },
+  );
 
 export const sourceProvenanceSchema = z.object({
   sourcePlatform: providerPlatformSchema,
@@ -111,6 +271,7 @@ export const jobListingSchema = z.object({
   city: z.string().optional(),
   locationText: z.string().min(1),
   experienceLevel: experienceLevelSchema.optional(),
+  experienceClassification: experienceClassificationSchema.optional(),
   sourcePlatform: providerPlatformSchema,
   sourceJobId: z.string().min(1),
   sourceUrl: z.string().url(),
@@ -119,16 +280,21 @@ export const jobListingSchema = z.object({
   canonicalUrl: z.string().url().optional(),
   postedAt: z.string().datetime().optional(),
   discoveredAt: z.string().datetime(),
-  linkStatus: linkStatusSchema,
+  linkStatus: linkStatusSchema.default("unknown"),
   lastValidatedAt: z.string().datetime().optional(),
-  rawSourceMetadata: z.record(z.string(), z.unknown()),
-  sourceProvenance: z.array(sourceProvenanceSchema),
-  sourceLookupKeys: z.array(z.string().min(1)),
-  crawlRunIds: z.array(z.string().min(1)),
+  rawSourceMetadata: z.record(z.string(), z.unknown()).default({}),
+  sourceProvenance: z.array(sourceProvenanceSchema).default([]),
+  sourceLookupKeys: z.array(z.string().min(1)).default([]),
+  crawlRunIds: z.array(z.string().min(1)).default([]),
   companyNormalized: z.string().min(1),
   titleNormalized: z.string().min(1),
   locationNormalized: z.string().min(1),
   contentFingerprint: z.string().min(1),
+});
+
+export const persistableJobSchema = jobListingSchema.omit({
+  _id: true,
+  crawlRunIds: true,
 });
 
 export const searchDocumentSchema = z.object({
@@ -146,10 +312,15 @@ export const crawlRunDocumentSchema = z.object({
   startedAt: z.string().datetime(),
   finishedAt: z.string().datetime().optional(),
   status: crawlRunStatusSchema,
+  discoveredSourcesCount: z.number().int().nonnegative().default(0),
+  crawledSourcesCount: z.number().int().nonnegative().default(0),
   totalFetchedJobs: z.number().int().nonnegative(),
   totalMatchedJobs: z.number().int().nonnegative(),
   dedupedJobs: z.number().int().nonnegative(),
+  validationMode: crawlValidationModeSchema.default("deferred"),
+  providerSummary: z.array(crawlProviderSummarySchema).default([]),
   errorMessage: z.string().optional(),
+  diagnostics: crawlDiagnosticsSchema.default({}),
 });
 
 export const crawlSourceResultSchema = z.object({
@@ -158,9 +329,11 @@ export const crawlSourceResultSchema = z.object({
   searchId: z.string().min(1),
   provider: providerPlatformSchema,
   status: crawlSourceStatusSchema,
+  sourceCount: z.number().int().nonnegative().default(0),
   fetchedCount: z.number().int().nonnegative(),
   matchedCount: z.number().int().nonnegative(),
   savedCount: z.number().int().nonnegative(),
+  warningCount: z.number().int().nonnegative().default(0),
   errorMessage: z.string().optional(),
   startedAt: z.string().datetime(),
   finishedAt: z.string().datetime(),
@@ -203,14 +376,28 @@ export const crawlResponseSchema = z.object({
   crawlRun: crawlRunDocumentSchema,
   sourceResults: z.array(crawlSourceResultSchema),
   jobs: z.array(jobListingSchema),
+  diagnostics: crawlRunDocumentSchema.shape.diagnostics.default({}),
 });
 
 export type ExperienceLevel = z.infer<typeof experienceLevelSchema>;
+export type ExperienceInferenceConfidence = z.infer<
+  typeof experienceInferenceConfidenceSchema
+>;
+export type ExperienceClassification = z.infer<
+  typeof experienceClassificationSchema
+>;
+export type ExperienceMatchMode = z.infer<typeof experienceMatchModeSchema>;
+export type CrawlerPlatform = z.infer<typeof crawlerPlatformSchema>;
+export type ActiveCrawlerPlatform = z.infer<typeof activeCrawlerPlatformSchema>;
+export type CrawlMode = z.infer<typeof crawlModeSchema>;
+export type CrawlValidationMode = z.infer<typeof crawlValidationModeSchema>;
 export type SearchFilters = z.infer<typeof searchFiltersSchema>;
 export type JobListing = z.infer<typeof jobListingSchema>;
+export type PersistableJobDocument = z.infer<typeof persistableJobSchema>;
 export type SearchDocument = z.infer<typeof searchDocumentSchema>;
 export type CrawlRun = z.infer<typeof crawlRunDocumentSchema>;
 export type CrawlSourceResult = z.infer<typeof crawlSourceResultSchema>;
+export type CrawlProviderSummary = z.infer<typeof crawlProviderSummarySchema>;
 export type LinkValidationResult = z.infer<typeof linkValidationResultSchema>;
 export type SourceProvenance = z.infer<typeof sourceProvenanceSchema>;
 export type ProviderPlatform = z.infer<typeof providerPlatformSchema>;
@@ -219,3 +406,4 @@ export type CrawlSourceStatus = z.infer<typeof crawlSourceStatusSchema>;
 export type LinkStatus = z.infer<typeof linkStatusSchema>;
 export type CompanyPageSourceConfig = z.infer<typeof companyPageSourceConfigSchema>;
 export type CrawlResponse = z.infer<typeof crawlResponseSchema>;
+export type CrawlDiagnostics = CrawlRun["diagnostics"];

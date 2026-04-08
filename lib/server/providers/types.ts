@@ -1,4 +1,16 @@
-import type { ExperienceLevel, ProviderPlatform, SearchFilters } from "@/lib/types";
+import type {
+  AshbyDiscoveredSource,
+  CompanyPageDiscoveredSource,
+  DiscoveredSource,
+  GreenhouseDiscoveredSource,
+  LeverDiscoveredSource,
+} from "@/lib/server/discovery/types";
+import type {
+  ExperienceClassification,
+  ExperienceLevel,
+  ProviderPlatform,
+  SearchFilters,
+} from "@/lib/types";
 
 export type FetchLike = typeof fetch;
 
@@ -10,6 +22,7 @@ export type NormalizedJobSeed = {
   city?: string;
   locationText: string;
   experienceLevel?: ExperienceLevel;
+  experienceClassification?: ExperienceClassification;
   sourcePlatform: ProviderPlatform;
   sourceJobId: string;
   sourceUrl: string;
@@ -26,16 +39,46 @@ export type ProviderExecutionContext = {
   filters: SearchFilters;
 };
 
-export type ProviderResult = {
-  provider: ProviderPlatform;
+type ProviderSourceMap = {
+  greenhouse: GreenhouseDiscoveredSource;
+  lever: LeverDiscoveredSource;
+  ashby: AshbyDiscoveredSource;
+  company_page: CompanyPageDiscoveredSource;
+  linkedin_limited: never;
+  indeed_limited: never;
+};
+
+export type ProviderSourceFor<P extends ProviderPlatform> = ProviderSourceMap[P];
+
+export type ProviderResult<P extends ProviderPlatform = ProviderPlatform> = {
+  provider: P;
   status: "success" | "partial" | "failed" | "unsupported";
   jobs: NormalizedJobSeed[];
+  sourceCount?: number;
   fetchedCount: number;
   matchedCount: number;
+  warningCount?: number;
+  excludedByTitle?: number;
+  excludedByLocation?: number;
   errorMessage?: string;
 };
 
-export type CrawlProvider = {
-  provider: ProviderPlatform;
-  crawl(context: ProviderExecutionContext): Promise<ProviderResult>;
+export type SourceDrivenProvider<
+  P extends ProviderPlatform,
+  TSource extends DiscoveredSource | never = ProviderSourceFor<P>,
+> = {
+  provider: P;
+  supportsSource(source: DiscoveredSource): source is TSource;
+  crawlSources(
+    context: ProviderExecutionContext,
+    sources: readonly TSource[],
+  ): Promise<ProviderResult<P>>;
 };
+
+export type CrawlProvider = SourceDrivenProvider<ProviderPlatform, DiscoveredSource>;
+
+export function defineProvider<P extends ProviderPlatform>(
+  provider: SourceDrivenProvider<P, ProviderSourceFor<P>>,
+): CrawlProvider {
+  return provider as CrawlProvider;
+}

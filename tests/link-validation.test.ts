@@ -65,4 +65,33 @@ describe("validateJobLink", () => {
     const result = await validateJobLink("not-a-url", fetch, new Date("2026-03-29T00:00:00.000Z"));
     expect(result.status).toBe("invalid");
   });
+
+  it("falls back to GET when HEAD is not supported", async () => {
+    const calls: string[] = [];
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+
+      if (init?.method === "HEAD") {
+        return new Response(null, {
+          status: 405,
+        });
+      }
+
+      return new Response("<html><body>Open role</body></html>", {
+        status: 200,
+        headers: {
+          "content-type": "text/html",
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await validateJobLink(
+      "https://example.com/jobs/3",
+      fetchImpl,
+      new Date("2026-03-29T00:00:00.000Z"),
+    );
+
+    expect(calls).toEqual(["HEAD", "GET"]);
+    expect(result.status).toBe("valid");
+  });
 });

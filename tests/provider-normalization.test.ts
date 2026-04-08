@@ -22,6 +22,11 @@ describe("provider normalization", () => {
     expect(job.company).toBe("Openai");
     expect(job.city).toBe("San Francisco");
     expect(job.experienceLevel).toBe("senior");
+    expect(job.experienceClassification).toMatchObject({
+      explicitLevel: "senior",
+      confidence: "high",
+      source: "title",
+    });
   });
 
   it("normalizes lever jobs into the common model", () => {
@@ -46,6 +51,10 @@ describe("provider normalization", () => {
     expect(job.city).toBe("New York");
     expect(job.country).toBe("US");
     expect(job.experienceLevel).toBe("junior");
+    expect(job.experienceClassification).toMatchObject({
+      explicitLevel: "junior",
+      source: "title",
+    });
   });
 
   it("uses Lever description content to classify generic titles", () => {
@@ -66,6 +75,11 @@ describe("provider normalization", () => {
     });
 
     expect(job.experienceLevel).toBe("senior");
+    expect(job.experienceClassification).toMatchObject({
+      inferredLevel: "senior",
+      confidence: "medium",
+      source: "description",
+    });
   });
 
   it("normalizes ashby candidates into the common model", () => {
@@ -85,6 +99,10 @@ describe("provider normalization", () => {
     expect(job.company).toBe("Notion");
     expect(job.locationText).toBe("Remote, United States");
     expect(job.experienceLevel).toBe("staff");
+    expect(job.experienceClassification).toMatchObject({
+      explicitLevel: "staff",
+      source: "title",
+    });
   });
 
   it("uses Ashby description content to classify generic titles", () => {
@@ -102,6 +120,11 @@ describe("provider normalization", () => {
     });
 
     expect(job.experienceLevel).toBe("new_grad");
+    expect(job.experienceClassification).toMatchObject({
+      inferredLevel: "new_grad",
+      confidence: "medium",
+      source: "description",
+    });
   });
 
   it("normalizes internship roles into the intern level", () => {
@@ -124,6 +147,10 @@ describe("provider normalization", () => {
     expect(job.sourcePlatform).toBe("lever");
     expect(job.country).toBe("US");
     expect(job.experienceLevel).toBe("intern");
+    expect(job.experienceClassification).toMatchObject({
+      explicitLevel: "intern",
+      source: "structured_metadata",
+    });
   });
 
   it("uses Greenhouse metadata and content clues to normalize generic software internships", () => {
@@ -150,6 +177,10 @@ describe("provider normalization", () => {
     expect(job.sourcePlatform).toBe("greenhouse");
     expect(job.experienceLevel).toBe("intern");
     expect(job.locationText).toBe("Seattle");
+    expect(job.experienceClassification).toMatchObject({
+      inferredLevel: "intern",
+      source: "structured_metadata",
+    });
   });
 
   it("uses Greenhouse description content to classify generic senior roles", () => {
@@ -168,6 +199,10 @@ describe("provider normalization", () => {
     });
 
     expect(job.experienceLevel).toBe("senior");
+    expect(job.experienceClassification).toMatchObject({
+      inferredLevel: "senior",
+      source: "description",
+    });
   });
 
   it("uses Greenhouse office data when the top-level location is missing", () => {
@@ -210,5 +245,11 @@ describe("provider normalization", () => {
     });
 
     expect(job.experienceLevel).toBeUndefined();
+    expect(job.experienceClassification).toEqual({
+      confidence: "none",
+      source: "unknown",
+      reasons: [],
+      isUnspecified: true,
+    });
   });
 });

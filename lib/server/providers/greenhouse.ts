@@ -2,19 +2,26 @@ import "server-only";
 
 import {
   buildLocationText,
-  matchesFiltersWithoutExperience,
   normalizeComparableText,
   runWithConcurrency,
 } from "@/lib/server/crawler/helpers";
-import { getEnv } from "@/lib/server/env";
 import {
-  buildExperiencePrompt,
+  type GreenhouseDiscoveredSource,
+  isGreenhouseSource,
+} from "@/lib/server/discovery/types";
+import {
+  safeFetchJson,
+  type SafeFetchResult,
+} from "@/lib/server/net/fetcher";
+import {
   buildSeed,
   coercePostedAt,
   defaultCompanyName,
+  filterProviderSeeds,
   finalizeProviderResult,
+  unsupportedProviderResult,
 } from "@/lib/server/providers/shared";
-import type { CrawlProvider, ProviderResult } from "@/lib/server/providers/types";
+import { defineProvider } from "@/lib/server/providers/types";
 
 type GreenhouseApiResponse = {
   jobs?: Array<{
@@ -39,109 +46,142 @@ const greenhouseStructuredExperiencePattern =
 
 export function normalizeGreenhouseJob(input: {
   companyToken: string;
+  boardUrl?: string;
+  companyName?: string;
   discoveredAt: string;
   job: GreenhouseJob;
 }) {
   const locationText = buildGreenhouseLocationText(input.job);
-  const experienceHint = buildGreenhouseExperienceHint(input.job);
+  const structuredExperienceHints = buildGreenhouseStructuredExperienceHints(input.job);
+  const descriptionExperienceHint = stripGreenhouseMarkup(input.job.content);
+  const boardUrl =
+    input.boardUrl ??
+    `https://boards.greenhouse.io/${input.companyToken}`;
 
   return buildSeed({
     title: input.job.title ?? "Untitled role",
     companyToken: input.companyToken,
-    company: defaultCompanyName(input.companyToken, input.job.company_name),
+    company: defaultCompanyName(
+      input.companyToken,
+      input.job.company_name ?? input.companyName,
+    ),
     locationText,
     sourcePlatform: "greenhouse",
     sourceJobId: String(input.job.id),
-    sourceUrl: input.job.absolute_url ?? `https://boards.greenhouse.io/${input.companyToken}`,
-    applyUrl: input.job.absolute_url ?? `https://boards.greenhouse.io/${input.companyToken}`,
+    sourceUrl: input.job.absolute_url ?? boardUrl,
+    applyUrl: input.job.absolute_url ?? boardUrl,
     canonicalUrl: input.job.absolute_url,
     postedAt: coercePostedAt(input.job.first_published ?? input.job.updated_at),
     rawSourceMetadata: {
       greenhouseJob: input.job,
-      greenhouseExperienceHint: experienceHint,
+      greenhouseStructuredExperienceHints: structuredExperienceHints,
+      greenhouseDescriptionExperienceHint: descriptionExperienceHint || undefined,
     },
     discoveredAt: input.discoveredAt,
-    experienceHint,
+    structuredExperienceHints,
+    descriptionExperienceHints: [descriptionExperienceHint],
   });
 }
 
-export function createGreenhouseProvider(): CrawlProvider {
-  return {
+export function createGreenhouseProvider() {
+  return defineProvider({
     provider: "greenhouse",
-    async crawl(context) {
-      const tokens = getEnv().greenhouseBoardTokens;
-      if (tokens.length === 0) {
-        return unsupportedResult("No Greenhouse board tokens are configured.");
+    supportsSource: isGreenhouseSource,
+    async crawlSources(context, sources) {
+      if (sources.length === 0) {
+        return unsupportedProviderResult(
+          "greenhouse",
+          "No discovered Greenhouse sources are available.",
+          sources.length,
+        );
       }
 
       const warnings: string[] = [];
-      let fetchedCount = 0;
+      const discoveredAt = context.now.toISOString();
 
       const boards = await runWithConcurrency(
-        tokens,
-        async (companyToken) => {
-          try {
-            const response = await context.fetchImpl(
-              `https://boards-api.greenhouse.io/v1/boards/${companyToken}/jobs?content=true`,
-              {
-                method: "GET",
-                headers: {
-                  Accept: "application/json",
-                },
-                cache: "no-store",
-              },
-            );
+        sources,
+        async (source) => {
+          const apiUrl = resolveGreenhouseApiUrl(source);
+          const companyToken = resolveGreenhouseToken(source);
+          const boardUrl = resolveGreenhouseBoardUrl(source);
 
-            if (!response.ok) {
-              throw new Error(`Greenhouse returned ${response.status} for ${companyToken}.`);
-            }
-
-            const payload = (await response.json()) as GreenhouseApiResponse;
-            const jobs = payload.jobs ?? [];
-            fetchedCount += jobs.length;
-
-            return jobs
-              .map((job) =>
-                normalizeGreenhouseJob({
-                  companyToken,
-                  discoveredAt: context.now.toISOString(),
-                  job,
-                }),
-              )
-              .filter((job) => matchesFiltersWithoutExperience(job, context.filters));
-          } catch (error) {
+          if (!apiUrl) {
             warnings.push(
-              error instanceof Error
-                ? error.message
-                : `Greenhouse board ${companyToken} failed unexpectedly.`,
+              `Greenhouse source ${describeGreenhouseSource(source)} is missing a usable board token or URL.`,
             );
-            return [];
+            return {
+              fetchedCount: 0,
+              jobs: [],
+            };
           }
+
+          const result = await safeFetchJson<GreenhouseApiResponse>(apiUrl, {
+            fetchImpl: context.fetchImpl,
+            method: "GET",
+            headers: {
+              Accept: "application/json",
+            },
+            cache: "no-store",
+          });
+
+          if (!result.ok) {
+            warnings.push(formatGreenhouseFetchWarning(source, result));
+            return {
+              fetchedCount: 0,
+              jobs: [],
+              excludedByTitle: 0,
+              excludedByLocation: 0,
+            };
+          }
+
+          const jobs = result.data?.jobs ?? [];
+          const normalizedJobs = jobs.map((job) =>
+            normalizeGreenhouseJob({
+              companyToken:
+                companyToken ??
+                buildProviderCompanyToken(source.companyHint) ??
+                "greenhouse",
+              boardUrl,
+              companyName: source.companyHint,
+              discoveredAt,
+              job,
+            }),
+          );
+          const filteredJobs = filterProviderSeeds(normalizedJobs, context.filters);
+
+          return {
+            fetchedCount: jobs.length,
+            jobs: filteredJobs.jobs,
+            excludedByTitle: filteredJobs.excludedByTitle,
+            excludedByLocation: filteredJobs.excludedByLocation,
+          };
         },
         3,
       );
 
-      const jobs = boards.flat();
+      const fetchedCount = boards.reduce((total, board) => total + board.fetchedCount, 0);
+      const jobs = boards.flatMap((board) => board.jobs);
+      const excludedByTitle = boards.reduce(
+        (total, board) => total + (board.excludedByTitle ?? 0),
+        0,
+      );
+      const excludedByLocation = boards.reduce(
+        (total, board) => total + (board.excludedByLocation ?? 0),
+        0,
+      );
 
       return finalizeProviderResult({
         provider: "greenhouse",
         jobs,
+        sourceCount: sources.length,
         fetchedCount,
         warnings,
+        excludedByTitle,
+        excludedByLocation,
       });
     },
-  };
-}
-
-function unsupportedResult(message: string): ProviderResult {
-  return {
-    provider: "greenhouse",
-    status: "unsupported",
-    jobs: [],
-    fetchedCount: 0,
-    matchedCount: 0,
-    errorMessage: message,
-  };
+  });
 }
 
 function buildGreenhouseLocationText(job: GreenhouseJob) {
@@ -154,14 +194,12 @@ function buildGreenhouseLocationText(job: GreenhouseJob) {
   return buildLocationText(candidates) || "Location unavailable";
 }
 
-function buildGreenhouseExperienceHint(job: GreenhouseJob) {
-  return buildExperiencePrompt(
-    job.title,
+function buildGreenhouseStructuredExperienceHints(job: GreenhouseJob) {
+  return [
     ...collectStructuredMetadataHints(job.metadata),
     ...collectStructuredNames(job.departments),
     ...collectStructuredNames(job.offices),
-    stripGreenhouseMarkup(job.content),
-  );
+  ];
 }
 
 function collectStructuredMetadataHints(
@@ -210,4 +248,106 @@ function dedupeComparableStrings(values: Array<string | undefined | null>) {
   }
 
   return results;
+}
+
+function resolveGreenhouseApiUrl(source: GreenhouseDiscoveredSource) {
+  const token = resolveGreenhouseToken(source);
+  if (token) {
+    return `https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true`;
+  }
+
+  return firstGreenhouseUrl([source.apiUrl, source.url, source.boardUrl]);
+}
+
+function resolveGreenhouseBoardUrl(source: GreenhouseDiscoveredSource) {
+  const token = resolveGreenhouseToken(source);
+  if (token) {
+    return `https://boards.greenhouse.io/${token}`;
+  }
+
+  return firstGreenhouseUrl([source.boardUrl, source.url]) ?? source.url;
+}
+
+function resolveGreenhouseToken(source: GreenhouseDiscoveredSource) {
+  return (
+    cleanString(source.token) ??
+    extractGreenhouseTokenFromUrl(source.url) ??
+    extractGreenhouseTokenFromUrl(source.boardUrl) ??
+    extractGreenhouseTokenFromUrl(source.apiUrl)
+  );
+}
+
+function extractGreenhouseTokenFromUrl(value?: string) {
+  if (!value?.trim()) {
+    return undefined;
+  }
+
+  try {
+    const url = new URL(value);
+    const segments = url.pathname.split("/").filter(Boolean);
+
+    if (url.hostname === "boards.greenhouse.io") {
+      return cleanString(segments[0]);
+    }
+
+    if (url.hostname === "boards-api.greenhouse.io") {
+      return segments[0] === "v1" && segments[1] === "boards"
+        ? cleanString(segments[2])
+        : undefined;
+    }
+
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function firstGreenhouseUrl(values: Array<string | undefined>) {
+  for (const value of values) {
+    const trimmed = cleanString(value);
+    if (!trimmed) {
+      continue;
+    }
+
+    try {
+      return new URL(trimmed).toString();
+    } catch {
+      continue;
+    }
+  }
+
+  return undefined;
+}
+
+function buildProviderCompanyToken(companyHint?: string) {
+  const comparable = normalizeComparableText(companyHint ?? "");
+  return comparable ? comparable.replace(/\s+/g, "-") : undefined;
+}
+
+function formatGreenhouseFetchWarning(
+  source: GreenhouseDiscoveredSource,
+  result: Extract<SafeFetchResult, { ok: false }>,
+) {
+  if (
+    (result.errorType === "http" || result.errorType === "rate_limit") &&
+    result.statusCode !== undefined
+  ) {
+    return `Greenhouse returned ${result.statusCode} for ${describeGreenhouseSource(source)}.`;
+  }
+
+  return `Greenhouse board ${describeGreenhouseSource(source)} failed: ${result.message}`;
+}
+
+function describeGreenhouseSource(source: GreenhouseDiscoveredSource) {
+  return (
+    resolveGreenhouseToken(source) ??
+    cleanString(source.companyHint) ??
+    cleanString(source.url) ??
+    "unknown source"
+  );
+}
+
+function cleanString(value?: string) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }

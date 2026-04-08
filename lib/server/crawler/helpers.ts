@@ -2,7 +2,15 @@ import "server-only";
 
 import { createHash, randomUUID } from "node:crypto";
 
-import type { ExperienceLevel, JobListing, ProviderPlatform, SearchFilters } from "@/lib/types";
+import type {
+  ExperienceClassification,
+  ExperienceInferenceConfidence,
+  ExperienceLevel,
+  ExperienceMatchMode,
+  JobListing,
+  ProviderPlatform,
+  SearchFilters,
+} from "@/lib/types";
 
 type CountryAliasGroup = {
   concept: string;
@@ -51,15 +59,6 @@ type TitleRoleDefinition = {
   relevantToBroadSoftwareQueries?: boolean;
 };
 
-type TitleRoleAlias = {
-  concept: TitleRoleConcept;
-  canonical: string;
-  family: TitleRoleFamily;
-  kind: TitleAliasKind;
-  phrase: string;
-  relevantToBroadSoftwareQueries: boolean;
-};
-
 type AnalyzedTitle = {
   normalized: string;
   baseNormalized: string;
@@ -78,6 +77,32 @@ export type TitleMatchResult = {
   score: number;
   canonicalQueryTitle: string;
   canonicalJobTitle: string;
+};
+
+export type FilterExclusionReason = "title" | "location" | "experience";
+
+export type FilterEvaluation =
+  | { matches: true }
+  | { matches: false; reason: FilterExclusionReason };
+
+type ExperienceFilterableJob = Pick<
+  JobListing,
+  | "title"
+  | "company"
+  | "country"
+  | "state"
+  | "city"
+  | "locationText"
+  | "experienceLevel"
+  | "experienceClassification"
+  | "rawSourceMetadata"
+>;
+
+type ExperienceSignal = {
+  level: ExperienceLevel;
+  confidence: ExperienceInferenceConfidence;
+  source: ExperienceClassification["source"];
+  reason: string;
 };
 
 const experienceMatchers: Array<{ level: ExperienceLevel; patterns: RegExp[] }> = [
@@ -547,9 +572,11 @@ export function parseLocationText(locationText?: string) {
 }
 
 export function inferExperienceLevel(...values: Array<string | undefined>) {
-  return inferExperienceLevelFromText(
-    buildExperienceInferencePrompt(...values),
-    experienceMatchers,
+  return selectExperienceLevel(
+    classifyExperience({
+      title: values[0],
+      descriptionExperienceHints: values.slice(1),
+    }),
   );
 }
 
@@ -576,14 +603,127 @@ export function buildExperienceInferencePrompt(...values: Array<string | undefin
   return segments.join(" ");
 }
 
-export function resolveJobExperienceLevel(
-  job: Pick<JobListing, "title" | "experienceLevel" | "rawSourceMetadata">,
-) {
-  return (
-    job.experienceLevel ??
-    inferExperienceLevel(job.title) ??
-    inferExperienceLevelFromMetadata(job.rawSourceMetadata)
+export function buildUnspecifiedExperienceClassification(
+  reasons: string[] = [],
+): ExperienceClassification {
+  return {
+    confidence: "none",
+    source: "unknown",
+    reasons,
+    isUnspecified: true,
+  };
+}
+
+export function classifyExperience(input: {
+  title?: string;
+  explicitExperienceLevel?: ExperienceLevel;
+  explicitExperienceSource?: ExperienceClassification["source"];
+  explicitExperienceReasons?: string[];
+  structuredExperienceHints?: Array<string | undefined>;
+  descriptionExperienceHints?: Array<string | undefined>;
+  pageFetchExperienceHints?: Array<string | undefined>;
+  rawSourceMetadata?: Record<string, unknown>;
+}): ExperienceClassification {
+  const explicitExperience = resolveExplicitExperienceClassification(input);
+  if (explicitExperience) {
+    return explicitExperience;
+  }
+
+  const structuredSignal = inferExperienceSignalFromHints(
+    input.structuredExperienceHints,
+    "structured_metadata",
   );
+  if (structuredSignal) {
+    return classificationFromSignal(structuredSignal);
+  }
+
+  const descriptionSignal = inferExperienceSignalFromHints(
+    input.descriptionExperienceHints,
+    "description",
+  );
+  if (descriptionSignal) {
+    return classificationFromSignal(descriptionSignal);
+  }
+
+  const metadataSignal = inferExperienceSignalFromMetadata(input.rawSourceMetadata);
+  if (metadataSignal) {
+    return classificationFromSignal(metadataSignal);
+  }
+
+  const pageFetchSignal = inferExperienceSignalFromHints(
+    input.pageFetchExperienceHints,
+    "page_fetch",
+  );
+  if (pageFetchSignal) {
+    return classificationFromSignal(pageFetchSignal);
+  }
+
+  return buildUnspecifiedExperienceClassification();
+}
+
+export function normalizeExperienceClassification(
+  classification?: ExperienceClassification,
+): ExperienceClassification {
+  if (!classification) {
+    return buildUnspecifiedExperienceClassification();
+  }
+
+  const reasons = classification.reasons.filter(Boolean);
+  const explicitLevel = classification.explicitLevel;
+  const inferredLevel = classification.inferredLevel;
+  const isUnspecified = !explicitLevel && !inferredLevel;
+
+  if (isUnspecified) {
+    return buildUnspecifiedExperienceClassification(reasons);
+  }
+
+  return {
+    explicitLevel,
+    inferredLevel,
+    confidence:
+      classification.confidence === "none" ? "low" : classification.confidence,
+    source: classification.source,
+    reasons,
+    isUnspecified: false,
+  };
+}
+
+export function resolveJobExperienceClassification(
+  job: Pick<
+    JobListing,
+    "title" | "experienceLevel" | "experienceClassification" | "rawSourceMetadata"
+  >,
+) {
+  const normalizedStoredClassification = normalizeExperienceClassification(
+    job.experienceClassification,
+  );
+  if (!normalizedStoredClassification.isUnspecified) {
+    return normalizedStoredClassification;
+  }
+
+  if (job.experienceLevel) {
+    return {
+      explicitLevel: job.experienceLevel,
+      confidence: "high",
+      source: "unknown",
+      reasons: ["Legacy stored experience level."],
+      isUnspecified: false,
+    } satisfies ExperienceClassification;
+  }
+
+  return classifyExperience({
+    title: job.title,
+    rawSourceMetadata: job.rawSourceMetadata,
+  });
+}
+
+export function resolveJobExperienceLevel(
+  job: Pick<
+    JobListing,
+    "title" | "experienceLevel" | "experienceClassification" | "rawSourceMetadata"
+  >,
+) {
+  return selectExperienceLevel(resolveJobExperienceClassification(job));
 }
 
 export function canonicalizeUrl(url: string) {
@@ -619,46 +759,46 @@ export function buildSourceLookupKey(platform: ProviderPlatform, sourceJobId: st
 }
 
 export function matchesFilters(
-  job: Pick<
-    JobListing,
-    "title" | "company" | "country" | "state" | "city" | "locationText" | "experienceLevel" | "rawSourceMetadata"
-  >,
+  job: ExperienceFilterableJob,
   filters: SearchFilters,
 ) {
-  return matchesFiltersWithOptions(job, filters, { includeExperience: true });
+  return evaluateSearchFilters(job, filters, { includeExperience: true }).matches;
 }
 
 export function matchesFiltersWithoutExperience(
-  job: Pick<
-    JobListing,
-    "title" | "company" | "country" | "state" | "city" | "locationText" | "experienceLevel" | "rawSourceMetadata"
-  >,
+  job: ExperienceFilterableJob,
   filters: SearchFilters,
 ) {
-  return matchesFiltersWithOptions(job, filters, { includeExperience: false });
+  return evaluateSearchFilters(job, filters, { includeExperience: false }).matches;
 }
 
-function matchesFiltersWithOptions(
-  job: Pick<
-    JobListing,
-    "title" | "company" | "country" | "state" | "city" | "locationText" | "experienceLevel" | "rawSourceMetadata"
-  >,
+export function evaluateSearchFilters(
+  job: ExperienceFilterableJob,
   filters: SearchFilters,
   options: { includeExperience: boolean },
-) {
+) : FilterEvaluation {
   if (!getTitleMatchResult(job.title, filters.title).matches) {
-    return false;
+    return {
+      matches: false,
+      reason: "title",
+    };
   }
 
   if (filters.country) {
     if (!matchesCountryFilter(job, filters.country)) {
-      return false;
+      return {
+        matches: false,
+        reason: "location",
+      };
     }
   }
 
   if (filters.state) {
     if (!matchesStateFilter(job, filters.state)) {
-      return false;
+      return {
+        matches: false,
+        reason: "location",
+      };
     }
   }
 
@@ -666,21 +806,67 @@ function matchesFiltersWithOptions(
     const wanted = normalizeComparableText(filters.city);
     const haystack = normalizeComparableText(`${job.city ?? ""} ${job.locationText}`);
     if (!haystack.includes(wanted)) {
-      return false;
+      return {
+        matches: false,
+        reason: "location",
+      };
     }
   }
 
   if (options.includeExperience && filters.experienceLevels?.length) {
-    const resolvedExperienceLevel = resolveJobExperienceLevel(job);
-    if (
-      !resolvedExperienceLevel ||
-      !filters.experienceLevels.includes(resolvedExperienceLevel)
-    ) {
-      return false;
+    if (!matchesExperienceFilters(job, filters)) {
+      return {
+        matches: false,
+        reason: "experience",
+      };
     }
   }
 
-  return true;
+  return {
+    matches: true,
+  };
+}
+
+function matchesExperienceFilters(job: ExperienceFilterableJob, filters: SearchFilters) {
+  const selectedLevels = filters.experienceLevels;
+  if (!selectedLevels?.length) {
+    return true;
+  }
+
+  const classification = resolveJobExperienceClassification(job);
+  const mode = resolveExperienceMatchMode(filters);
+  const includeUnspecified =
+    filters.includeUnspecifiedExperience === true || mode === "broad";
+
+  if (
+    classification.explicitLevel &&
+    selectedLevels.includes(classification.explicitLevel)
+  ) {
+    return true;
+  }
+
+  if (
+    mode !== "strict" &&
+    classification.inferredLevel &&
+    selectedLevels.includes(classification.inferredLevel)
+  ) {
+    if (mode === "broad") {
+      return true;
+    }
+
+    if (
+      classification.confidence === "high" ||
+      classification.confidence === "medium"
+    ) {
+      return true;
+    }
+  }
+
+  return includeUnspecified && classification.isUnspecified;
+}
+
+function resolveExperienceMatchMode(filters: SearchFilters): ExperienceMatchMode {
+  return filters.experienceMatchMode ?? "balanced";
 }
 
 export function normalizeTitleToCanonicalForm(value?: string) {
@@ -895,37 +1081,127 @@ function containsAllNormalizedTerms(haystack: string, needle: string) {
   return terms.length > 0 && terms.every((term) => containsNormalizedTerm(haystack, term));
 }
 
-function inferExperienceLevelFromText(
-  text: string,
-  matchers: Array<{ level: ExperienceLevel; patterns: RegExp[] }>,
+function resolveExplicitExperienceClassification(input: {
+  title?: string;
+  explicitExperienceLevel?: ExperienceLevel;
+  explicitExperienceSource?: ExperienceClassification["source"];
+  explicitExperienceReasons?: string[];
+}) {
+  if (input.explicitExperienceLevel) {
+    return {
+      explicitLevel: input.explicitExperienceLevel,
+      confidence: "high",
+      source: input.explicitExperienceSource ?? "structured_metadata",
+      reasons:
+        input.explicitExperienceReasons?.filter(Boolean) ?? [
+          "Provider supplied an explicit experience level.",
+        ],
+      isUnspecified: false,
+    } satisfies ExperienceClassification;
+  }
+
+  const titleSignal = inferExperienceSignalFromTitle(input.title);
+  return titleSignal
+    ? {
+        explicitLevel: titleSignal.level,
+        confidence: titleSignal.confidence,
+        source: titleSignal.source,
+        reasons: [titleSignal.reason],
+        isUnspecified: false,
+      }
+    : undefined;
+}
+
+function classificationFromSignal(signal: ExperienceSignal): ExperienceClassification {
+  return {
+    inferredLevel: signal.level,
+    confidence: signal.confidence,
+    source: signal.source,
+    reasons: [signal.reason],
+    isUnspecified: false,
+  };
+}
+
+function selectExperienceLevel(classification: ExperienceClassification) {
+  return classification.explicitLevel ?? classification.inferredLevel;
+}
+
+function inferExperienceSignalFromTitle(title?: string) {
+  if (!title?.trim()) {
+    return undefined;
+  }
+
+  return inferExperienceSignalFromText({
+    text: title,
+    matchers: experienceMatchers,
+    source: "title",
+    keywordConfidence: "high",
+    yearConfidence: "medium",
+  });
+}
+
+function inferExperienceSignalFromHints(
+  values: Array<string | undefined> | undefined,
+  source: ExperienceClassification["source"],
 ) {
-  const normalized = normalizeComparableText(text);
+  const prompt = buildExperienceInferencePrompt(...(values ?? []));
+  if (!prompt) {
+    return undefined;
+  }
+
+  return inferExperienceSignalFromText({
+    text: prompt,
+    matchers:
+      source === "structured_metadata" ? metadataExperienceMatchers : experienceMatchers,
+    source,
+    keywordConfidence: source === "structured_metadata" ? "high" : "medium",
+    yearConfidence: source === "page_fetch" ? "low" : "medium",
+  });
+}
+
+function inferExperienceSignalFromText(input: {
+  text: string;
+  matchers: Array<{ level: ExperienceLevel; patterns: RegExp[] }>;
+  source: ExperienceClassification["source"];
+  keywordConfidence: ExperienceInferenceConfidence;
+  yearConfidence: ExperienceInferenceConfidence;
+}) {
+  const normalized = normalizeComparableText(input.text);
   if (!normalized) {
     return undefined;
   }
 
-  for (const matcher of matchers) {
+  for (const matcher of input.matchers) {
     if (matcher.patterns.some((pattern) => pattern.test(normalized))) {
-      return matcher.level;
+      return {
+        level: matcher.level,
+        confidence: input.keywordConfidence,
+        source: input.source,
+        reason: buildExperienceReason(input.source, matcher.level, input.text),
+      } satisfies ExperienceSignal;
     }
   }
 
-  return inferExperienceLevelFromYears(text);
+  const yearsLevel = inferExperienceLevelFromYears(input.text);
+  if (!yearsLevel) {
+    return undefined;
+  }
+
+  return {
+    level: yearsLevel,
+    confidence: input.yearConfidence,
+    source: input.source,
+    reason: buildExperienceYearsReason(input.source, yearsLevel, input.text),
+  } satisfies ExperienceSignal;
 }
 
-function inferExperienceLevelFromMetadata(rawSourceMetadata?: Record<string, unknown>) {
+function inferExperienceSignalFromMetadata(rawSourceMetadata?: Record<string, unknown>) {
   const hints = collectExperienceMetadataHints(rawSourceMetadata);
   if (hints.length === 0) {
     return undefined;
   }
 
-  const prompt = buildExperienceInferencePrompt(hints.join(" "));
-  const keywordMatch = inferExperienceLevelFromText(
-    prompt || hints.join(" "),
-    metadataExperienceMatchers,
-  );
-
-  return keywordMatch ?? inferExperienceLevelFromYears(prompt || hints.join(" "));
+  return inferExperienceSignalFromHints(hints, "structured_metadata");
 }
 
 function collectExperienceMetadataHints(
@@ -990,15 +1266,6 @@ function extractExperienceMetadataHints(value: string) {
   return extractExperiencePromptSegments(value).slice(0, 6);
 }
 
-function stripMetadataMarkup(value: string) {
-  return value
-    .replace(/&lt;\/?[^&]+&gt;/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&(nbsp|amp|quot|apos|#39|#x27);/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function looksLikeNegativeExperienceMetadataHint(value: string) {
   const normalized = normalizeComparableText(value);
   return Boolean(normalized) && negativeExperienceMetadataHintPatterns.some((pattern) => pattern.test(normalized));
@@ -1058,6 +1325,31 @@ function looksLikeExperiencePromptSegment(value: string) {
     experiencePromptSignalPattern.test(normalized) ||
     looksLikeExperienceMetadataHint(value)
   );
+}
+
+function buildExperienceReason(
+  source: ExperienceClassification["source"],
+  level: ExperienceLevel,
+  text: string,
+) {
+  return `Detected ${level.replace("_", " ")} markers in ${source.replace("_", " ")}: "${summarizeExperienceText(text)}".`;
+}
+
+function buildExperienceYearsReason(
+  source: ExperienceClassification["source"],
+  level: ExperienceLevel,
+  text: string,
+) {
+  return `Mapped years-of-experience guidance in ${source.replace("_", " ")} to ${level.replace("_", " ")}: "${summarizeExperienceText(text)}".`;
+}
+
+function summarizeExperienceText(value: string) {
+  const cleaned = stripExperiencePromptMarkup(value);
+  if (cleaned.length <= 140) {
+    return cleaned;
+  }
+
+  return `${cleaned.slice(0, 137).trimEnd()}...`;
 }
 
 function inferExperienceLevelFromYears(text: string) {
@@ -1221,7 +1513,7 @@ export function isValidationStale(lastValidatedAt: string | undefined, ttlMinute
 }
 
 export async function runWithConcurrency<T, TResult>(
-  items: T[],
+  items: readonly T[],
   worker: (item: T) => Promise<TResult>,
   concurrency = 4,
 ) {

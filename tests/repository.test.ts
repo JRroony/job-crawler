@@ -82,6 +82,10 @@ describe("JobCrawlerRepository", () => {
 
     expect(jobs).toHaveLength(1);
     expect(jobs[0]._id).toBe(savedJob._id);
+    expect(crawlRun.validationMode).toBe("deferred");
+    expect(crawlRun.providerSummary).toEqual([]);
+    expect(crawlRun.discoveredSourcesCount).toBe(0);
+    expect(crawlRun.crawledSourcesCount).toBe(0);
     expect(validation?.jobId).toBe(savedJob._id);
   });
 
@@ -218,6 +222,78 @@ describe("JobCrawlerRepository", () => {
     });
   });
 
+  it("normalizes legacy crawl runs with missing crawler metadata on read", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+
+    await db.collection(collectionNames.crawlRuns).insertOne({
+      _id: "run-legacy",
+      searchId: "search-1",
+      startedAt: "2026-03-29T00:00:00.000Z",
+      finishedAt: "2026-03-29T00:10:00.000Z",
+      status: "completed",
+      totalFetchedJobs: 10,
+      totalMatchedJobs: 4,
+      dedupedJobs: 3,
+      diagnostics: {
+        discoveredSources: 2,
+        crawledSources: 2,
+      },
+    });
+
+    const crawlRun = await repository.getCrawlRun("run-legacy");
+
+    expect(crawlRun).toMatchObject({
+      _id: "run-legacy",
+      discoveredSourcesCount: 2,
+      crawledSourcesCount: 2,
+      validationMode: "deferred",
+      providerSummary: [],
+      diagnostics: {
+        discoveredSources: 2,
+        crawledSources: 2,
+        providerFailures: 0,
+      },
+    });
+  });
+
+  it("normalizes legacy jobs into the richer stored shape on read", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+
+    await db.collection(collectionNames.jobs).insertOne({
+      _id: "job-legacy",
+      title: "Software Engineer",
+      company: "Acme",
+      locationText: "Remote, United States",
+      sourcePlatform: "greenhouse",
+      sourceJobId: "role-legacy",
+      sourceUrl: "https://example.com/jobs/legacy",
+      applyUrl: "https://example.com/jobs/legacy/apply",
+      discoveredAt: "2026-03-29T00:00:00.000Z",
+      companyNormalized: "acme",
+      titleNormalized: "software engineer",
+      locationNormalized: "remote united states",
+      contentFingerprint: "fingerprint-legacy",
+    });
+
+    const job = await repository.getJob("job-legacy");
+
+    expect(job).toMatchObject({
+      _id: "job-legacy",
+      linkStatus: "unknown",
+      crawlRunIds: [],
+      sourceLookupKeys: ["greenhouse:role legacy"],
+    });
+    expect(job?.sourceProvenance).toEqual([
+      expect.objectContaining({
+        sourcePlatform: "greenhouse",
+        sourceJobId: "role-legacy",
+        applyUrl: "https://example.com/jobs/legacy/apply",
+      }),
+    ]);
+  });
+
   it("creates the expected MongoDB indexes", async () => {
     const db = new FakeDb();
     await ensureDatabaseIndexes(db);
@@ -228,5 +304,11 @@ describe("JobCrawlerRepository", () => {
     expect(
       db.collection(collectionNames.linkValidations).indexes.map((index) => index.name),
     ).toContain("linkValidations_applyUrl_checkedAt_desc");
+    expect(
+      db.collection(collectionNames.jobs).indexes.map((index) => index.name),
+    ).toContain("jobs_export_by_platform_and_postedAt");
+    expect(
+      db.collection(collectionNames.crawlRuns).indexes.map((index) => index.name),
+    ).toContain("crawlRuns_validationMode_startedAt_desc");
   });
 });

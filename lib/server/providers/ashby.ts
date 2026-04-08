@@ -1,18 +1,30 @@
 import "server-only";
 
-import { matchesFiltersWithoutExperience, runWithConcurrency } from "@/lib/server/crawler/helpers";
-import { getEnv } from "@/lib/server/env";
 import {
-  buildExperiencePrompt,
+  inferExperienceLevel,
+  normalizeComparableText,
+  runWithConcurrency,
+} from "@/lib/server/crawler/helpers";
+import {
+  type AshbyDiscoveredSource,
+  isAshbySource,
+} from "@/lib/server/discovery/types";
+import {
+  safeFetchText,
+  type SafeFetchResult,
+} from "@/lib/server/net/fetcher";
+import {
   buildSeed,
   coercePostedAt,
   deepCollect,
   extractWindowAppData,
   extractNextData,
+  filterProviderSeeds,
   finalizeProviderResult,
   firstString,
+  unsupportedProviderResult,
 } from "@/lib/server/providers/shared";
-import type { CrawlProvider, ProviderResult } from "@/lib/server/providers/types";
+import { defineProvider } from "@/lib/server/providers/types";
 
 type AshbyCandidate = {
   id?: string;
@@ -38,18 +50,27 @@ type AshbyCandidate = {
 
 export function normalizeAshbyCandidate(input: {
   companyToken: string;
+  boardUrl?: string;
+  companyName?: string;
   discoveredAt: string;
   candidate: AshbyCandidate;
 }) {
+  const boardUrl =
+    input.boardUrl ??
+    `https://jobs.ashbyhq.com/${input.companyToken}`;
+  const explicitExperienceLevel = resolveAshbyExplicitExperienceLevel(input.candidate);
+  const structuredExperienceHints = collectAshbyStructuredExperienceHints(input.candidate);
+  const descriptionExperienceHints = collectAshbyDescriptionExperienceHints(input.candidate);
   const sourceUrl =
     input.candidate.jobUrl ??
     input.candidate.absoluteUrl ??
     input.candidate.url ??
-    `https://jobs.ashbyhq.com/${input.companyToken}`;
+    boardUrl;
 
   return buildSeed({
     title: input.candidate.title ?? "Untitled role",
     companyToken: input.companyToken,
+    company: input.companyName,
     locationText:
       input.candidate.locationName ??
       input.candidate.location ??
@@ -66,78 +87,123 @@ export function normalizeAshbyCandidate(input: {
     ),
     rawSourceMetadata: {
       ashbyJob: input.candidate,
+      ashbyStructuredExperienceHints: structuredExperienceHints,
+      ashbyDescriptionExperienceHints: descriptionExperienceHints,
     },
     discoveredAt: input.discoveredAt,
-    experienceHint: buildAshbyExperienceHint(input.candidate),
+    explicitExperienceLevel,
+    explicitExperienceSource: explicitExperienceLevel
+      ? "structured_metadata"
+      : undefined,
+    explicitExperienceReasons: explicitExperienceLevel
+      ? [`Ashby metadata explicitly indicates ${explicitExperienceLevel.replace("_", " ")}.`]
+      : undefined,
+    structuredExperienceHints,
+    descriptionExperienceHints,
   });
 }
 
-export function createAshbyProvider(): CrawlProvider {
-  return {
+export function createAshbyProvider() {
+  return defineProvider({
     provider: "ashby",
-    async crawl(context) {
-      const tokens = getEnv().ashbyBoardTokens;
-      if (tokens.length === 0) {
-        return unsupportedResult("No Ashby board tokens are configured.");
+    supportsSource: isAshbySource,
+    async crawlSources(context, sources) {
+      if (sources.length === 0) {
+        return unsupportedProviderResult(
+          "ashby",
+          "No discovered Ashby sources are available.",
+          sources.length,
+        );
       }
 
       const warnings: string[] = [];
-      let fetchedCount = 0;
+      const discoveredAt = context.now.toISOString();
 
       const boards = await runWithConcurrency(
-        tokens,
-        async (companyToken) => {
-          try {
-            const response = await context.fetchImpl(
-              `https://jobs.ashbyhq.com/${companyToken}`,
-              {
-                method: "GET",
-                headers: {
-                  Accept: "text/html,application/xhtml+xml",
-                },
-                cache: "no-store",
-              },
-            );
+        sources,
+        async (source) => {
+          const boardUrl = resolveAshbyBoardUrl(source);
+          const companyToken = resolveAshbyToken(source);
 
-            if (!response.ok) {
-              throw new Error(`Ashby returned ${response.status} for ${companyToken}.`);
-            }
-
-            const html = await response.text();
-            const extracted = extractAshbyCandidates(html, companyToken);
-            fetchedCount += extracted.length;
-
-            return extracted
-              .map((candidate) =>
-                normalizeAshbyCandidate({
-                  companyToken,
-                  discoveredAt: context.now.toISOString(),
-                  candidate,
-                }),
-              )
-              .filter((job) => matchesFiltersWithoutExperience(job, context.filters));
-          } catch (error) {
+          if (!boardUrl) {
             warnings.push(
-              error instanceof Error
-                ? error.message
-                : `Ashby board ${companyToken} failed unexpectedly.`,
+              `Ashby source ${describeAshbySource(source)} is missing a usable board URL.`,
             );
-            return [];
+            return {
+              fetchedCount: 0,
+              jobs: [],
+            };
           }
+
+          const result = await safeFetchText(boardUrl, {
+            fetchImpl: context.fetchImpl,
+            method: "GET",
+            headers: {
+              Accept: "text/html,application/xhtml+xml",
+            },
+            cache: "no-store",
+          });
+
+          if (!result.ok) {
+            warnings.push(formatAshbyFetchWarning(source, result));
+            return {
+              fetchedCount: 0,
+              jobs: [],
+              excludedByTitle: 0,
+              excludedByLocation: 0,
+            };
+          }
+
+          const extracted = extractAshbyCandidates(
+            result.data ?? "",
+            companyToken ?? buildProviderCompanyToken(source.companyHint) ?? "ashby",
+          );
+          const normalizedJobs = extracted.map((candidate) =>
+            normalizeAshbyCandidate({
+              companyToken:
+                companyToken ??
+                buildProviderCompanyToken(source.companyHint) ??
+                "ashby",
+              boardUrl,
+              companyName: source.companyHint,
+              discoveredAt,
+              candidate,
+            }),
+          );
+          const filteredJobs = filterProviderSeeds(normalizedJobs, context.filters);
+
+          return {
+            fetchedCount: extracted.length,
+            jobs: filteredJobs.jobs,
+            excludedByTitle: filteredJobs.excludedByTitle,
+            excludedByLocation: filteredJobs.excludedByLocation,
+          };
         },
         2,
       );
 
-      const jobs = boards.flat();
+      const fetchedCount = boards.reduce((total, board) => total + board.fetchedCount, 0);
+      const jobs = boards.flatMap((board) => board.jobs);
+      const excludedByTitle = boards.reduce(
+        (total, board) => total + (board.excludedByTitle ?? 0),
+        0,
+      );
+      const excludedByLocation = boards.reduce(
+        (total, board) => total + (board.excludedByLocation ?? 0),
+        0,
+      );
 
       return finalizeProviderResult({
         provider: "ashby",
         jobs,
+        sourceCount: sources.length,
         fetchedCount,
         warnings,
+        excludedByTitle,
+        excludedByLocation,
       });
     },
-  };
+  });
 }
 
 function extractAshbyCandidates(html: string, companyToken: string) {
@@ -245,28 +311,109 @@ function extractAshbyCandidatesFromAppData(html: string, companyToken: string) {
     });
 }
 
-function unsupportedResult(message: string): ProviderResult {
-  return {
-    provider: "ashby",
-    status: "unsupported",
-    jobs: [],
-    fetchedCount: 0,
-    matchedCount: 0,
-    errorMessage: message,
-  };
+function resolveAshbyExplicitExperienceLevel(candidate: AshbyCandidate) {
+  return inferExperienceLevel(candidate.seniority, candidate.employmentType);
 }
 
-function buildAshbyExperienceHint(candidate: AshbyCandidate) {
-  return buildExperiencePrompt(
-    candidate.title,
+function collectAshbyStructuredExperienceHints(candidate: AshbyCandidate) {
+  return [
     candidate.employmentType,
     candidate.departmentName,
     candidate.teamName,
     candidate.seniority,
+  ].filter((value): value is string => Boolean(value?.trim()));
+}
+
+function collectAshbyDescriptionExperienceHints(candidate: AshbyCandidate) {
+  return [
     candidate.descriptionPlain,
     candidate.descriptionHtml,
     candidate.jobDescription,
     candidate.requirements,
     candidate.summary,
+  ].filter((value): value is string => Boolean(value?.trim()));
+}
+
+function resolveAshbyBoardUrl(source: AshbyDiscoveredSource) {
+  const token = resolveAshbyToken(source);
+  if (token) {
+    return `https://jobs.ashbyhq.com/${token}`;
+  }
+
+  return firstAshbyUrl([source.boardUrl, source.url]) ?? source.url;
+}
+
+function resolveAshbyToken(source: AshbyDiscoveredSource) {
+  return (
+    cleanString(source.token) ??
+    extractAshbyTokenFromUrl(source.url) ??
+    extractAshbyTokenFromUrl(source.boardUrl)
   );
+}
+
+function extractAshbyTokenFromUrl(value?: string) {
+  if (!value?.trim()) {
+    return undefined;
+  }
+
+  try {
+    const url = new URL(value);
+    if (url.hostname !== "jobs.ashbyhq.com") {
+      return undefined;
+    }
+
+    return cleanString(url.pathname.split("/").filter(Boolean)[0]);
+  } catch {
+    return undefined;
+  }
+}
+
+function firstAshbyUrl(values: Array<string | undefined>) {
+  for (const value of values) {
+    const trimmed = cleanString(value);
+    if (!trimmed) {
+      continue;
+    }
+
+    try {
+      return new URL(trimmed).toString();
+    } catch {
+      continue;
+    }
+  }
+
+  return undefined;
+}
+
+function buildProviderCompanyToken(companyHint?: string) {
+  const comparable = normalizeComparableText(companyHint ?? "");
+  return comparable ? comparable.replace(/\s+/g, "-") : undefined;
+}
+
+function formatAshbyFetchWarning(
+  source: AshbyDiscoveredSource,
+  result: Extract<SafeFetchResult, { ok: false }>,
+) {
+  if (
+    (result.errorType === "http" || result.errorType === "rate_limit") &&
+    result.statusCode !== undefined
+  ) {
+    return `Ashby returned ${result.statusCode} for ${describeAshbySource(source)}.`;
+  }
+
+  return `Ashby board ${describeAshbySource(source)} failed: ${result.message}`;
+}
+
+function describeAshbySource(source: AshbyDiscoveredSource) {
+  return (
+    resolveAshbyToken(source) ??
+    cleanString(source.companyHint) ??
+    cleanString(source.url) ??
+    "unknown source"
+  );
+}
+
+function cleanString(value?: string) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }

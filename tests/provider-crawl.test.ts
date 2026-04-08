@@ -1,8 +1,54 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
+import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import { createAshbyProvider } from "@/lib/server/providers/ashby";
 import { createCompanyPageProvider } from "@/lib/server/providers/company-page";
 import { createGreenhouseProvider } from "@/lib/server/providers/greenhouse";
+import type { CrawlProvider, ProviderExecutionContext } from "@/lib/server/providers/types";
+import type { CompanyPageSourceConfig } from "@/lib/types";
+
+function greenhouseSource(token: string) {
+  return classifySourceCandidate({
+    url: `https://boards.greenhouse.io/${token}`,
+    token,
+    confidence: "high",
+    discoveryMethod: "configured_env",
+  });
+}
+
+function ashbySource(token: string) {
+  return classifySourceCandidate({
+    url: `https://jobs.ashbyhq.com/${token}`,
+    token,
+    confidence: "high",
+    discoveryMethod: "configured_env",
+  });
+}
+
+function companyPageSource(source: CompanyPageSourceConfig) {
+  return classifySourceCandidate({
+    url: source.url,
+    companyHint: source.company,
+    pageType: source.type,
+    confidence: source.type === "json_feed" ? "high" : "medium",
+    discoveryMethod: "manual_config",
+  });
+}
+
+async function crawlProvider(
+  provider: CrawlProvider,
+  input: ProviderExecutionContext & { sources: DiscoveredSource[] },
+) {
+  return provider.crawlSources(
+    {
+      fetchImpl: input.fetchImpl,
+      now: input.now,
+      filters: input.filters,
+    },
+    input.sources.filter((source) => provider.supportsSource(source)),
+  );
+}
 
 describe("provider crawl status and live parsing", () => {
   it("marks a Greenhouse crawl as failed when every configured board fetch fails", async () => {
@@ -11,12 +57,17 @@ describe("provider crawl status and live parsing", () => {
       throw new Error("Network unavailable");
     }) as unknown as typeof fetch;
 
-    const result = await provider.crawl({
+    const result = await crawlProvider(provider, {
       fetchImpl,
       now: new Date("2026-03-30T12:00:00.000Z"),
       filters: {
         title: "Software Engineer",
       },
+      sources: [
+        greenhouseSource("openai"),
+        greenhouseSource("stripe"),
+        greenhouseSource("coinbase"),
+      ],
     });
 
     expect(result.status).toBe("failed");
@@ -56,12 +107,17 @@ describe("provider crawl status and live parsing", () => {
       );
     }) as unknown as typeof fetch;
 
-    const result = await provider.crawl({
+    const result = await crawlProvider(provider, {
       fetchImpl,
       now: new Date("2026-03-30T12:00:00.000Z"),
       filters: {
         title: "Software Engineer",
       },
+      sources: [
+        greenhouseSource("openai"),
+        greenhouseSource("stripe"),
+        greenhouseSource("coinbase"),
+      ],
     });
 
     expect(result.status).toBe("partial");
@@ -111,12 +167,13 @@ describe("provider crawl status and live parsing", () => {
       });
     }) as unknown as typeof fetch;
 
-    const result = await provider.crawl({
+    const result = await crawlProvider(provider, {
       fetchImpl,
       now: new Date("2026-03-30T12:00:00.000Z"),
       filters: {
         title: "Software Engineer",
       },
+      sources: [ashbySource("notion")],
     });
 
     expect(result.status).toBe("success");
@@ -133,13 +190,12 @@ describe("provider crawl status and live parsing", () => {
   });
 
   it("parses configured json_ld_page sources from embedded public HTML when JSON-LD is absent", async () => {
-    const provider = createCompanyPageProvider([
-      {
-        type: "json_ld_page",
-        company: "Acme",
-        url: "https://careers.acme.com/jobs",
-      },
-    ]);
+    const provider = createCompanyPageProvider();
+    const source = {
+      type: "json_ld_page",
+      company: "Acme",
+      url: "https://careers.acme.com/jobs",
+    } satisfies CompanyPageSourceConfig;
     const html = `
       <!DOCTYPE html>
       <html lang="en">
@@ -175,13 +231,14 @@ describe("provider crawl status and live parsing", () => {
       });
     }) as unknown as typeof fetch;
 
-    const result = await provider.crawl({
+    const result = await crawlProvider(provider, {
       fetchImpl,
       now: new Date("2026-03-30T12:00:00.000Z"),
       filters: {
         title: "Platform Engineer",
         country: "United States",
       },
+      sources: [companyPageSource(source)],
     });
 
     expect(result.status).toBe("success");
@@ -198,7 +255,8 @@ describe("provider crawl status and live parsing", () => {
   });
 
   it("parses configured html_page sources from anchor listings and reports partial failures", async () => {
-    const provider = createCompanyPageProvider([
+    const provider = createCompanyPageProvider();
+    const sources = [
       {
         type: "html_page",
         company: "Acme",
@@ -209,7 +267,7 @@ describe("provider crawl status and live parsing", () => {
         company: "BrokenCo",
         url: "https://careers.broken.example/jobs",
       },
-    ]);
+    ] satisfies CompanyPageSourceConfig[];
     const html = `
       <!DOCTYPE html>
       <html lang="en">
@@ -248,13 +306,14 @@ describe("provider crawl status and live parsing", () => {
       });
     }) as unknown as typeof fetch;
 
-    const result = await provider.crawl({
+    const result = await crawlProvider(provider, {
       fetchImpl,
       now: new Date("2026-03-30T12:00:00.000Z"),
       filters: {
         title: "Security Engineer",
         country: "United States",
       },
+      sources: sources.map(companyPageSource),
     });
 
     expect(result.status).toBe("partial");
@@ -270,13 +329,12 @@ describe("provider crawl status and live parsing", () => {
   });
 
   it("prefilters provider jobs using execution filters before returning seeds", async () => {
-    const provider = createCompanyPageProvider([
-      {
-        type: "json_ld_page",
-        company: "Acme",
-        url: "https://careers.acme.com/jobs",
-      },
-    ]);
+    const provider = createCompanyPageProvider();
+    const source = {
+      type: "json_ld_page",
+      company: "Acme",
+      url: "https://careers.acme.com/jobs",
+    } satisfies CompanyPageSourceConfig;
     const html = `
       <!DOCTYPE html>
       <html lang="en">
@@ -316,13 +374,14 @@ describe("provider crawl status and live parsing", () => {
       });
     }) as unknown as typeof fetch;
 
-    const result = await provider.crawl({
+    const result = await crawlProvider(provider, {
       fetchImpl,
       now: new Date("2026-03-30T12:00:00.000Z"),
       filters: {
         title: "Backend Engineer",
         country: "United States",
       },
+      sources: [companyPageSource(source)],
     });
 
     expect(result.fetchedCount).toBe(2);

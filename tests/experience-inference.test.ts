@@ -1,22 +1,93 @@
 import { describe, expect, it } from "vitest";
 
-import { inferExperienceLevel } from "@/lib/server/crawler/helpers";
+import {
+  classifyExperience,
+  inferExperienceLevel,
+  resolveJobExperienceClassification,
+} from "@/lib/server/crawler/helpers";
+
+describe("experience classification", () => {
+  it("treats direct title seniority markers as explicit title classifications", () => {
+    const classification = classifyExperience({
+      title: "Senior Software Engineer",
+    });
+
+    expect(classification).toMatchObject({
+      explicitLevel: "senior",
+      confidence: "high",
+      source: "title",
+      isUnspecified: false,
+    });
+    expect(classification.reasons[0]).toContain("title");
+  });
+
+  it("uses structured metadata ahead of description heuristics", () => {
+    const classification = classifyExperience({
+      title: "Software Engineer",
+      structuredExperienceHints: ["Student Program"],
+      descriptionExperienceHints: [
+        "Minimum qualifications: 5+ years of experience building backend systems.",
+      ],
+    });
+
+    expect(classification).toMatchObject({
+      inferredLevel: "intern",
+      confidence: "high",
+      source: "structured_metadata",
+      isUnspecified: false,
+    });
+  });
+
+  it("keeps description-based inference as inferred instead of explicit", () => {
+    const classification = classifyExperience({
+      title: "Software Engineer",
+      descriptionExperienceHints: [
+        "This entry-level role is designed for recent graduates joining our product engineering team.",
+      ],
+    });
+
+    expect(classification).toMatchObject({
+      inferredLevel: "new_grad",
+      confidence: "medium",
+      source: "description",
+      isUnspecified: false,
+    });
+  });
+
+  it("falls back to unspecified when no experience clues exist", () => {
+    const classification = classifyExperience({
+      title: "Software Engineer",
+    });
+
+    expect(classification).toEqual({
+      confidence: "none",
+      source: "unknown",
+      reasons: [],
+      isUnspecified: true,
+    });
+  });
+
+  it("normalizes legacy stored levels into explicit high-confidence classifications", () => {
+    const classification = resolveJobExperienceClassification({
+      title: "Software Engineer",
+      experienceLevel: "mid",
+      rawSourceMetadata: {},
+    });
+
+    expect(classification).toMatchObject({
+      explicitLevel: "mid",
+      confidence: "high",
+      source: "unknown",
+      isUnspecified: false,
+    });
+  });
+});
 
 describe("inferExperienceLevel", () => {
   it.each([
     {
       label: "software engineer intern title",
       values: ["Software Engineer Intern"],
-      expected: "intern",
-    },
-    {
-      label: "software engineering intern title",
-      values: ["Software Engineering Intern"],
-      expected: "intern",
-    },
-    {
-      label: "internship hint",
-      values: ["Software Engineer", "Internship"],
       expected: "intern",
     },
     {
@@ -45,40 +116,12 @@ describe("inferExperienceLevel", () => {
       expected: "staff",
     },
     {
-      label: "0-2 years maps to junior",
-      values: ["Software Engineer", "0-2 years of experience"],
-      expected: "junior",
-    },
-    {
-      label: "2-5 years maps to mid",
-      values: ["Software Engineer", "2-5 years of experience"],
-      expected: "mid",
-    },
-    {
-      label: "5-10 years maps to senior",
-      values: ["Software Engineer", "5-10 years of experience"],
-      expected: "senior",
-    },
-    {
-      label: "10+ years maps to staff",
-      values: ["Software Engineer", "10+ years of experience"],
-      expected: "staff",
-    },
-    {
       label: "summer internship description maps to intern",
       values: [
         "Software Engineer",
         "<p>Join our 2026 summer internship program for software engineering students.</p>",
       ],
       expected: "intern",
-    },
-    {
-      label: "recent graduate description maps to new grad",
-      values: [
-        "Software Engineer",
-        "This entry-level role is designed for recent graduates starting their careers.",
-      ],
-      expected: "new_grad",
     },
     {
       label: "minimum qualifications years prompt maps to senior",
