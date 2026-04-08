@@ -105,7 +105,9 @@ export function JobCrawlerApp({
   initialError,
 }: JobCrawlerAppProps) {
   const [filters, setFilters] = useState<SearchFilters>(initialFilters);
-  const [recentSearches, setRecentSearches] = useState(initialSearches);
+  const [recentSearches, setRecentSearches] = useState<SearchDocument[]>(() =>
+    initialSearches.map(normalizeSearchDocumentForClient),
+  );
   const [activeResult, setActiveResult] = useState<CrawlResponse | null>(null);
   const [viewState, setViewState] = useState<ViewState>(initialError ? "error" : "idle");
   const [message, setMessage] = useState(initialError ?? "");
@@ -129,6 +131,8 @@ export function JobCrawlerApp({
     setErrorKind(null);
 
     try {
+      console.log("[job-crawler:submit] payload", payloadResult.payload);
+
       const response = await fetch("/api/searches", {
         method: "POST",
         headers: {
@@ -163,7 +167,9 @@ export function JobCrawlerApp({
       }
 
       applyLoadedResult(payload);
-      setRecentSearches((current) => dedupeSearches([payload.search, ...current]));
+      setRecentSearches((current) =>
+        dedupeSearches([normalizeSearchDocumentForClient(payload.search), ...current]),
+      );
     } catch (error) {
       setViewState("error");
       setErrorKind(resolveErrorKind(error));
@@ -195,7 +201,9 @@ export function JobCrawlerApp({
       }
 
       applyLoadedResult(payload);
-      setRecentSearches((current) => dedupeSearches([payload.search, ...current]));
+      setRecentSearches((current) =>
+        dedupeSearches([normalizeSearchDocumentForClient(payload.search), ...current]),
+      );
     } catch (error) {
       setViewState("error");
       setErrorKind(resolveErrorKind(error));
@@ -256,9 +264,11 @@ export function JobCrawlerApp({
   }
 
   function applyLoadedResult(payload: CrawlResponse) {
-    setActiveResult(payload);
-    setFilters(toUiFilters(payload.search.filters));
-    setViewState(resolveViewState(payload));
+    const normalizedPayload = normalizeCrawlResponseForClient(payload);
+
+    setActiveResult(normalizedPayload);
+    setFilters(normalizedPayload.search.filters);
+    setViewState(resolveViewState(normalizedPayload));
     setErrorKind(null);
   }
 
@@ -561,6 +571,20 @@ function toUiFilters(filters: SearchFilters): SearchFilters {
     city: filters.city ?? "",
     experienceMatchMode: filters.experienceMatchMode ?? "balanced",
     crawlMode: filters.crawlMode ?? "fast",
+  };
+}
+
+function normalizeSearchDocumentForClient(search: SearchDocument): SearchDocument {
+  return {
+    ...search,
+    filters: toUiFilters(search.filters),
+  };
+}
+
+function normalizeCrawlResponseForClient(payload: CrawlResponse): CrawlResponse {
+  return {
+    ...payload,
+    search: normalizeSearchDocumentForClient(payload.search),
   };
 }
 
@@ -869,9 +893,13 @@ function validateSearchFiltersForClient(filters: Pick<SearchFilters, "title">) {
   return null;
 }
 
-function normalizeOptionalString(value: string | undefined) {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : undefined;
+function normalizeOptionalString(value: unknown) {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function normalizeEnumValue<T extends string>(

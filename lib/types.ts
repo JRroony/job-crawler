@@ -1,6 +1,10 @@
 import { z } from "zod";
 
 const optionalTrimmedString = z.preprocess((value) => {
+  if (value == null) {
+    return undefined;
+  }
+
   if (typeof value !== "string") {
     return value;
   }

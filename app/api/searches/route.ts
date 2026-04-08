@@ -6,7 +6,9 @@ import {
   runSearchFromFilters,
 } from "@/lib/server/crawler/service";
 
-const postSearchLogPrefix = "[api/searches][POST]";
+const searchRequestLogPrefix = "[searches:request]";
+const searchValidationLogPrefix = "[searches:validation]";
+const searchErrorLogPrefix = "[searches:error]";
 
 type FlattenedValidationErrors = {
   formErrors: string[];
@@ -30,7 +32,7 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const payload: unknown = await request.json();
-    console.info(`${postSearchLogPrefix} incoming payload`, payload);
+    console.info(`${searchRequestLogPrefix} payload:`, payload);
 
     const result = await runSearchFromFilters(payload);
     return NextResponse.json(result, { status: 201 });
@@ -39,10 +41,7 @@ export async function POST(request: Request) {
       const details = error.flatten();
       const readableErrors = buildReadableErrors(details);
 
-      console.error(
-        `${postSearchLogPrefix} validation failure`,
-        details,
-      );
+      console.error(searchValidationLogPrefix, details);
 
       return NextResponse.json(
         {
@@ -54,7 +53,7 @@ export async function POST(request: Request) {
       );
     }
 
-    console.error(`${postSearchLogPrefix} unexpected failure`, error);
+    console.error(searchErrorLogPrefix, error);
 
     return NextResponse.json(
       {
