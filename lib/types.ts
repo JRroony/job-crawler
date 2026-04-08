@@ -13,22 +13,53 @@ export function normalizeOptionalSearchString(value: unknown) {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-export function normalizeOptionalSearchFilterFields(rawFilters: unknown) {
+const canonicalSearchFilterKeys = [
+  "title",
+  "country",
+  "state",
+  "city",
+  "platforms",
+  "crawlMode",
+  "experienceLevel",
+  "experienceLevels",
+  "experienceMatchMode",
+  "includeUnspecifiedExperience",
+] as const;
+
+type CanonicalSearchFilterKey = (typeof canonicalSearchFilterKeys)[number];
+
+function isCanonicalSearchFilterKey(value: string): value is CanonicalSearchFilterKey {
+  return canonicalSearchFilterKeys.includes(value as CanonicalSearchFilterKey);
+}
+
+export function sanitizeSearchFiltersInput(rawFilters: unknown) {
   if (!rawFilters || typeof rawFilters !== "object" || Array.isArray(rawFilters)) {
     return rawFilters;
   }
 
-  const candidate = { ...(rawFilters as Record<string, unknown>) };
+  const source = rawFilters as Record<string, unknown>;
+  const candidate: Record<string, unknown> = {};
 
-  for (const field of ["country", "state", "city"] as const) {
-    const normalized = normalizeOptionalSearchString(candidate[field]);
-
-    if (typeof normalized === "undefined") {
-      delete candidate[field];
+  for (const key of Object.keys(source)) {
+    if (!isCanonicalSearchFilterKey(key)) {
       continue;
     }
 
-    candidate[field] = normalized;
+    if (key === "country" || key === "state" || key === "city") {
+      const normalized = normalizeOptionalSearchString(source[key]);
+
+      if (typeof normalized !== "undefined") {
+        candidate[key] = normalized;
+      }
+
+      continue;
+    }
+
+    if (source[key] == null) {
+      continue;
+    }
+
+    candidate[key] = source[key];
   }
 
   return candidate;
@@ -230,6 +261,7 @@ export const searchFiltersSchema = z
     experienceMatchMode: experienceMatchModeSchema.optional(),
     includeUnspecifiedExperience: z.boolean().optional(),
   })
+  .strip()
   .transform(
     ({
       platforms,

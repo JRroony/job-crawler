@@ -35,6 +35,7 @@ describe("search intent normalization", () => {
         country: " United States ",
         state: null,
         city: "   ",
+        experienceClassification: null,
       }),
     ).toEqual({
       title: "Software Engineer",

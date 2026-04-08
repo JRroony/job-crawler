@@ -1,7 +1,7 @@
 import "server-only";
 
 import {
-  normalizeOptionalSearchFilterFields,
+  sanitizeSearchFiltersInput,
   type CrawlerPlatform,
 } from "@/lib/types";
 
@@ -50,7 +50,7 @@ const leadingTrailingNoisePatterns = [
 ];
 
 export function normalizeSearchIntentInput(rawFilters: unknown) {
-  const normalizedFilters = normalizeOptionalSearchFilterFields(rawFilters);
+  const normalizedFilters = sanitizeSearchFiltersInput(rawFilters);
   if (
     !normalizedFilters ||
     typeof normalizedFilters !== "object" ||

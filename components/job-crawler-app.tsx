@@ -2,17 +2,13 @@
 
 import { useMemo, useState } from "react";
 
-import { DiagnosticsBreakdownPanel } from "@/components/job-crawler/diagnostics-breakdown-panel";
 import { RecentSearchesPanel } from "@/components/job-crawler/recent-searches-panel";
-import { RunHeaderPanel } from "@/components/job-crawler/run-header-panel";
-import { RunSummaryPanel } from "@/components/job-crawler/run-summary-panel";
 import { SearchControlsPanel } from "@/components/job-crawler/search-controls-panel";
 import { SourceCoveragePanel } from "@/components/job-crawler/source-coverage-panel";
 import {
   LoadingPanel,
   MessageBanner,
   NoticeBanner,
-  OperationalHonestyPanel,
   StatePanel,
 } from "@/components/job-crawler/status-panels";
 import {
@@ -39,9 +35,10 @@ import {
   normalizeCrawlerPlatforms,
   normalizeExperienceLevels,
   normalizeOptionalSearchString,
+  sanitizeSearchFiltersInput,
   searchFiltersSchema,
 } from "@/lib/types";
-import { formatRelativeMoment, labelForExperience } from "@/lib/utils";
+import { labelForExperience } from "@/lib/utils";
 
 type JobCrawlerAppProps = {
   initialSearches: SearchDocument[];
@@ -78,7 +75,7 @@ type BlockingErrorState = {
 type SearchPayloadResult =
   | {
       ok: true;
-      payload: SearchFilters;
+      payload: Record<string, unknown>;
     }
   | {
       ok: false;
@@ -132,8 +129,6 @@ export function JobCrawlerApp({
     setErrorKind(null);
 
     try {
-      console.log("[job-crawler:submit] payload", payloadResult.payload);
-
       const response = await fetch("/api/searches", {
         method: "POST",
         headers: {
@@ -319,31 +314,10 @@ export function JobCrawlerApp({
               onRerun={(searchId) => void rerunActiveSearch(searchId)}
               describeSearchMeta={describeSearchMeta}
             />
-
-            <OperationalHonestyPanel />
           </div>
         </div>
 
         <div className="mt-8 space-y-6">
-          {activeResult ? (
-            <>
-              <RunHeaderPanel
-                title={activeResult.search.filters.title}
-                description={buildSearchBrief(activeResult.search.filters)}
-                badges={buildFilterBadges(activeResult.search.filters)}
-                platformScope={describePlatformScope(activeResult.search.filters.platforms)}
-                validationMode={describeValidationMode(activeResult.search.filters.crawlMode)}
-                experienceMode={activeResult.search.filters.experienceMatchMode ?? "balanced"}
-                includeUnspecified={
-                  activeResult.search.filters.includeUnspecifiedExperience === true ||
-                  activeResult.search.filters.experienceMatchMode === "broad"
-                }
-                updatedLabel={formatRelativeMoment(activeResult.search.updatedAt)}
-              />
-              <RunSummaryPanel result={activeResult} />
-            </>
-          ) : null}
-
           {resultNotice ? (
             <NoticeBanner
               title={resultNotice.title}
@@ -351,10 +325,6 @@ export function JobCrawlerApp({
               tone={resultNotice.tone}
               highlights={resultNotice.highlights}
             />
-          ) : null}
-
-          {activeResult ? (
-            <DiagnosticsBreakdownPanel diagnostics={activeResult.diagnostics} />
           ) : null}
 
           {visibleSourceResults.length > 0 ? (
@@ -368,7 +338,7 @@ export function JobCrawlerApp({
           {viewState === "idle" ? (
             <StatePanel
               title="Start with a clear job target"
-              description="Choose the role, location scope, experience policy, active platforms, and crawl mode. The UI now shows what is enabled, what is limited, and how validation will behave before the run starts."
+              description="Choose the role, location scope, experience policy, active platforms, and crawl mode before starting the crawl."
               tone="neutral"
             />
           ) : null}
@@ -565,13 +535,70 @@ function buildOperationalHighlights(
 }
 
 function toUiFilters(filters: SearchFilters): SearchFilters {
+  return normalizeSearchFiltersForClient(filters);
+}
+
+export function normalizeSearchFiltersForClient(rawFilters: unknown): SearchFilters {
+  const filters = sanitizeSearchFiltersInput(rawFilters);
+  if (!filters || typeof filters !== "object" || Array.isArray(filters)) {
+    return {
+      ...initialFilters,
+    };
+  }
+
+  const candidate = filters as Record<string, unknown>;
+  const normalizedPlatforms = normalizeCrawlerPlatforms(
+    normalizeEnumArray(
+      Array.isArray(candidate.platforms)
+        ? candidate.platforms.filter((value): value is string => typeof value === "string")
+        : undefined,
+      crawlerPlatforms,
+    ),
+  );
+  const normalizedExperienceLevels = normalizeExperienceLevels(
+    normalizeEnumArray(
+      [
+        ...(Array.isArray(candidate.experienceLevels)
+          ? candidate.experienceLevels.filter((value): value is string => typeof value === "string")
+          : []),
+        ...(typeof candidate.experienceLevel === "string" ? [candidate.experienceLevel] : []),
+      ],
+      experienceLevels,
+    ),
+  );
+
   return {
-    ...filters,
-    country: toUiOptionalString(filters.country),
-    state: toUiOptionalString(filters.state),
-    city: toUiOptionalString(filters.city),
-    experienceMatchMode: filters.experienceMatchMode ?? "balanced",
-    crawlMode: filters.crawlMode ?? "fast",
+    title: typeof candidate.title === "string" ? candidate.title.trim() : "",
+    country: toUiOptionalString(candidate.country),
+    state: toUiOptionalString(candidate.state),
+    city: toUiOptionalString(candidate.city),
+    ...(normalizedPlatforms
+      ? {
+          platforms: normalizedPlatforms,
+        }
+      : {}),
+    ...(normalizedExperienceLevels
+      ? {
+          experienceLevels: normalizedExperienceLevels,
+        }
+      : {}),
+    experienceMatchMode:
+      normalizeEnumValue(
+        typeof candidate.experienceMatchMode === "string"
+          ? candidate.experienceMatchMode
+          : undefined,
+        experienceMatchModes,
+      ) ?? "balanced",
+    crawlMode:
+      normalizeEnumValue(
+        typeof candidate.crawlMode === "string" ? candidate.crawlMode : undefined,
+        crawlModes,
+      ) ?? "fast",
+    ...(candidate.includeUnspecifiedExperience === true
+      ? {
+          includeUnspecifiedExperience: true,
+        }
+      : {}),
   };
 }
 
@@ -587,20 +614,6 @@ function normalizeCrawlResponseForClient(payload: CrawlResponse): CrawlResponse 
     ...payload,
     search: normalizeSearchDocumentForClient(payload.search),
   };
-}
-
-function buildSearchBrief(filters: SearchFilters) {
-  const title = filters.title.trim();
-  if (!title) {
-    return "Pick a role, choose the active platforms, and decide how strict experience matching and validation should be before the crawl starts.";
-  }
-
-  const location = [filters.city, filters.state, filters.country].filter(Boolean).join(", ");
-  const locationText = location ? `in ${location}` : "across any location";
-  const levels = describeExperienceLevels(filters.experienceLevels, "lowercase");
-  const levelText = levels ? `${levels} ` : "";
-
-  return `Looking for ${levelText}${title} roles ${locationText}. Validation mode: ${describeValidationMode(filters.crawlMode).toLowerCase()}.`;
 }
 
 function buildFilterBadges(filters: SearchFilters) {
@@ -830,27 +843,28 @@ function isStringArray(value: unknown): value is string[] {
 }
 
 export function buildSearchRequestPayload(filters: SearchFilters): SearchPayloadResult {
+  const normalizedFilters = normalizeSearchFiltersForClient(filters);
   const experienceMatchMode = normalizeEnumValue(
-    filters.experienceMatchMode,
+    normalizedFilters.experienceMatchMode,
     experienceMatchModes,
   );
   const candidate = {
-    title: filters.title.trim(),
-    country: normalizeOptionalSearchString(filters.country),
-    state: normalizeOptionalSearchString(filters.state),
-    city: normalizeOptionalSearchString(filters.city),
+    title: normalizedFilters.title.trim(),
+    country: normalizeOptionalSearchString(normalizedFilters.country),
+    state: normalizeOptionalSearchString(normalizedFilters.state),
+    city: normalizeOptionalSearchString(normalizedFilters.city),
     platforms: normalizeCrawlerPlatforms(
-      normalizeEnumArray(filters.platforms, crawlerPlatforms),
+      normalizeEnumArray(normalizedFilters.platforms, crawlerPlatforms),
     ),
-    crawlMode: normalizeEnumValue(filters.crawlMode, crawlModes),
+    crawlMode: normalizeEnumValue(normalizedFilters.crawlMode, crawlModes),
     experienceLevels: normalizeExperienceLevels(
-      normalizeEnumArray(filters.experienceLevels, experienceLevels),
+      normalizeEnumArray(normalizedFilters.experienceLevels, experienceLevels),
     ),
     experienceMatchMode,
     includeUnspecifiedExperience:
       experienceMatchMode === "broad"
         ? true
-        : filters.includeUnspecifiedExperience === true
+        : normalizedFilters.includeUnspecifiedExperience === true
           ? true
           : undefined,
   };
@@ -863,7 +877,7 @@ export function buildSearchRequestPayload(filters: SearchFilters): SearchPayload
     };
   }
 
-  const parsed = searchFiltersSchema.safeParse(candidate);
+  const parsed = searchFiltersSchema.safeParse(sanitizeSearchFiltersInput(candidate));
   if (!parsed.success) {
     return {
       ok: false,

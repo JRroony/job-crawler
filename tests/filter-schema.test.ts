@@ -23,12 +23,13 @@ describe("searchFiltersSchema", () => {
     });
   });
 
-  it("normalizes nullable optional location fields instead of rejecting them", () => {
+  it("normalizes nullable optional location fields and strips legacy search-only fields", () => {
     const parsed = searchFiltersSchema.parse({
       title: "Software Engineer",
       country: " United States ",
       state: null,
       city: "   ",
+      experienceClassification: null,
     });
 
     expect(parsed).toEqual({

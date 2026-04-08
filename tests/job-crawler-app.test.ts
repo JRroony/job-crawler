@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildSearchRequestPayload,
   describeZeroResultState,
+  normalizeSearchFiltersForClient,
   resolveViewState,
 } from "@/components/job-crawler-app";
 import type { CrawlResponse, SearchFilters } from "@/lib/types";
@@ -73,16 +74,17 @@ function createResult(
 }
 
 describe("job crawler app result state", () => {
-  it("strips nullable optional filters from the submit payload", () => {
+  it("strips nullable optional filters and legacy experienceClassification from the submit payload", () => {
     const result = buildSearchRequestPayload({
       title: "Software Engineer",
       country: " United States ",
       state: null as unknown as SearchFilters["state"],
       city: "   ",
+      experienceClassification: null,
       platforms: ["greenhouse"],
       experienceMatchMode: "balanced",
       crawlMode: "fast",
-    });
+    } as SearchFilters & { experienceClassification: null });
 
     expect(result).toEqual({
       ok: true,
@@ -93,6 +95,28 @@ describe("job crawler app result state", () => {
         experienceMatchMode: "balanced",
         crawlMode: "fast",
       },
+    });
+  });
+
+  it("normalizes hydrated legacy filter objects into the canonical client shape", () => {
+    expect(
+      normalizeSearchFiltersForClient({
+        title: "Software Engineer",
+        country: null,
+        state: null,
+        city: null,
+        experienceClassification: null,
+        experienceLevel: "senior",
+        crawlMode: null,
+      }),
+    ).toEqual({
+      title: "Software Engineer",
+      country: "",
+      state: "",
+      city: "",
+      experienceLevels: ["senior"],
+      experienceMatchMode: "balanced",
+      crawlMode: "fast",
     });
   });
 

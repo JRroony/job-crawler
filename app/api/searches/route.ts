@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { sanitizeSearchFiltersInput } from "@/lib/types";
 import {
   isInputValidationError,
   listRecentSearches,
@@ -31,7 +32,7 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const payload: unknown = await request.json();
+    const payload = sanitizeSearchFiltersInput(await request.json());
     console.info(`${searchRequestLogPrefix} payload:`, payload);
 
     const result = await runSearchFromFilters(payload);

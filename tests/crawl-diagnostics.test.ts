@@ -22,7 +22,7 @@ function createStubProvider(
 }
 
 describe("crawl diagnostics", () => {
-  it("accepts nullable optional location fields on incoming search requests", async () => {
+  it("accepts nullable optional filters and strips legacy experienceClassification on incoming search requests", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const now = new Date("2026-03-29T12:00:00.000Z");
 
@@ -71,6 +71,7 @@ describe("crawl diagnostics", () => {
         country: "United States",
         state: null,
         city: null,
+        experienceClassification: null,
         platforms: ["greenhouse"],
       },
       {
