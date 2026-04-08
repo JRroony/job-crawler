@@ -12,6 +12,7 @@ import type {
 
 const greenhouseHosts = new Set([
   "boards.greenhouse.io",
+  "job-boards.greenhouse.io",
   "boards-api.greenhouse.io",
 ]);
 
@@ -150,6 +151,10 @@ function extractGreenhouseToken(url: URL) {
   const segments = url.pathname.split("/").filter(Boolean);
 
   if (url.hostname === "boards.greenhouse.io") {
+    return cleanString(segments[0]);
+  }
+
+  if (url.hostname === "job-boards.greenhouse.io") {
     return cleanString(segments[0]);
   }
 

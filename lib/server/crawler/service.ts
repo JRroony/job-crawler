@@ -9,6 +9,7 @@ import {
   refreshStaleJobs,
   type CrawlLinkValidationMode,
 } from "@/lib/server/crawler/pipeline";
+import { normalizeSearchIntentInput } from "@/lib/server/crawler/search-intent";
 import {
   createId,
   resolveJobExperienceClassification,
@@ -51,7 +52,7 @@ export async function runSearchFromFilters(
   rawFilters: unknown,
   runtime: Runtime = {},
 ) {
-  const filters = searchFiltersSchema.parse(rawFilters);
+  const filters = searchFiltersSchema.parse(normalizeSearchIntentInput(rawFilters));
   const repository = await resolveRepository(runtime.repository);
   const now = runtime.now ?? new Date();
   const search = await repository.createSearch(filters, now.toISOString());

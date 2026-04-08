@@ -1,10 +1,10 @@
 # Job Crawler
 
-Job Crawler is a Next.js App Router application for running transparent, source-driven crawls against configured public job sources, normalizing listings into one model, and storing searches plus crawl history in MongoDB.
+Job Crawler is a Next.js App Router application for running transparent, source-driven crawls against configured and query-discovered public job sources, normalizing listings into one model, and storing searches plus crawl history in MongoDB.
 
 The project is intentionally conservative:
 
-- discovery is configuration-driven, not open-ended web scraping
+- discovery starts from configured seeds and limited public ATS search, not open-ended scraping of arbitrary pages
 - providers only run against discovered sources they explicitly support
 - link validation is deferred by default unless the selected crawl mode asks for inline validation
 - unsupported or partial platforms stay labeled as such in the UI instead of being presented as active crawlers
@@ -58,7 +58,7 @@ npm test
 ## Current product behavior
 
 - Search by target title, country, state, city, experience levels, experience matching mode, crawl mode, and selected platforms.
-- Discover configured public sources before any provider-specific fetch work starts.
+- Discover configured seeds and query-discovered public ATS sources before any provider-specific fetch work starts.
 - Route sources only to the provider families that support them.
 - Normalize all results into one `JobListing` shape with source provenance, experience classification, validation state, and dedupe keys.
 - Deduplicate by canonical URL, resolved URL, apply URL, source lookup keys, and finally normalized content fingerprint.
@@ -70,7 +70,7 @@ npm test
 The crawler now runs in a discovery-first pipeline:
 
 1. `searchFiltersSchema` validates and normalizes the requested search filters.
-2. Discovery resolves configured public sources for the selected platform scope.
+2. Discovery resolves configured seeds plus query-discovered public ATS sources for the selected platform scope.
 3. Source-driven providers receive only the discovered source types they support.
 4. Providers normalize raw records into shared job seeds.
 5. The pipeline applies title, location, and experience filtering.

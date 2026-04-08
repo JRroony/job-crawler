@@ -2,6 +2,7 @@ import "server-only";
 
 import { slugToLabel } from "@/lib/server/crawler/helpers";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
+import { discoverSourcesFromPublicSearch } from "@/lib/server/discovery/public-search";
 import { resolveOperationalCrawlerPlatforms } from "@/lib/types";
 import type {
   DiscoveredSource,
@@ -12,17 +13,36 @@ import { getEnv, type AppEnv } from "@/lib/server/env";
 
 type DiscoveryEnvSnapshot = Pick<
   AppEnv,
-  "greenhouseBoardTokens" | "leverSiteTokens" | "ashbyBoardTokens" | "companyPageSources"
+  | "greenhouseBoardTokens"
+  | "leverSiteTokens"
+  | "ashbyBoardTokens"
+  | "companyPageSources"
+  | "PUBLIC_SEARCH_DISCOVERY_ENABLED"
+  | "PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS"
 >;
 
 export const defaultDiscoveryService: DiscoveryService = {
   async discover(input) {
-    return discoverConfiguredSources({
+    return discoverSources({
       ...input,
       env: getEnv(),
     });
   },
 };
+
+export async function discoverSources(input: DiscoveryInput & { env: DiscoveryEnvSnapshot }) {
+  const configuredSources = discoverConfiguredSources(input);
+  if (!input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED) {
+    return configuredSources;
+  }
+
+  const publicSources = await discoverSourcesFromPublicSearch(input.filters, {
+    fetchImpl: input.fetchImpl,
+    maxResultsPerQuery: input.env.PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS,
+  });
+
+  return dedupeDiscoveredSources([...configuredSources, ...publicSources]);
+}
 
 export function discoverConfiguredSources(input: DiscoveryInput & { env: DiscoveryEnvSnapshot }) {
   const selectedPlatforms = input.filters.platforms

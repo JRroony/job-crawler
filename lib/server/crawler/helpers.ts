@@ -362,6 +362,46 @@ const seniorityTokens = new Set([
   "v",
 ]);
 
+const broadSoftwarePositivePhrases = [
+  "software",
+  "developer",
+  "full stack",
+  "fullstack",
+  "front end",
+  "frontend",
+  "back end",
+  "backend",
+  "platform",
+  "mobile",
+  "ios",
+  "android",
+  "web",
+  "application",
+  "app",
+  "devops",
+  "site reliability",
+  "sre",
+  "infrastructure",
+] as const;
+
+const broadSoftwareNegativePhrases = [
+  "sales",
+  "support",
+  "customer",
+  "designer",
+  "design",
+  "quality",
+  "qa",
+  "test",
+  "data",
+  "scientist",
+  "recruit",
+  "marketing",
+  "finance",
+  "account",
+  "legal",
+] as const;
+
 const titleRoleDefinitions: TitleRoleDefinition[] = [
   {
     concept: "software_engineer_in_test",
@@ -1413,6 +1453,7 @@ function analyzeTitle(value?: string): AnalyzedTitle {
   const normalized = normalizeComparableText(value);
   const baseNormalized = stripSeniorityModifiers(normalized);
   const alias = findBestTitleAlias(baseNormalized) ?? findBestTitleAlias(normalized);
+  const inferredFamily = alias ? undefined : inferBroadTitleFamily(baseNormalized);
   const canonical = alias?.canonical ?? baseNormalized;
   const remainderNormalized = alias ? removeNormalizedPhrase(baseNormalized, alias.phrase) : "";
 
@@ -1421,10 +1462,11 @@ function analyzeTitle(value?: string): AnalyzedTitle {
     baseNormalized,
     canonical,
     concept: alias?.concept,
-    family: alias?.family,
+    family: alias?.family ?? inferredFamily?.family,
     aliasKind: alias?.kind,
     matchedPhrase: alias?.phrase,
-    relevantToBroadSoftwareQueries: alias?.relevantToBroadSoftwareQueries ?? false,
+    relevantToBroadSoftwareQueries:
+      alias?.relevantToBroadSoftwareQueries ?? inferredFamily?.relevantToBroadSoftwareQueries ?? false,
     remainderNormalized,
   };
 }
@@ -1470,6 +1512,35 @@ function escapeRegExp(value: string) {
 
 function isBroadSoftwareQuery(title: AnalyzedTitle) {
   return title.concept === "software_engineer" && title.remainderNormalized.length === 0;
+}
+
+function inferBroadTitleFamily(value: string) {
+  if (!value) {
+    return undefined;
+  }
+
+  if (broadSoftwareNegativePhrases.some((phrase) => containsNormalizedTerm(value, phrase))) {
+    return undefined;
+  }
+
+  const hasEngineeringCore =
+    containsNormalizedTerm(value, "engineer") ||
+    containsNormalizedTerm(value, "developer");
+  if (!hasEngineeringCore) {
+    return undefined;
+  }
+
+  const hasSoftwareSignal = broadSoftwarePositivePhrases.some((phrase) =>
+    containsNormalizedTerm(value, phrase),
+  );
+  if (!hasSoftwareSignal) {
+    return undefined;
+  }
+
+  return {
+    family: "software" as const,
+    relevantToBroadSoftwareQueries: true,
+  };
 }
 
 function buildTitleMatchResult(

@@ -86,6 +86,7 @@ export async function executeCrawlPipeline(
     const discoveredSources = await input.discovery.discover({
       filters: normalizedFilters,
       now: input.now,
+      fetchImpl: input.fetchImpl,
     });
     const providerSources = selectedProviders.map((provider) =>
       discoveredSources.filter((source) => provider.supportsSource(source)),

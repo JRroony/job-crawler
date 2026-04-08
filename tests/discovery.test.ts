@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
+import { discoverSourcesFromPublicSearch } from "@/lib/server/discovery/public-search";
 import { discoverConfiguredSources } from "@/lib/server/discovery/service";
 
 describe("source discovery", () => {
   it("classifies known ATS URLs and generic career pages", () => {
     const greenhouse = classifySourceCandidate({
       url: "https://boards-api.greenhouse.io/v1/boards/openai/jobs?content=true",
+      discoveryMethod: "future_search",
+    });
+    const greenhouseJobBoard = classifySourceCandidate({
+      url: "https://job-boards.greenhouse.io/acme/jobs/123",
       discoveryMethod: "future_search",
     });
     const lever = classifySourceCandidate({
@@ -30,6 +35,11 @@ describe("source discovery", () => {
       platform: "greenhouse",
       token: "openai",
       boardUrl: "https://boards.greenhouse.io/openai",
+    });
+    expect(greenhouseJobBoard).toMatchObject({
+      platform: "greenhouse",
+      token: "acme",
+      boardUrl: "https://boards.greenhouse.io/acme",
     });
     expect(lever).toMatchObject({
       platform: "lever",
@@ -69,6 +79,8 @@ describe("source discovery", () => {
             url: "https://careers.acme.com/feed.json",
           },
         ],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
+        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 8,
       },
     });
 
@@ -118,6 +130,8 @@ describe("source discovery", () => {
             url: "https://careers.acme.com/feed.json",
           },
         ],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
+        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 8,
       },
     });
 
@@ -128,5 +142,53 @@ describe("source discovery", () => {
         token: "figma",
       }),
     ]);
+  });
+
+  it("discovers additional public greenhouse sources from search results", async () => {
+    const html = `
+      <html>
+        <body>
+          <a href="https://boards.greenhouse.io/acme/jobs/123">Acme</a>
+          <a href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fjob-boards.greenhouse.io%2Fwidgetco%2Fjobs%2F456">WidgetCo</a>
+          <a href="https://jobs.lever.co/ignored/abc">Ignored Lever</a>
+        </body>
+      </html>
+    `;
+
+    const fetchImpl = (async () =>
+      new Response(html, {
+        status: 200,
+        headers: {
+          "content-type": "text/html",
+        },
+      })) as unknown as typeof fetch;
+
+    const sources = await discoverSourcesFromPublicSearch(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        fetchImpl,
+        maxResultsPerQuery: 4,
+      },
+    );
+
+    expect(sources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          platform: "greenhouse",
+          token: "acme",
+          discoveryMethod: "future_search",
+        }),
+        expect.objectContaining({
+          platform: "greenhouse",
+          token: "widgetco",
+          discoveryMethod: "future_search",
+        }),
+      ]),
+    );
+    expect(sources.every((source) => source.platform === "greenhouse")).toBe(true);
   });
 });

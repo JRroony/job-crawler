@@ -63,8 +63,8 @@ export function SearchControlsPanel(props: SearchControlsPanelProps) {
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
             <SummaryCallout
               label="Discovery scope"
-              value="Configured public boards and company pages"
-              detail="The UI is honest about current discovery: no hidden web-wide scraping."
+              value="Configured seeds plus public ATS discovery"
+              detail="Configured sources still seed coverage, but the crawler can now discover additional public ATS sources from the search intent."
             />
             <SummaryCallout
               label="Default behavior"
@@ -83,7 +83,7 @@ export function SearchControlsPanel(props: SearchControlsPanelProps) {
             <div className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
               <div className="space-y-4">
                 <Field
-                  label="Target title"
+                  label="Target role"
                   value={props.filters.title}
                   onChange={(value) =>
                     props.setFilters((current) => ({
@@ -96,8 +96,9 @@ export function SearchControlsPanel(props: SearchControlsPanelProps) {
                   emphasized
                 />
                 <div className="rounded-[22px] border border-ink/10 bg-sand/45 px-4 py-4 text-sm leading-6 text-slate">
-                  Title matching happens first. A clear role target makes the rest of the
-                  diagnostics more meaningful when the crawl comes back empty or partial.
+                  Start with the role you want. If a user types platform or location hints into
+                  this field, the backend now normalizes obvious cases before discovery and
+                  matching begin.
                 </div>
               </div>
 

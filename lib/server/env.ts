@@ -11,6 +11,11 @@ const envSchema = z.object({
   LEVER_SITE_TOKENS: z.string().default("figma,plaid,robinhood"),
   ASHBY_BOARD_TOKENS: z.string().default("notion,ramp,replit"),
   COMPANY_PAGE_SOURCE_CONFIG: z.string().optional(),
+  PUBLIC_SEARCH_DISCOVERY_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: z.coerce.number().int().positive().default(8),
 });
 
 type ParsedEnv = z.infer<typeof envSchema>;
@@ -39,6 +44,10 @@ export function getEnv() {
       LEVER_SITE_TOKENS: process.env.LEVER_SITE_TOKENS ?? "figma,plaid,robinhood",
       ASHBY_BOARD_TOKENS: process.env.ASHBY_BOARD_TOKENS ?? "notion,ramp,replit",
       COMPANY_PAGE_SOURCE_CONFIG: process.env.COMPANY_PAGE_SOURCE_CONFIG,
+      PUBLIC_SEARCH_DISCOVERY_ENABLED:
+        process.env.PUBLIC_SEARCH_DISCOVERY_ENABLED ?? "true",
+      PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS:
+        process.env.PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS ?? "8",
     });
   }
 

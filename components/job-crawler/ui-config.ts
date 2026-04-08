@@ -25,19 +25,19 @@ export const selectablePlatformOptions: Array<{
   {
     platform: "greenhouse",
     label: "Greenhouse",
-    detail: "Configured public board tokens",
+    detail: "Configured seeds plus public board discovery",
     availability: "Enabled",
   },
   {
     platform: "lever",
     label: "Lever",
-    detail: "Configured public posting feeds",
+    detail: "Configured seeds plus public posting discovery",
     availability: "Enabled",
   },
   {
     platform: "ashby",
     label: "Ashby",
-    detail: "Configured public board pages",
+    detail: "Configured seeds plus public board discovery",
     availability: "Enabled",
   },
   {

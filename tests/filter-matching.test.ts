@@ -270,6 +270,16 @@ describe("title relevance", () => {
       title: "Backend Engineer",
       tier: "related",
     },
+    {
+      label: "mobile engineering role",
+      title: "Mobile Engineer",
+      tier: "related",
+    },
+    {
+      label: "infrastructure engineering role",
+      title: "Infrastructure Engineer",
+      tier: "related",
+    },
   ])("classifies $label", ({ title, tier }) => {
     expect(getTitleMatchResult(title, "Software Engineer")).toMatchObject({
       matches: true,
@@ -326,6 +336,8 @@ describe("matchesFilters title matching", () => {
     "Software Developer",
     "SWE",
     "Backend Engineer",
+    "Mobile Engineer",
+    "Infrastructure Engineer",
     "Frontend Engineer",
     "Full Stack Engineer",
     "Platform Engineer",

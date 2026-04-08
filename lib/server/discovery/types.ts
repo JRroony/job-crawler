@@ -85,6 +85,7 @@ export type SourceClassificationCandidate = {
 export type DiscoveryInput = {
   filters: SearchFilters;
   now: Date;
+  fetchImpl?: typeof fetch;
 };
 
 export type DiscoveryService = {

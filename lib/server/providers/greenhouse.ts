@@ -290,6 +290,10 @@ function extractGreenhouseTokenFromUrl(value?: string) {
       return cleanString(segments[0]);
     }
 
+    if (url.hostname === "job-boards.greenhouse.io") {
+      return cleanString(segments[0]);
+    }
+
     if (url.hostname === "boards-api.greenhouse.io") {
       return segments[0] === "v1" && segments[1] === "boards"
         ? cleanString(segments[2])

@@ -24,6 +24,23 @@ function createStubProvider(
   };
 }
 
+function expectNoDirectJobFetches(fetchImpl: unknown) {
+  const calls = (
+    fetchImpl as {
+      mock: {
+        calls: Array<[unknown, ...unknown[]]>;
+      };
+    }
+  ).mock.calls;
+
+  expect(
+    calls.some(([input]) => {
+      const url = String(input);
+      return !url.includes("duckduckgo.com");
+    }),
+  ).toBe(false);
+}
+
 describe("crawl orchestration", () => {
   it("routes only matching discovered sources into each provider", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
@@ -133,6 +150,46 @@ describe("crawl orchestration", () => {
 
     expect(greenhouseCrawl).not.toHaveBeenCalled();
     expect(leverCrawl).toHaveBeenCalledTimes(1);
+  });
+
+  it("normalizes query-like role input before discovery runs", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-03-29T12:00:00.000Z");
+    let seenFilters: Record<string, unknown> | undefined;
+
+    const discovery: DiscoveryService = {
+      async discover(input) {
+        seenFilters = input.filters;
+        return [];
+      },
+    };
+
+    await runSearchFromFilters(
+      {
+        title: "Greenhouse software engineer jobs in the US",
+      },
+      {
+        repository,
+        providers: [
+          createStubProvider("greenhouse", async () => ({
+            provider: "greenhouse",
+            status: "success",
+            fetchedCount: 0,
+            matchedCount: 0,
+            jobs: [],
+          })),
+        ],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    expect(seenFilters).toMatchObject({
+      title: "software engineer",
+      country: "United States",
+      platforms: ["greenhouse"],
+    });
   });
 
   it("marks an all-provider failure as failed instead of a completed empty crawl", async () => {
@@ -673,7 +730,7 @@ describe("crawl orchestration", () => {
     );
 
     expect(result.jobs).toHaveLength(0);
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expectNoDirectJobFetches(fetchImpl);
   });
 
   it("keeps generic Greenhouse internships while excluding disclaimer-only and non-US matches", async () => {
@@ -1087,7 +1144,7 @@ describe("crawl orchestration", () => {
       "San Francisco, CA",
       "Seattle",
     ]);
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expectNoDirectJobFetches(fetchImpl);
   });
 
   it("passes explicit city and state filters into providers while keeping validation deferred", async () => {
@@ -1201,7 +1258,7 @@ describe("crawl orchestration", () => {
     expect(result.jobs).toHaveLength(1);
     expect(result.jobs[0]?.sourceJobId).toBe("job-sf");
     expect(result.sourceResults[0]?.matchedCount).toBe(1);
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expectNoDirectJobFetches(fetchImpl);
   });
 
   it("persists normalized crawl results into the jobs collection without inline validation by default", async () => {
@@ -1306,7 +1363,7 @@ describe("crawl orchestration", () => {
     ]);
     expect(storedJobs[0]?.resolvedUrl).toBeUndefined();
     expect(storedJobs[0]?.lastValidatedAt).toBeUndefined();
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expectNoDirectJobFetches(fetchImpl);
   });
 
   it("supports explicit full inline validation when requested", async () => {
