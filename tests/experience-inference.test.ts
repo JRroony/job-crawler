@@ -116,6 +116,51 @@ describe("inferExperienceLevel", () => {
       expected: "staff",
     },
     {
+      label: "software architect title",
+      values: ["Software Architect"],
+      expected: "senior",
+    },
+    {
+      label: "director title",
+      values: ["Director of Engineering"],
+      expected: "senior",
+    },
+    {
+      label: "software engineer iii title",
+      values: ["Software Engineer III"],
+      expected: "senior",
+    },
+    {
+      label: "software engineer iv title",
+      values: ["Software Engineer IV"],
+      expected: "staff",
+    },
+    {
+      label: "fellow title",
+      values: ["Fellow"],
+      expected: "staff",
+    },
+    {
+      label: "member of technical staff title",
+      values: ["Member of Technical Staff"],
+      expected: "staff",
+    },
+    {
+      label: "mixed punctuation title chooses the higher seniority bucket",
+      values: ["Sr./Staff Software Engineer"],
+      expected: "staff",
+    },
+    {
+      label: "mixed case lead title",
+      values: ["LEAD software engineer"],
+      expected: "senior",
+    },
+    {
+      label: "roman numeral title with suffix",
+      values: ["Software Engineer III - Platform"],
+      expected: "senior",
+    },
+    {
       label: "summer internship description maps to intern",
       values: [
         "Software Engineer",
@@ -133,5 +178,95 @@ describe("inferExperienceLevel", () => {
     },
   ])("infers $label", ({ values, expected }) => {
     expect(inferExperienceLevel(...values)).toBe(expected);
+  });
+
+  it.each([
+    {
+      title: "Senior Software Engineer",
+      expected: "senior",
+    },
+    {
+      title: "Sr. Software Engineer",
+      expected: "senior",
+    },
+    {
+      title: "Lead Software Engineer",
+      expected: "senior",
+    },
+    {
+      title: "Software Architect",
+      expected: "senior",
+    },
+    {
+      title: "Engineering Manager",
+      expected: "senior",
+    },
+    {
+      title: "Director of Engineering",
+      expected: "senior",
+    },
+    {
+      title: "Staff Software Engineer",
+      expected: "staff",
+    },
+    {
+      title: "Principal Software Engineer",
+      expected: "staff",
+    },
+    {
+      title: "Distinguished Engineer",
+      expected: "staff",
+    },
+    {
+      title: "Fellow",
+      expected: "staff",
+    },
+    {
+      title: "Member of Technical Staff",
+      expected: "staff",
+    },
+    {
+      title: "Software Engineer II",
+      expected: "mid",
+    },
+    {
+      title: "Software Engineer III",
+      expected: "senior",
+    },
+    {
+      title: "Software Engineer IV",
+      expected: "staff",
+    },
+    {
+      title: "New Grad Software Engineer",
+      expected: "new_grad",
+    },
+    {
+      title: "Software Engineer Intern",
+      expected: "intern",
+    },
+    {
+      title: "Junior Software Engineer",
+      expected: "junior",
+    },
+    {
+      title: "Sr./Staff Software Engineer",
+      expected: "staff",
+    },
+    {
+      title: "LEAD software engineer",
+      expected: "senior",
+    },
+    {
+      title: "Software Engineer III - Platform",
+      expected: "senior",
+    },
+  ])("keeps title-based experience classification conservative for $title", ({ title, expected }) => {
+    expect(classifyExperience({ title })).toMatchObject({
+      explicitLevel: expected,
+      confidence: "high",
+      source: "title",
+      isUnspecified: false,
+    });
   });
 });

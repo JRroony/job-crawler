@@ -3,7 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import { getDefaultGreenhouseRegistryEntries } from "@/lib/server/discovery/greenhouse-registry";
-import { discoverSourcesFromPublicSearch } from "@/lib/server/discovery/public-search";
+import {
+  buildPublicSearchQueryPlan,
+  discoverSourcesFromPublicSearch,
+} from "@/lib/server/discovery/public-search";
 import { discoverConfiguredSources, discoverSources } from "@/lib/server/discovery/service";
 
 describe("source discovery", () => {
@@ -248,6 +251,118 @@ describe("source discovery", () => {
     expect(sources.every((source) => source.platform === "greenhouse")).toBe(true);
   });
 
+  it("expands broad US Greenhouse discovery into ranked remote and metro clauses", () => {
+    const plan = buildPublicSearchQueryPlan(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        maxResultsPerQuery: 4,
+      },
+    );
+
+    expect(plan.maxSources).toBe(24);
+    expect(plan.queries).toHaveLength(24);
+    expect(plan.platformPlans).toEqual([
+      expect.objectContaining({
+        platform: "greenhouse",
+        locationIntent: expect.objectContaining({
+          kind: "broad_us",
+        }),
+        locationClauses: [
+          "",
+          "remote us",
+          "remote united states",
+          "seattle wa",
+          "bellevue wa",
+          "san francisco ca",
+          "san jose ca",
+          "mountain view ca",
+          "sunnyvale ca",
+          "palo alto ca",
+          "austin tx",
+          "new york ny",
+        ],
+      }),
+    ]);
+    expect(new Set(plan.queries.map((query) => query.query)).size).toBe(plan.queries.length);
+    expect(plan.queries.some((query) => query.query.includes("\""))).toBe(false);
+    expect(
+      plan.platformPlans[0]?.locationClauses.some(
+        (clause) => clause === "united states" || clause === "us",
+      ),
+    ).toBe(false);
+  });
+
+  it("scopes US state-only Greenhouse discovery to the direct state clause and same-state metros", () => {
+    const plan = buildPublicSearchQueryPlan(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        state: "California",
+        platforms: ["greenhouse"],
+      },
+      {
+        maxResultsPerQuery: 4,
+      },
+    );
+
+    const greenhousePlan = plan.platformPlans[0];
+    const locationClauses = greenhousePlan?.locationClauses.filter(Boolean) ?? [];
+
+    expect(greenhousePlan).toMatchObject({
+      platform: "greenhouse",
+      locationIntent: expect.objectContaining({
+        kind: "us_state",
+        stateName: "California",
+        stateCode: "CA",
+      }),
+    });
+    expect(locationClauses[0]).toBe("california");
+    expect(locationClauses).toEqual(
+      expect.arrayContaining([
+        "san francisco ca",
+        "san jose ca",
+        "mountain view ca",
+      ]),
+    );
+    expect(locationClauses).not.toContain("remote us");
+    expect(locationClauses).not.toContain("seattle wa");
+    expect(locationClauses.length).toBeLessThanOrEqual(11);
+  });
+
+  it("scopes explicit Greenhouse city searches to the explicit city clause plus the broad fallback", () => {
+    const plan = buildPublicSearchQueryPlan(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        city: "Seattle",
+        platforms: ["greenhouse"],
+      },
+      {
+        maxResultsPerQuery: 4,
+      },
+    );
+
+    expect(plan.platformPlans[0]).toMatchObject({
+      platform: "greenhouse",
+      locationIntent: expect.objectContaining({
+        kind: "us_city",
+        city: "Seattle",
+        stateCode: "WA",
+      }),
+      locationClauses: ["", "seattle wa"],
+    });
+    expect(plan.queries.map((query) => query.query)).toEqual([
+      "site:boards.greenhouse.io software engineer",
+      "site:job-boards.greenhouse.io software engineer",
+      "site:boards.greenhouse.io software engineer seattle wa",
+      "site:job-boards.greenhouse.io software engineer seattle wa",
+    ]);
+  });
+
   it("falls back from challenged DuckDuckGo HTML to Bing RSS and keeps greenhouse discovery queries broad", async () => {
     const requests: string[] = [];
     const bingRss = `<?xml version="1.0" encoding="utf-8" ?>
@@ -335,6 +450,59 @@ describe("source discovery", () => {
     expect(requestedQueries.some((query) => query?.includes("United States"))).toBe(false);
     expect(requestedQueries.some((query) => query?.includes("\""))).toBe(false);
     expect(requestedQueries.some((query) => query?.includes("Senior"))).toBe(false);
+  });
+
+  it("stops issuing lower-priority public search queries once 24 unique sources have been found", async () => {
+    let queryIndex = 0;
+    const requestedQueries: string[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const query = new URL(String(input)).searchParams.get("q") ?? "";
+      requestedQueries.push(query);
+
+      const html = `
+        <html>
+          <body>
+            ${Array.from({ length: 4 }, (_, offset) => {
+              const token = `acme${queryIndex}${offset}`;
+              return `<a href="https://boards.greenhouse.io/${token}/jobs/${queryIndex}${offset}">Job</a>`;
+            }).join("")}
+          </body>
+        </html>
+      `;
+      queryIndex += 1;
+
+      return new Response(html, {
+        status: 200,
+        headers: {
+          "content-type": "text/html",
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    const plan = buildPublicSearchQueryPlan(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        maxResultsPerQuery: 4,
+      },
+    );
+    const sources = await discoverSourcesFromPublicSearch(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        fetchImpl,
+        maxResultsPerQuery: 4,
+      },
+    );
+
+    expect(sources).toHaveLength(24);
+    expect(requestedQueries).toEqual(plan.queries.slice(0, 6).map((query) => query.query));
   });
 
   it("returns non-zero Greenhouse registry sources even when public search is disabled", async () => {

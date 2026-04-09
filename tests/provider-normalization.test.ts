@@ -205,6 +205,38 @@ describe("provider normalization", () => {
     });
   });
 
+  it.each([
+    {
+      title: "Software Engineer III - Platform",
+      expected: "senior",
+    },
+    {
+      title: "Principal Software Engineer",
+      expected: "staff",
+    },
+  ])(
+    "applies shared title seniority precedence through Greenhouse normalization for $title",
+    ({ title, expected }) => {
+      const job = normalizeGreenhouseJob({
+        companyToken: "stripe",
+        discoveredAt: "2026-03-29T00:00:00.000Z",
+        job: {
+          id: `${title}-role`,
+          title,
+          absolute_url: "https://boards.greenhouse.io/stripe/jobs/title-role",
+          first_published: "2026-03-20T00:00:00.000Z",
+          location: { name: "Seattle" },
+        },
+      });
+
+      expect(job.experienceLevel).toBe(expected);
+      expect(job.experienceClassification).toMatchObject({
+        explicitLevel: expected,
+        source: "title",
+      });
+    },
+  );
+
   it("uses Greenhouse office data when the top-level location is missing", () => {
     const job = normalizeGreenhouseJob({
       companyToken: "stripe",

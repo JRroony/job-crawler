@@ -2,6 +2,10 @@ import "server-only";
 
 import { createHash, randomUUID } from "node:crypto";
 
+import {
+  isRecognizedUsCity,
+  resolveUsState,
+} from "@/lib/server/locations/us";
 import type {
   ExperienceClassification,
   ExperienceInferenceConfidence,
@@ -104,6 +108,65 @@ type ExperienceSignal = {
   source: ExperienceClassification["source"];
   reason: string;
 };
+
+const titleExperienceMatchers: Array<{ level: ExperienceLevel; patterns: RegExp[] }> = [
+  {
+    level: "intern",
+    patterns: [
+      /\bintern\b/,
+      /\binternship\b/,
+      /\bco op\b/,
+      /\bworking student\b/,
+    ],
+  },
+  {
+    level: "new_grad",
+    patterns: [
+      /\bnew grad\b/,
+      /\bnew graduate\b/,
+      /\brecent grad\b/,
+      /\brecent graduate\b/,
+      /\bentry level\b/,
+      /\bearly career\b/,
+    ],
+  },
+  {
+    level: "staff",
+    patterns: [
+      /\bstaff\b/,
+      /\bprincipal\b/,
+      /\bdistinguished\b/,
+      /\bfellow\b/,
+      /\bmember of technical staff\b/,
+      /\bmts\b/,
+      /\blevel 4\b/,
+      /\blevel 5\b/,
+      /\biv\b/,
+      /\bv\b/,
+    ],
+  },
+  {
+    level: "senior",
+    patterns: [
+      /\bsenior\b/,
+      /\bsr\b/,
+      /\blead\b/,
+      /\barchitect\b/,
+      /\bmanager\b/,
+      /\bdirector\b/,
+      /\blevel 3\b/,
+      /\biii\b/,
+    ],
+  },
+  {
+    level: "junior",
+    patterns: [/\bjunior\b/, /\bjr\b/, /\bassociate\b/],
+  },
+  {
+    level: "mid",
+    patterns: [/\bmid\b/, /\bmid level\b/, /\blevel 2\b/, /\bii\b/, /\bexperienced\b/],
+  },
+];
 
 const experienceMatchers: Array<{ level: ExperienceLevel; patterns: RegExp[] }> = [
   {
@@ -241,104 +304,6 @@ const countryAliasesByConcept = new Map(
     group.concept,
     group.aliases.map((alias) => normalizeComparableText(alias)),
   ] as const),
-);
-
-const usStatePairs = [
-  ["AL", "Alabama"],
-  ["AK", "Alaska"],
-  ["AZ", "Arizona"],
-  ["AR", "Arkansas"],
-  ["CA", "California"],
-  ["CO", "Colorado"],
-  ["CT", "Connecticut"],
-  ["DE", "Delaware"],
-  ["FL", "Florida"],
-  ["GA", "Georgia"],
-  ["HI", "Hawaii"],
-  ["ID", "Idaho"],
-  ["IL", "Illinois"],
-  ["IN", "Indiana"],
-  ["IA", "Iowa"],
-  ["KS", "Kansas"],
-  ["KY", "Kentucky"],
-  ["LA", "Louisiana"],
-  ["ME", "Maine"],
-  ["MD", "Maryland"],
-  ["MA", "Massachusetts"],
-  ["MI", "Michigan"],
-  ["MN", "Minnesota"],
-  ["MS", "Mississippi"],
-  ["MO", "Missouri"],
-  ["MT", "Montana"],
-  ["NE", "Nebraska"],
-  ["NV", "Nevada"],
-  ["NH", "New Hampshire"],
-  ["NJ", "New Jersey"],
-  ["NM", "New Mexico"],
-  ["NY", "New York"],
-  ["NC", "North Carolina"],
-  ["ND", "North Dakota"],
-  ["OH", "Ohio"],
-  ["OK", "Oklahoma"],
-  ["OR", "Oregon"],
-  ["PA", "Pennsylvania"],
-  ["RI", "Rhode Island"],
-  ["SC", "South Carolina"],
-  ["SD", "South Dakota"],
-  ["TN", "Tennessee"],
-  ["TX", "Texas"],
-  ["UT", "Utah"],
-  ["VT", "Vermont"],
-  ["VA", "Virginia"],
-  ["WA", "Washington"],
-  ["WV", "West Virginia"],
-  ["WI", "Wisconsin"],
-  ["WY", "Wyoming"],
-  ["DC", "District of Columbia"],
-] as const;
-
-const usStateByAlias = new Map(
-  usStatePairs.flatMap(([abbreviation, name]) => [
-    [normalizeComparableText(abbreviation), name],
-    [normalizeComparableText(name), name],
-  ] as const),
-);
-
-const knownUsCityAliases = new Set(
-  [
-    "Atlanta",
-    "Austin",
-    "Bellevue",
-    "Boston",
-    "Chicago",
-    "Dallas",
-    "Denver",
-    "Houston",
-    "Irvine",
-    "Jersey City",
-    "Las Vegas",
-    "Los Angeles",
-    "Miami",
-    "Mountain View",
-    "Nashville",
-    "New York",
-    "Oakland",
-    "Philadelphia",
-    "Phoenix",
-    "Pittsburgh",
-    "Portland",
-    "Raleigh",
-    "Redwood City",
-    "Salt Lake City",
-    "San Diego",
-    "San Francisco",
-    "San Jose",
-    "Santa Clara",
-    "Seattle",
-    "Sunnyvale",
-    "Washington",
-    "Washington DC",
-  ].map((city) => normalizeComparableText(city)),
 );
 
 const seniorityPhrases = ["new grad", "entry level"];
@@ -588,7 +553,7 @@ export function parseLocationText(locationText?: string) {
 
   if (parts.length === 2) {
     const normalizedSecondPart = normalizeComparableText(parts[1]);
-    const usState = usStateByAlias.get(normalizedSecondPart);
+    const usState = resolveUsState(normalizedSecondPart);
     const countryConcept = resolveCountryConcept(parts[1]);
     const isRemote = normalizeComparableText(parts[0]) === "remote";
 
@@ -1095,20 +1060,6 @@ function inferJobUsState(
   return undefined;
 }
 
-function resolveUsState(value?: string) {
-  const normalized = normalizeComparableText(value);
-  if (!normalized) {
-    return undefined;
-  }
-
-  return usStateByAlias.get(normalized);
-}
-
-function isRecognizedUsCity(value?: string) {
-  const normalized = normalizeComparableText(value);
-  return Boolean(normalized) && knownUsCityAliases.has(normalized);
-}
-
 function splitLocationTextParts(locationText?: string) {
   return (locationText ?? "")
     .split(",")
@@ -1171,13 +1122,23 @@ function inferExperienceSignalFromTitle(title?: string) {
     return undefined;
   }
 
-  return inferExperienceSignalFromText({
-    text: title,
-    matchers: experienceMatchers,
-    source: "title",
-    keywordConfidence: "high",
-    yearConfidence: "medium",
-  });
+  const normalizedTitle = normalizeComparableText(title);
+  if (!normalizedTitle) {
+    return undefined;
+  }
+
+  for (const matcher of titleExperienceMatchers) {
+    if (matcher.patterns.some((pattern) => pattern.test(normalizedTitle))) {
+      return {
+        level: matcher.level,
+        confidence: "high",
+        source: "title",
+        reason: buildExperienceReason("title", matcher.level, title),
+      } satisfies ExperienceSignal;
+    }
+  }
+
+  return undefined;
 }
 
 function inferExperienceSignalFromHints(

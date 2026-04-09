@@ -6,10 +6,6 @@ const process = require("node:process");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 
-// Keep the default acceptance run stable by limiting discovery to configured and
-// curated sources unless the shell already opted into broader discovery.
-process.env.PUBLIC_SEARCH_DISCOVERY_ENABLED ??= "false";
-
 const configuredPlatforms = parseCsv(process.env.VERIFY_CRAWL_PLATFORMS) ?? ["greenhouse"];
 
 const VERIFY_CRAWL_CONFIG = {
