@@ -9,6 +9,7 @@ import {
   refreshStaleJobs,
   type CrawlLinkValidationMode,
 } from "@/lib/server/crawler/pipeline";
+import { dedupeStoredJobs } from "@/lib/server/crawler/dedupe";
 import { normalizeSearchIntentInput } from "@/lib/server/crawler/search-intent";
 import {
   createId,
@@ -174,7 +175,10 @@ export async function getSearchDetails(searchId: string, runtime: Runtime = {}) 
     search,
     crawlRun,
     sourceResults,
-    jobs: sortJobs(jobs.map(applyResolvedExperienceLevel), search.filters.title),
+    jobs: sortJobs(
+      dedupeStoredJobs(jobs).map(applyResolvedExperienceLevel),
+      search.filters.title,
+    ),
     diagnostics: crawlRun.diagnostics,
   });
 }

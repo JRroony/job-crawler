@@ -3,6 +3,7 @@ import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 
 import {
+  analyzeUsLocation,
   isRecognizedUsCity,
   resolveUsState,
 } from "@/lib/server/locations/us";
@@ -301,6 +302,23 @@ const metadataExperienceMatchers: Array<{ level: ExperienceLevel; patterns: RegE
   },
 ];
 
+const experienceLevelPriority: Record<ExperienceLevel, number> = {
+  mid: 1,
+  junior: 2,
+  senior: 3,
+  staff: 4,
+  new_grad: 5,
+  intern: 6,
+};
+
+const prioritizedTitleExperienceMatchers = sortExperienceMatchersByPriority(
+  titleExperienceMatchers,
+);
+const prioritizedExperienceMatchers = sortExperienceMatchersByPriority(experienceMatchers);
+const prioritizedMetadataExperienceMatchers = sortExperienceMatchersByPriority(
+  metadataExperienceMatchers,
+);
+
 const experienceMetadataHintPattern =
   /\b(intern|internship|co op|cooperative education|apprentice|working student|student program|student opportunity|student role|student position|for students|new grad|new graduate|recent grad|recent graduate|entry level|early career|junior|associate|mid level|senior|staff|principal|distinguished|fellow|member of technical staff|mts|lead|architect|manager|director|level [2-5]|ii|iii|iv|v|experienced|years|year|yrs|yoe|experience)\b/;
 
@@ -584,6 +602,7 @@ export function parseLocationText(locationText?: string) {
   }
 
   const parts = cleaned.split(",").map((part) => part.trim()).filter(Boolean);
+  const analyzedUsLocation = analyzeUsLocation(cleaned);
   if (parts.length === 0) {
     return {
       city: undefined,
@@ -595,9 +614,9 @@ export function parseLocationText(locationText?: string) {
 
   if (parts.length === 1) {
     return {
-      city: undefined,
-      state: undefined,
-      country: undefined,
+      city: analyzedUsLocation.isRemote ? undefined : analyzedUsLocation.city,
+      state: analyzedUsLocation.stateName,
+      country: analyzedUsLocation.isUnitedStates ? "United States" : undefined,
       locationText: parts[0],
     };
   }
@@ -609,10 +628,13 @@ export function parseLocationText(locationText?: string) {
     const isRemote = normalizeComparableText(parts[0]) === "remote";
 
     return {
-      city: isRemote ? undefined : parts[0],
-      state: usState,
+      city:
+        analyzedUsLocation.isRemote || isRemote
+          ? undefined
+          : analyzedUsLocation.city ?? parts[0],
+      state: analyzedUsLocation.stateName ?? usState,
       country:
-        usState || countryConcept === "united states"
+        analyzedUsLocation.isUnitedStates || usState || countryConcept === "united states"
           ? "United States"
           : parts[1],
       locationText: cleaned,
@@ -620,9 +642,9 @@ export function parseLocationText(locationText?: string) {
   }
 
   return {
-    city: parts[0],
-    state: parts[1],
-    country: parts[2],
+    city: analyzedUsLocation.isRemote ? undefined : analyzedUsLocation.city ?? parts[0],
+    state: analyzedUsLocation.stateName ?? resolveUsState(parts[1]) ?? parts[1],
+    country: analyzedUsLocation.isUnitedStates ? "United States" : parts[2],
     locationText: cleaned,
   };
 }
@@ -1012,6 +1034,10 @@ function matchesCountryFilter(
     return false;
   }
 
+  if (wantedConcept === "united states") {
+    return inferJobCountryConcept(job) === wantedConcept;
+  }
+
   const inferredCountryConcept = inferJobCountryConcept(job);
   if (inferredCountryConcept === wantedConcept) {
     return true;
@@ -1066,11 +1092,8 @@ function inferJobCountryConcept(
     return countryConcept;
   }
 
-  if (inferJobUsState(job)) {
-    return "united states";
-  }
-
-  if (isRecognizedUsCity(job.city)) {
+  const analyzedLocation = analyzeJobLocation(job);
+  if (analyzedLocation.isUnitedStates) {
     return "united states";
   }
 
@@ -1078,6 +1101,11 @@ function inferJobCountryConcept(
 }
 
 function inferCountryConceptFromLocationText(locationText?: string) {
+  const analyzedLocation = analyzeUsLocation(locationText);
+  if (analyzedLocation.isUnitedStates) {
+    return "united states";
+  }
+
   const normalizedLocationText = normalizeComparableText(locationText);
   if (!normalizedLocationText) {
     return undefined;
@@ -1115,6 +1143,11 @@ function inferCountryConceptFromLocationText(locationText?: string) {
 function inferJobUsState(
   job: Pick<JobListing, "state" | "locationText">,
 ) {
+  const analyzedLocation = analyzeUsLocation(job.locationText);
+  if (analyzedLocation.stateName) {
+    return analyzedLocation.stateName;
+  }
+
   const directState = resolveUsState(job.state);
   if (directState) {
     return directState;
@@ -1133,6 +1166,20 @@ function inferJobUsState(
   }
 
   return undefined;
+}
+
+function analyzeJobLocation(
+  job: Pick<JobListing, "country" | "state" | "city" | "locationText">,
+) {
+  const analyzedLocation = analyzeUsLocation(
+    [job.city, job.state, job.country].filter(Boolean).join(", "),
+  );
+
+  if (analyzedLocation.isUnitedStates) {
+    return analyzedLocation;
+  }
+
+  return analyzeUsLocation(job.locationText);
 }
 
 function splitLocationTextParts(locationText?: string) {
@@ -1202,7 +1249,7 @@ function inferExperienceSignalFromTitle(title?: string) {
     return undefined;
   }
 
-  for (const matcher of titleExperienceMatchers) {
+  for (const matcher of prioritizedTitleExperienceMatchers) {
     if (matcher.patterns.some((pattern) => pattern.test(normalizedTitle))) {
       return {
         level: matcher.level,
@@ -1228,7 +1275,9 @@ function inferExperienceSignalFromHints(
   return inferExperienceSignalFromText({
     text: prompt,
     matchers:
-      source === "structured_metadata" ? metadataExperienceMatchers : experienceMatchers,
+      source === "structured_metadata"
+        ? prioritizedMetadataExperienceMatchers
+        : prioritizedExperienceMatchers,
     source,
     keywordConfidence: source === "structured_metadata" ? "high" : "medium",
     yearConfidence: source === "page_fetch" ? "low" : "medium",
@@ -1483,6 +1532,13 @@ function extractExperienceYearSignals(text: string) {
   }
 
   return signals;
+}
+
+function sortExperienceMatchersByPriority<T extends { level: ExperienceLevel }>(matchers: T[]) {
+  return [...matchers].sort(
+    (left, right) =>
+      experienceLevelPriority[right.level] - experienceLevelPriority[left.level],
+  );
 }
 
 function analyzeTitle(value?: string): AnalyzedTitle {

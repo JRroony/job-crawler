@@ -338,19 +338,10 @@ function buildRoleQueries(title: string) {
 }
 
 function buildPlatformLocationPlan(
-  platform: SearchablePublicPlatform,
+  _platform: SearchablePublicPlatform,
   filters: SearchFilters,
   maxLocationClauses: number,
 ) {
-  if (platform !== "greenhouse") {
-    return {
-      locationIntent: {
-        kind: "none",
-      } satisfies UsLocationIntent,
-      locationClauses: [""],
-    };
-  }
-
   const locationPlan = buildUsDiscoveryLocationClauses(filters, {
     maxClauses: maxLocationClauses,
   });

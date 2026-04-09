@@ -11,6 +11,7 @@ import {
   parseLocationText,
   slugToLabel,
 } from "@/lib/server/crawler/helpers";
+import { isUnitedStatesValue, resolveUsState } from "@/lib/server/locations/us";
 
 export function coercePostedAt(value: unknown) {
   if (!value) {
@@ -66,12 +67,14 @@ export function buildSeed(input: {
   });
   const experienceLevel =
     experienceClassification.explicitLevel ?? experienceClassification.inferredLevel;
+  const explicitCountry = normalizeCountry(input.explicitCountry);
+  const explicitState = normalizeState(input.explicitState);
 
   return {
     title: input.title.trim(),
     company: defaultCompanyName(input.companyToken, input.company),
-    country: input.explicitCountry ?? parsedLocation.country,
-    state: input.explicitState ?? parsedLocation.state,
+    country: explicitCountry ?? parsedLocation.country,
+    state: explicitState ?? parsedLocation.state,
     city: input.explicitCity ?? parsedLocation.city,
     locationText,
     experienceLevel,
@@ -88,6 +91,24 @@ export function buildSeed(input: {
     discoveredAt: input.discoveredAt,
     rawSourceMetadata: input.rawSourceMetadata,
   };
+}
+
+function normalizeCountry(value?: string) {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  return isUnitedStatesValue(trimmed) ? "United States" : trimmed;
+}
+
+function normalizeState(value?: string) {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  return resolveUsState(trimmed) ?? trimmed;
 }
 
 export function finalizeProviderResult<P extends ProviderResult["provider"]>(input: {

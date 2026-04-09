@@ -4,15 +4,18 @@ import React from "react";
 
 import type { JobListing } from "@/lib/types";
 import { JobCard } from "@/components/job-search/job-card";
+import { buildStableJobRenderKeys } from "@/components/job-search/helpers";
 
 type JobListProps = {
   jobs: JobListing[];
-  selectedJobId?: string;
-  onSelect: (jobId: string) => void;
+  selectedJobKey?: string;
+  onSelect: (selectionKey: string) => void;
   emptyMessage?: string;
 };
 
 export function JobList(props: JobListProps) {
+  const renderKeys = buildStableJobRenderKeys(props.jobs);
+
   if (props.jobs.length === 0) {
     return (
       <div className="rounded-[24px] border border-dashed border-ink/12 bg-mist/35 px-5 py-8 text-center">
@@ -27,11 +30,12 @@ export function JobList(props: JobListProps) {
 
   return (
     <div className="space-y-3">
-      {props.jobs.map((job) => (
+      {props.jobs.map((job, index) => (
         <JobCard
-          key={job._id}
+          key={renderKeys[index]}
           job={job}
-          selected={job._id === props.selectedJobId}
+          selectionKey={renderKeys[index]}
+          selected={renderKeys[index] === props.selectedJobKey}
           onSelect={props.onSelect}
         />
       ))}

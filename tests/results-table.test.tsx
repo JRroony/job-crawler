@@ -2,6 +2,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
+import { buildStableJobRenderKeys } from "@/components/job-search/helpers";
 import { ResultsTable } from "@/components/results-table";
 import type { JobListing } from "@/lib/types";
 
@@ -87,5 +88,22 @@ describe("ResultsTable", () => {
 
     expect(html).toContain("Pending validation");
     expect(html).toContain("Validate");
+  });
+
+  it("builds unique render keys even when malformed jobs reuse the same database id", () => {
+    const keys = buildStableJobRenderKeys([
+      createJob(),
+      createJob({
+        sourceJobId: "role-2",
+        sourceLookupKeys: ["greenhouse:role-2"],
+        applyUrl: "https://example.com/jobs/2/apply",
+        sourceUrl: "https://example.com/jobs/2",
+        canonicalUrl: "https://example.com/jobs/2",
+      }),
+    ]);
+
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(keys[0]).toBe("job-1");
+    expect(keys[1]).toBe("job-1::2");
   });
 });

@@ -5,7 +5,6 @@ import { useMemo, useState } from "react";
 import {
   LoadingPanel,
   MessageBanner,
-  NoticeBanner,
   StatePanel,
 } from "@/components/job-crawler/status-panels";
 import {
@@ -17,7 +16,6 @@ import {
   resolveSelectedPlatforms,
   togglePlatformSelection,
 } from "@/components/job-crawler/ui-config";
-import { DiagnosticsDrawer } from "@/components/job-search/diagnostics-drawer";
 import { FilterBar } from "@/components/job-search/filter-bar";
 import {
   buildLocationInputValue,
@@ -311,13 +309,6 @@ export function JobCrawlerApp({
     setErrorKind(null);
   }
 
-  const visibleSourceResults = useMemo(
-    () =>
-      activeResult
-        ? filterOperationalSourceResults(activeResult.sourceResults)
-        : [],
-    [activeResult],
-  );
   const visibleJobs = useMemo(
     () =>
       activeResult
@@ -325,7 +316,6 @@ export function JobCrawlerApp({
         : [],
     [activeResult, clientResultFilters, filters],
   );
-  const resultNotice = activeResult ? describeResultNotice(activeResult) : null;
   const zeroResultState =
     activeResult && activeResult.jobs.length === 0
       ? describeZeroResultState(activeResult)
@@ -339,9 +329,9 @@ export function JobCrawlerApp({
     : buildLocationInputValue(buildLiveFilters()) || "All locations";
 
   return (
-    <main className="min-h-screen bg-[linear-gradient(180deg,#f7f8fb_0%,#f2f5f9_100%)] text-ink">
-      <div className="mx-auto max-w-[1440px] px-4 py-8 sm:px-6 lg:px-8">
-        <div className="space-y-4">
+    <main className="min-h-screen bg-[#f3f2ef] text-ink">
+      <div className="mx-auto max-w-[1380px] px-4 py-5 sm:px-6 lg:px-8">
+        <div className="space-y-3">
           <SearchBar
             keyword={keywordInput}
             location={locationInput}
@@ -393,52 +383,10 @@ export function JobCrawlerApp({
             onClear={clearBrowseFilters}
           />
 
-          <DiagnosticsDrawer
-            activeResult={
-              activeResult
-                ? {
-                    ...activeResult,
-                    sourceResults: visibleSourceResults,
-                  }
-                : null
-            }
-            recentSearches={recentSearches}
-            filters={filters}
-            onLoadSearch={(searchId) => void loadSearch(searchId)}
-            onRerunSearch={(searchId) => void rerunActiveSearch(searchId)}
-            onSetCrawlMode={(crawlMode) =>
-              setFilters((current) => ({
-                ...current,
-                crawlMode: crawlMode ?? "fast",
-              }))
-            }
-            onSetExperienceMatchMode={(experienceMatchMode) =>
-              setFilters((current) => ({
-                ...current,
-                experienceMatchMode: experienceMatchMode ?? "balanced",
-              }))
-            }
-            onToggleIncludeUnspecified={() =>
-              setFilters((current) => ({
-                ...current,
-                includeUnspecifiedExperience: !current.includeUnspecifiedExperience,
-              }))
-            }
-          />
-
           {message && !blockingErrorState ? <MessageBanner message={message} /> : null}
         </div>
 
-        <div className="mt-6 space-y-6">
-          {resultNotice ? (
-            <NoticeBanner
-              title={resultNotice.title}
-              description={resultNotice.description}
-              tone={resultNotice.tone}
-              highlights={resultNotice.highlights}
-            />
-          ) : null}
-
+        <div className="mt-4 space-y-4">
           {viewState === "loading" ? (
             <LoadingPanel />
           ) : null}
@@ -483,20 +431,20 @@ export function JobCrawlerApp({
 
           {activeResult && activeResult.jobs.length > 0 ? (
             <>
-              <section className="rounded-[28px] border border-ink/8 bg-white px-5 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.05)] sm:px-6">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+              <section className="rounded-[20px] border border-ink/10 bg-white px-5 py-4 shadow-sm">
+                <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
                   <div>
-                    <div className="text-sm font-medium uppercase tracking-[0.18em] text-slate/65">
-                      Current search
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
+                      Active search
                     </div>
-                    <h2 className="mt-2 text-2xl font-semibold tracking-tight text-ink">
+                    <h2 className="mt-1 text-xl font-semibold tracking-tight text-ink">
                       {activeResult.search.filters.title}
                     </h2>
-                    <p className="mt-2 text-sm leading-6 text-slate">
+                    <p className="mt-1 text-sm text-slate">
                       {resultsLocation} • updated {formatRelativeMoment(activeResult.search.updatedAt)}
                     </p>
                   </div>
-                  <div className="text-sm text-slate">
+                  <div className="text-sm font-medium text-slate">
                     {visibleJobs.length === activeResult.jobs.length
                       ? `${visibleJobs.length} jobs ready to browse`
                       : `${visibleJobs.length} of ${activeResult.jobs.length} jobs shown`}

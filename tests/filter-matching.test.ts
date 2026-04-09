@@ -83,6 +83,15 @@ describe("matchesFilters country matching", () => {
         locationText: "Remote, United States",
       }),
     },
+    {
+      label: "United States Remote",
+      job: createJob({
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "United States Remote",
+      }),
+    },
   ])("matches a United States filter against $label", ({ job }) => {
     expect(
       matchesFilters(
@@ -158,6 +167,24 @@ describe("matchesFilters country matching", () => {
         state: undefined,
         city: undefined,
         locationText: "Washington, DC",
+      }),
+    },
+    {
+      label: "Bellevue WA",
+      job: createJob({
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Bellevue WA",
+      }),
+    },
+    {
+      label: "East Windsor NJ",
+      job: createJob({
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "East Windsor NJ",
       }),
     },
     {

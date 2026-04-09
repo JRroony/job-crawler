@@ -9,6 +9,7 @@ import {
   discoverSourcesFromPublicSearchDetailed,
 } from "@/lib/server/discovery/public-search";
 import { discoverConfiguredSources, discoverSources } from "@/lib/server/discovery/service";
+import { buildUsDiscoveryLocationTokens } from "@/lib/server/locations/us";
 
 const discoveryEnvDefaults = {
   greenhouseBoardTokens: ["openai"],
@@ -287,56 +288,48 @@ describe("source discovery", () => {
       "frontend engineer",
       "swe",
     ]);
-    expect(plan.platformPlans).toEqual([
-      expect.objectContaining({
-        platform: "greenhouse",
-        locationIntent: expect.objectContaining({
-          kind: "broad_us",
-        }),
-        locationClauses: [
-          "",
-          "remote us",
-          "remote usa",
-          "remote united states",
-          "seattle wa",
-          "bellevue wa",
-          "san francisco ca",
-          "san jose ca",
-          "mountain view ca",
-          "sunnyvale ca",
-          "palo alto ca",
-          "austin tx",
-          "new york ny",
-          "boston ma",
-          "chicago il",
-          "washington dc",
-          "arlington va",
-          "reston va",
-          "herndon va",
-          "denver co",
-          "atlanta ga",
-          "los angeles ca",
-          "irvine ca",
-          "santa clara ca",
-        ],
-      }),
-    ]);
+    expect(plan.platformPlans).toHaveLength(1);
+    expect(plan.platformPlans[0]).toMatchObject({
+      platform: "greenhouse",
+      locationIntent: {
+        kind: "broad_us",
+      },
+    });
+    expect(plan.platformPlans[0].locationClauses).toEqual(
+      expect.arrayContaining([
+        "",
+        "united states",
+        "usa",
+        "us",
+        "remote united states",
+        "remote usa",
+        "remote us",
+        "united states remote",
+        "california",
+        "ca usa",
+        "texas",
+        "tx usa",
+        "new york state",
+        "washington state",
+        "seattle wa",
+        "seattle washington",
+        "bellevue wa",
+        "san francisco ca",
+        "san jose ca",
+      ]),
+    );
     expect(plan.queries.length).toBeGreaterThan(300);
     expect(plan.queries.slice(0, 6).map((query) => query.query)).toEqual([
       "site:boards.greenhouse.io software engineer",
       "site:job-boards.greenhouse.io software engineer",
-      "site:boards.greenhouse.io software engineer remote us",
-      "site:job-boards.greenhouse.io software engineer remote us",
-      "site:boards.greenhouse.io software engineer remote usa",
-      "site:job-boards.greenhouse.io software engineer remote usa",
+      "site:boards.greenhouse.io software engineer united states",
+      "site:job-boards.greenhouse.io software engineer united states",
+      "site:boards.greenhouse.io software engineer usa",
+      "site:job-boards.greenhouse.io software engineer usa",
     ]);
     expect(new Set(plan.queries.map((query) => query.query)).size).toBe(plan.queries.length);
     expect(plan.queries.some((query) => query.query.includes("\""))).toBe(false);
-    expect(
-      plan.platformPlans[0]?.locationClauses.some(
-        (clause) => clause === "united states" || clause === "us",
-      ),
-    ).toBe(false);
+    expect(plan.platformPlans[0]?.locationClauses).toHaveLength(24);
   });
 
   it("scopes US state-only Greenhouse discovery to the direct state clause and same-state metros", () => {
@@ -366,7 +359,9 @@ describe("source discovery", () => {
     expect(locationClauses[0]).toBe("california");
     expect(locationClauses).toEqual(
       expect.arrayContaining([
+        "ca usa",
         "san francisco ca",
+        "san francisco california",
         "san jose ca",
         "mountain view ca",
       ]),
@@ -396,18 +391,24 @@ describe("source discovery", () => {
         city: "Seattle",
         stateCode: "WA",
       }),
-      locationClauses: ["", "seattle wa"],
+      locationClauses: expect.arrayContaining([
+        "",
+        "seattle",
+        "seattle wa",
+        "seattle washington",
+        "washington state",
+        "wa usa",
+        "united states",
+      ]),
     });
-    expect(plan.queries.slice(0, 8).map((query) => query.query)).toEqual([
-      "site:boards.greenhouse.io software engineer",
-      "site:job-boards.greenhouse.io software engineer",
-      "site:boards.greenhouse.io software engineer seattle wa",
-      "site:job-boards.greenhouse.io software engineer seattle wa",
-      "site:boards.greenhouse.io software developer",
-      "site:job-boards.greenhouse.io software developer",
-      "site:boards.greenhouse.io software developer seattle wa",
-      "site:job-boards.greenhouse.io software developer seattle wa",
-    ]);
+    expect(plan.queries.map((query) => query.query)).toEqual(
+      expect.arrayContaining([
+        "site:boards.greenhouse.io software engineer seattle wa",
+        "site:job-boards.greenhouse.io software engineer seattle wa",
+        "site:boards.greenhouse.io software developer seattle wa",
+        "site:job-boards.greenhouse.io software developer seattle wa",
+      ]),
+    );
   });
 
   it("prefers Bing RSS first, skips DuckDuckGo when Bing already returns enough Greenhouse matches, and keeps queries broad", async () => {
@@ -571,13 +572,84 @@ describe("source discovery", () => {
     expect(requestedQueries).toEqual([
       "site:boards.greenhouse.io software engineer",
       "site:job-boards.greenhouse.io software engineer",
-      "site:boards.greenhouse.io software engineer remote us",
-      "site:job-boards.greenhouse.io software engineer remote us",
-      "site:boards.greenhouse.io software engineer remote usa",
-      "site:job-boards.greenhouse.io software engineer remote usa",
-      "site:boards.greenhouse.io software engineer remote united states",
-      "site:job-boards.greenhouse.io software engineer remote united states",
+      "site:boards.greenhouse.io software engineer united states",
+      "site:job-boards.greenhouse.io software engineer united states",
+      "site:boards.greenhouse.io software engineer usa",
+      "site:job-boards.greenhouse.io software engineer usa",
+      "site:boards.greenhouse.io software engineer us",
+      "site:job-boards.greenhouse.io software engineer us",
     ]);
+  });
+
+  it("builds United States discovery tokens from country aliases, state aliases, metros, and remote variants", () => {
+    const plan = buildUsDiscoveryLocationTokens({
+      country: "US",
+    });
+
+    expect(plan.intent).toEqual({
+      kind: "broad_us",
+    });
+    expect(plan.tokens.map((token) => token.value)).toEqual(
+      expect.arrayContaining([
+        "united states",
+        "usa",
+        "us",
+        "remote united states",
+        "remote usa",
+        "remote us",
+        "california",
+        "ca usa",
+        "texas",
+        "tx usa",
+        "seattle wa",
+        "seattle washington",
+      ]),
+    );
+  });
+
+  it("applies broad US discovery clauses to Lever and Ashby too so board discovery is not Greenhouse-only", () => {
+    const plan = buildPublicSearchQueryPlan(
+      {
+        title: "Software Engineer",
+        country: "United States",
+      },
+      {
+        maxResultsPerQuery: 4,
+      },
+    );
+
+    expect(
+      plan.platformPlans.find((platformPlan) => platformPlan.platform === "lever"),
+    ).toEqual(
+      expect.objectContaining({
+        locationIntent: expect.objectContaining({
+          kind: "broad_us",
+        }),
+        locationClauses: expect.arrayContaining([
+          "",
+          "united states",
+          "usa",
+          "remote us",
+          "california",
+        ]),
+      }),
+    );
+    expect(
+      plan.platformPlans.find((platformPlan) => platformPlan.platform === "ashby"),
+    ).toEqual(
+      expect.objectContaining({
+        locationIntent: expect.objectContaining({
+          kind: "broad_us",
+        }),
+        locationClauses: expect.arrayContaining([
+          "",
+          "united states",
+          "usa",
+          "remote us",
+          "texas",
+        ]),
+      }),
+    );
   });
 
   it("returns non-zero Greenhouse registry sources even when public search is disabled", async () => {

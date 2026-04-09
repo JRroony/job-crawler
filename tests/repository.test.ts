@@ -195,6 +195,98 @@ describe("JobCrawlerRepository", () => {
     expect(storedJobs[0].postedAt).toBe("2026-03-21T00:00:00.000Z");
   });
 
+  it("returns a unique saved job list when duplicate candidates collapse during the same persist batch", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      {
+        title: "Software Engineer",
+      },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const crawlRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+    );
+
+    const savedJobs = await repository.persistJobs(crawlRun._id, [
+      {
+        title: "Software Engineer",
+        company: "Acme",
+        country: "United States",
+        state: "California",
+        city: "San Francisco",
+        locationText: "San Francisco, California, United States",
+        experienceLevel: "mid",
+        sourcePlatform: "greenhouse",
+        sourceJobId: "role-1",
+        sourceUrl: "https://example.com/jobs/1",
+        applyUrl: "https://example.com/jobs/1/apply",
+        canonicalUrl: "https://example.com/jobs/1",
+        postedAt: "2026-03-20T00:00:00.000Z",
+        discoveredAt: "2026-03-29T00:00:00.000Z",
+        linkStatus: "unknown",
+        rawSourceMetadata: {},
+        sourceProvenance: [
+          {
+            sourcePlatform: "greenhouse",
+            sourceJobId: "role-1",
+            sourceUrl: "https://example.com/jobs/1",
+            applyUrl: "https://example.com/jobs/1/apply",
+            canonicalUrl: "https://example.com/jobs/1",
+            discoveredAt: "2026-03-29T00:00:00.000Z",
+            rawSourceMetadata: {},
+          },
+        ],
+        sourceLookupKeys: ["greenhouse:role-1"],
+        companyNormalized: "acme",
+        titleNormalized: "software engineer",
+        locationNormalized: "san francisco california united states",
+        contentFingerprint: "fingerprint-1",
+      },
+      {
+        title: "Software Engineer",
+        company: "Acme",
+        country: "United States",
+        state: "California",
+        city: "San Francisco",
+        locationText: "San Francisco, California, United States",
+        experienceLevel: "mid",
+        sourcePlatform: "lever",
+        sourceJobId: "role-2",
+        sourceUrl: "https://example.com/jobs/1",
+        applyUrl: "https://example.com/jobs/1/apply",
+        canonicalUrl: "https://example.com/jobs/1",
+        postedAt: "2026-03-20T00:00:00.000Z",
+        discoveredAt: "2026-03-29T00:01:00.000Z",
+        linkStatus: "valid",
+        rawSourceMetadata: {},
+        sourceProvenance: [
+          {
+            sourcePlatform: "lever",
+            sourceJobId: "role-2",
+            sourceUrl: "https://example.com/jobs/1",
+            applyUrl: "https://example.com/jobs/1/apply",
+            canonicalUrl: "https://example.com/jobs/1",
+            discoveredAt: "2026-03-29T00:01:00.000Z",
+            rawSourceMetadata: {},
+          },
+        ],
+        sourceLookupKeys: ["lever:role-2"],
+        companyNormalized: "acme",
+        titleNormalized: "software engineer",
+        locationNormalized: "san francisco california united states",
+        contentFingerprint: "fingerprint-1",
+      },
+    ]);
+
+    const storedJobs = db.snapshot<JobListing>(collectionNames.jobs);
+
+    expect(savedJobs).toHaveLength(1);
+    expect(savedJobs[0].sourceProvenance).toHaveLength(2);
+    expect(storedJobs).toHaveLength(1);
+  });
+
   it("keeps distinct same-title same-location jobs separate when their source ids and URLs differ", async () => {
     const db = new FakeDb();
     const repository = new JobCrawlerRepository(db);

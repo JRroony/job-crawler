@@ -10,7 +10,8 @@ import { getJobTags } from "@/components/job-search/helpers";
 type JobCardProps = {
   job: JobListing;
   selected: boolean;
-  onSelect: (jobId: string) => void;
+  selectionKey: string;
+  onSelect: (selectionKey: string) => void;
 };
 
 export function JobCard(props: JobCardProps) {
@@ -19,24 +20,24 @@ export function JobCard(props: JobCardProps) {
   return (
     <button
       type="button"
-      onClick={() => props.onSelect(props.job._id)}
+      onClick={() => props.onSelect(props.selectionKey)}
       aria-pressed={props.selected}
       className={cn(
-        "w-full rounded-[24px] border px-4 py-4 text-left transition",
+        "w-full rounded-[18px] border px-4 py-4 text-left transition",
         props.selected
-          ? "border-ink/20 bg-mist/60 shadow-[0_18px_40px_rgba(15,23,42,0.08)]"
+          ? "border-[#0a66c2]/30 bg-[#0a66c2]/[0.06] shadow-sm"
           : "border-ink/8 bg-white hover:border-ink/18 hover:bg-mist/35",
       )}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="line-clamp-2 text-base font-semibold leading-6 text-ink">
+          <div className="line-clamp-2 text-[15px] font-semibold leading-6 text-ink">
             {props.job.title}
           </div>
           <div className="mt-1 truncate text-sm text-slate">{props.job.company}</div>
         </div>
 
-        <div className="rounded-full border border-ink/8 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate">
+        <div className="rounded-full border border-ink/8 bg-white px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate">
           {labelForProviderPlatform(props.job.sourcePlatform)}
         </div>
       </div>

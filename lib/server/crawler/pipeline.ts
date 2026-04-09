@@ -1,6 +1,6 @@
 import "server-only";
 
-import { dedupeJobs } from "@/lib/server/crawler/dedupe";
+import { dedupeJobs, dedupeStoredJobs } from "@/lib/server/crawler/dedupe";
 import {
   buildContentFingerprint,
   buildSourceLookupKey,
@@ -253,7 +253,9 @@ export async function executeCrawlPipeline(
       input.now,
     );
     diagnostics.validationDeferred = deferredCount;
-    const savedJobs = await input.repository.persistJobs(crawlRun._id, jobsReadyToPersist);
+    const savedJobs = dedupeStoredJobs(
+      await input.repository.persistJobs(crawlRun._id, jobsReadyToPersist),
+    );
 
     console.info("[crawl:summary]", {
       searchId: search._id,
@@ -347,7 +349,7 @@ export async function refreshStaleJobs(
   const ttl = getEnv().LINK_VALIDATION_TTL_MINUTES;
 
   return runWithConcurrency(
-    jobs,
+    dedupeStoredJobs(jobs),
     async (job) => {
       if (!job.lastValidatedAt) {
         // Deferred crawls intentionally leave fresh jobs unvalidated. Keep search loads

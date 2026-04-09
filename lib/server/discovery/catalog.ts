@@ -33,6 +33,16 @@ const curatedPublicSourceCatalog: CatalogEntry[] = [
     companyHint: "Robinhood",
   },
   {
+    platform: "lever",
+    token: "sourcegraph",
+    companyHint: "Sourcegraph",
+  },
+  {
+    platform: "lever",
+    token: "postman",
+    companyHint: "Postman",
+  },
+  {
     platform: "ashby",
     token: "notion",
     companyHint: "Notion",
@@ -46,6 +56,16 @@ const curatedPublicSourceCatalog: CatalogEntry[] = [
     platform: "ashby",
     token: "replit",
     companyHint: "Replit",
+  },
+  {
+    platform: "ashby",
+    token: "linear",
+    companyHint: "Linear",
+  },
+  {
+    platform: "ashby",
+    token: "vercel",
+    companyHint: "Vercel",
   },
 ];
 

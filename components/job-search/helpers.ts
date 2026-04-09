@@ -319,6 +319,35 @@ export function describeSelectedPlatforms(filters: SearchFilters) {
   return selected.join(", ");
 }
 
+export function buildStableJobRenderKeys(jobs: JobListing[]) {
+  const seen = new Map<string, number>();
+
+  return jobs.map((job) => {
+    const baseKey = resolveStableJobIdentity(job);
+    const occurrence = seen.get(baseKey) ?? 0;
+    seen.set(baseKey, occurrence + 1);
+
+    return occurrence === 0 ? baseKey : `${baseKey}::${occurrence + 1}`;
+  });
+}
+
+function resolveStableJobIdentity(job: JobListing) {
+  return (
+    job._id ||
+    job.contentFingerprint ||
+    [
+      job.sourcePlatform,
+      job.sourceJobId,
+      job.applyUrl,
+      job.titleNormalized,
+      job.companyNormalized,
+      job.locationNormalized,
+    ]
+      .filter(Boolean)
+      .join("|")
+  );
+}
+
 function buildSearchableJobText(job: JobListing) {
   return [
     job.title,

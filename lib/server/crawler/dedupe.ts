@@ -2,10 +2,21 @@ import "server-only";
 
 import type { JobListing } from "@/lib/types";
 
-type DedupeCandidate = Omit<JobListing, "_id" | "crawlRunIds">;
+type ComparableJobRecord = Omit<JobListing, "_id" | "crawlRunIds"> &
+  Partial<Pick<JobListing, "_id" | "crawlRunIds">>;
 
-export function dedupeJobs(jobs: DedupeCandidate[]) {
-  const deduped: DedupeCandidate[] = [];
+type PersistableDedupeCandidate = Omit<JobListing, "_id" | "crawlRunIds">;
+
+export function dedupeJobs<T extends PersistableDedupeCandidate>(jobs: T[]) {
+  return dedupeComparableJobs(jobs);
+}
+
+export function dedupeStoredJobs(jobs: JobListing[]) {
+  return dedupeComparableJobs(jobs);
+}
+
+function dedupeComparableJobs<T extends ComparableJobRecord>(jobs: T[]) {
+  const deduped: T[] = [];
 
   for (const job of jobs) {
     const existingIndex = deduped.findIndex((candidate) => isDuplicate(candidate, job));
@@ -20,7 +31,11 @@ export function dedupeJobs(jobs: DedupeCandidate[]) {
   return deduped;
 }
 
-function isDuplicate(left: DedupeCandidate, right: DedupeCandidate) {
+function isDuplicate(left: ComparableJobRecord, right: ComparableJobRecord) {
+  if (left._id && right._id && left._id === right._id) {
+    return true;
+  }
+
   if (left.canonicalUrl && right.canonicalUrl && left.canonicalUrl === right.canonicalUrl) {
     return true;
   }
@@ -36,8 +51,9 @@ function isDuplicate(left: DedupeCandidate, right: DedupeCandidate) {
   return left.sourceLookupKeys.some((lookupKey) => right.sourceLookupKeys.includes(lookupKey));
 }
 
-function mergeCandidates(left: DedupeCandidate, right: DedupeCandidate): DedupeCandidate {
+function mergeCandidates<T extends ComparableJobRecord>(left: T, right: T): T {
   const primary = score(right) >= score(left) ? right : left;
+  const mergedId = primary._id ?? left._id ?? right._id;
 
   return {
     ...primary,
@@ -45,18 +61,30 @@ function mergeCandidates(left: DedupeCandidate, right: DedupeCandidate): DedupeC
     discoveredAt: left.discoveredAt < right.discoveredAt ? left.discoveredAt : right.discoveredAt,
     sourceLookupKeys: Array.from(new Set([...left.sourceLookupKeys, ...right.sourceLookupKeys])),
     sourceProvenance: dedupeProvenance([...left.sourceProvenance, ...right.sourceProvenance]),
-  };
+    ...(mergedId
+      ? {
+          _id: mergedId,
+        }
+      : {}),
+    ...(left.crawlRunIds || right.crawlRunIds
+      ? {
+          crawlRunIds: Array.from(
+            new Set([...(left.crawlRunIds ?? []), ...(right.crawlRunIds ?? [])]),
+          ),
+        }
+      : {}),
+  } as T;
 }
 
-function dedupeProvenance(records: DedupeCandidate["sourceProvenance"]) {
-  const map = new Map<string, DedupeCandidate["sourceProvenance"][number]>();
+function dedupeProvenance(records: ComparableJobRecord["sourceProvenance"]) {
+  const map = new Map<string, ComparableJobRecord["sourceProvenance"][number]>();
   for (const record of records) {
     map.set(`${record.sourcePlatform}:${record.sourceJobId}:${record.applyUrl}`, record);
   }
   return Array.from(map.values());
 }
 
-function score(candidate: DedupeCandidate) {
+function score(candidate: ComparableJobRecord) {
   let score = 0;
   if (candidate.linkStatus === "valid") {
     score += 3;
@@ -71,6 +99,10 @@ function score(candidate: DedupeCandidate) {
   }
 
   if (candidate.canonicalUrl) {
+    score += 1;
+  }
+
+  if (candidate.lastValidatedAt) {
     score += 1;
   }
 

@@ -2,6 +2,7 @@ import "server-only";
 
 import type { Db } from "mongodb";
 
+import { dedupeJobs, dedupeStoredJobs } from "@/lib/server/crawler/dedupe";
 import { buildSourceLookupKey, createId } from "@/lib/server/crawler/helpers";
 import { collectionNames } from "@/lib/server/db/indexes";
 import { getMemoryDb } from "@/lib/server/db/memory";
@@ -179,7 +180,7 @@ export class JobCrawlerRepository {
       )
       .toArray();
 
-    return documents.map((document) => parseStoredJob(document));
+    return dedupeStoredJobs(documents.map((document) => parseStoredJob(document)));
   }
 
   async getJob(jobId: string) {
@@ -188,10 +189,10 @@ export class JobCrawlerRepository {
   }
 
   async persistJobs(crawlRunId: string, jobs: PersistableJob[]) {
-    const savedJobs: JobListing[] = [];
+    const savedJobsById = new Map<string, JobListing>();
+    const sanitizedJobs = dedupeJobs(jobs.map((job) => sanitizePersistableJob(job)));
 
-    for (const rawJob of jobs) {
-      const job = sanitizePersistableJob(rawJob);
+    for (const job of sanitizedJobs) {
       const existing = await this.findExistingJob(job);
       if (!existing) {
         const document = jobListingSchema.parse({
@@ -200,17 +201,17 @@ export class JobCrawlerRepository {
           crawlRunIds: [crawlRunId],
         });
         await this.jobs().insertOne(document);
-        savedJobs.push(document);
+        savedJobsById.set(document._id, document);
         continue;
       }
 
       const merged = mergeJobRecords(existing, job, crawlRunId);
       const { _id: _ignoredId, ...updateFields } = merged;
       await this.jobs().updateOne({ _id: existing._id }, { $set: updateFields });
-      savedJobs.push(merged);
+      savedJobsById.set(merged._id, merged);
     }
 
-    return savedJobs;
+    return dedupeStoredJobs(Array.from(savedJobsById.values()));
   }
 
   async saveLinkValidation(result: LinkValidationResult) {

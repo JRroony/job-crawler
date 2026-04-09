@@ -49,7 +49,7 @@ describe("provider normalization", () => {
     expect(job.sourcePlatform).toBe("lever");
     expect(job.applyUrl).toContain("/apply");
     expect(job.city).toBe("New York");
-    expect(job.country).toBe("US");
+    expect(job.country).toBe("United States");
     expect(job.experienceLevel).toBe("junior");
     expect(job.experienceClassification).toMatchObject({
       explicitLevel: "junior",
@@ -145,7 +145,7 @@ describe("provider normalization", () => {
     });
 
     expect(job.sourcePlatform).toBe("lever");
-    expect(job.country).toBe("US");
+    expect(job.country).toBe("United States");
     expect(job.experienceLevel).toBe("intern");
     expect(job.experienceClassification).toMatchObject({
       explicitLevel: "intern",
@@ -258,7 +258,7 @@ describe("provider normalization", () => {
     expect(job.locationText).toBe("Austin, Texas, US");
     expect(job.city).toBe("Austin");
     expect(job.state).toBe("Texas");
-    expect(job.country).toBe("US");
+    expect(job.country).toBe("United States");
   });
 
   it("does not classify disclaimer-only Greenhouse content as an internship", () => {
