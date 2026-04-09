@@ -26,16 +26,16 @@ import { defineProvider } from "@/lib/server/providers/types";
 type GreenhouseApiResponse = {
   jobs?: Array<{
     id: number | string;
-    title?: string;
-    absolute_url?: string;
-    updated_at?: string;
-    first_published?: string;
-    company_name?: string;
-    content?: string;
-    location?: { name?: string };
-    offices?: Array<{ name?: string; location?: { name?: string | null } | null }>;
-    departments?: Array<{ name?: string }>;
-    metadata?: Array<{ name?: string; value?: string | null }>;
+    title?: unknown;
+    absolute_url?: unknown;
+    updated_at?: unknown;
+    first_published?: unknown;
+    company_name?: unknown;
+    content?: unknown;
+    location?: { name?: unknown };
+    offices?: Array<{ name?: unknown; location?: { name?: unknown | null } | null }>;
+    departments?: Array<{ name?: unknown }>;
+    metadata?: Array<{ name?: unknown; value?: unknown }>;
   }>;
 };
 
@@ -54,24 +54,28 @@ export function normalizeGreenhouseJob(input: {
   const locationText = buildGreenhouseLocationText(input.job);
   const structuredExperienceHints = buildGreenhouseStructuredExperienceHints(input.job);
   const descriptionExperienceHint = stripGreenhouseMarkup(input.job.content);
+  const absoluteUrl = readGreenhouseText(input.job.absolute_url);
   const boardUrl =
     input.boardUrl ??
     `https://boards.greenhouse.io/${input.companyToken}`;
 
   return buildSeed({
-    title: input.job.title ?? "Untitled role",
+    title: readGreenhouseText(input.job.title) ?? "Untitled role",
     companyToken: input.companyToken,
     company: defaultCompanyName(
       input.companyToken,
-      input.job.company_name ?? input.companyName,
+      readGreenhouseText(input.job.company_name) ?? input.companyName,
     ),
     locationText,
     sourcePlatform: "greenhouse",
     sourceJobId: String(input.job.id),
-    sourceUrl: input.job.absolute_url ?? boardUrl,
-    applyUrl: input.job.absolute_url ?? boardUrl,
-    canonicalUrl: input.job.absolute_url,
-    postedAt: coercePostedAt(input.job.first_published ?? input.job.updated_at),
+    sourceUrl: absoluteUrl ?? boardUrl,
+    applyUrl: absoluteUrl ?? boardUrl,
+    canonicalUrl: absoluteUrl,
+    postedAt: coercePostedAt(
+      readGreenhouseText(input.job.first_published) ??
+      readGreenhouseText(input.job.updated_at),
+    ),
     rawSourceMetadata: {
       greenhouseJob: input.job,
       greenhouseStructuredExperienceHints: structuredExperienceHints,
@@ -105,11 +109,20 @@ export function createGreenhouseProvider() {
           const apiUrl = resolveGreenhouseApiUrl(source);
           const companyToken = resolveGreenhouseToken(source);
           const boardUrl = resolveGreenhouseBoardUrl(source);
+          const sourceDescriptor = {
+            token: companyToken,
+            boardUrl,
+            apiUrl,
+          };
 
           if (!apiUrl) {
             warnings.push(
               `Greenhouse source ${describeGreenhouseSource(source)} is missing a usable board token or URL.`,
             );
+            console.warn("[greenhouse:crawl-source]", {
+              ...sourceDescriptor,
+              status: "missing_api_url",
+            });
             return {
               fetchedCount: 0,
               jobs: [],
@@ -127,6 +140,13 @@ export function createGreenhouseProvider() {
 
           if (!result.ok) {
             warnings.push(formatGreenhouseFetchWarning(source, result));
+            console.warn("[greenhouse:crawl-source]", {
+              ...sourceDescriptor,
+              status: "fetch_failed",
+              errorType: result.errorType,
+              statusCode: result.statusCode,
+              message: result.message,
+            });
             return {
               fetchedCount: 0,
               jobs: [],
@@ -149,6 +169,15 @@ export function createGreenhouseProvider() {
             }),
           );
           const filteredJobs = filterProviderSeeds(normalizedJobs, context.filters);
+
+          console.info("[greenhouse:crawl-source]", {
+            ...sourceDescriptor,
+            status: "success",
+            fetchedCount: jobs.length,
+            matchedCount: filteredJobs.jobs.length,
+            excludedByTitle: filteredJobs.excludedByTitle,
+            excludedByLocation: filteredJobs.excludedByLocation,
+          });
 
           return {
             fetchedCount: jobs.length,
@@ -175,6 +204,8 @@ export function createGreenhouseProvider() {
         sourceCount: sources.length,
         fetchedCount,
         matchedCount: jobs.length,
+        excludedByTitle,
+        excludedByLocation,
         warningCount: warnings.length,
       });
 
@@ -193,7 +224,9 @@ export function createGreenhouseProvider() {
 
 function buildGreenhouseLocationText(job: GreenhouseJob) {
   const candidates = dedupeComparableStrings([
-    job.metadata?.find((entry) => entry.name?.toLowerCase().includes("location"))?.value ?? undefined,
+    job.metadata?.find((entry) =>
+      readGreenhouseText(entry.name)?.toLowerCase().includes("location"),
+    )?.value ?? undefined,
     job.location?.name,
     ...(job.offices ?? []).flatMap((office) => [office.location?.name ?? undefined, office.name]),
   ]);
@@ -213,21 +246,28 @@ function collectStructuredMetadataHints(
   metadata: GreenhouseJob["metadata"],
 ) {
   return (metadata ?? [])
-    .map((entry) => [entry.name?.trim(), entry.value?.trim()].filter(Boolean).join(": "))
+    .map((entry) =>
+      [
+        readGreenhouseText(entry.name),
+        readGreenhouseText(entry.value),
+      ]
+        .filter((value): value is string => Boolean(value))
+        .join(": "),
+    )
     .filter((value) => greenhouseStructuredExperiencePattern.test(value));
 }
 
 function collectStructuredNames(
-  records: Array<{ name?: string }> | undefined,
+  records: Array<{ name?: unknown }> | undefined,
 ) {
   return (records ?? [])
-    .map((record) => record.name?.trim())
+    .map((record) => readGreenhouseText(record.name))
     .filter((value): value is string => Boolean(value))
     .filter((value) => greenhouseStructuredExperiencePattern.test(value));
 }
 
-function stripGreenhouseMarkup(value?: string) {
-  return (value ?? "")
+function stripGreenhouseMarkup(value?: unknown) {
+  return (typeof value === "string" ? value : "")
     .replace(/&lt;\/?[^&]+&gt;/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/&(nbsp|amp|quot|apos|#39|#x27);/gi, " ")
@@ -235,12 +275,12 @@ function stripGreenhouseMarkup(value?: string) {
     .trim();
 }
 
-function dedupeComparableStrings(values: Array<string | undefined | null>) {
+function dedupeComparableStrings(values: Array<unknown>) {
   const seen = new Set<string>();
   const results: string[] = [];
 
   for (const value of values) {
-    const trimmed = value?.trim();
+    const trimmed = readGreenhouseText(value);
     if (!trimmed) {
       continue;
     }
@@ -255,6 +295,15 @@ function dedupeComparableStrings(values: Array<string | undefined | null>) {
   }
 
   return results;
+}
+
+function readGreenhouseText(value: unknown) {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function resolveGreenhouseApiUrl(source: GreenhouseDiscoveredSource) {

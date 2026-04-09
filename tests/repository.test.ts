@@ -324,6 +324,80 @@ describe("JobCrawlerRepository", () => {
     ]);
   });
 
+  it("normalizes legacy null optional job fields and nested provenance on read", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+
+    await db.collection(collectionNames.jobs).insertOne({
+      _id: "job-null-legacy",
+      title: "Software Engineer",
+      company: "Acme",
+      country: "United States",
+      state: null,
+      city: null,
+      locationText: "San Francisco, CA",
+      experienceLevel: null,
+      experienceClassification: null,
+      sourcePlatform: "greenhouse",
+      sourceJobId: "role-null-legacy",
+      sourceUrl: "https://example.com/jobs/null-legacy",
+      applyUrl: "https://example.com/jobs/null-legacy/apply",
+      resolvedUrl: null,
+      canonicalUrl: null,
+      postedAt: null,
+      discoveredAt: "2026-03-29T00:00:00.000Z",
+      lastValidatedAt: null,
+      linkStatus: "unknown",
+      rawSourceMetadata: null,
+      sourceProvenance: [
+        {
+          sourcePlatform: "greenhouse",
+          sourceJobId: "role-null-legacy",
+          sourceUrl: "https://example.com/jobs/null-legacy",
+          applyUrl: "https://example.com/jobs/null-legacy/apply",
+          resolvedUrl: null,
+          canonicalUrl: null,
+          discoveredAt: "2026-03-29T00:00:00.000Z",
+          rawSourceMetadata: null,
+        },
+      ],
+      sourceLookupKeys: ["greenhouse:role null legacy"],
+      crawlRunIds: ["run-legacy"],
+      companyNormalized: "acme",
+      titleNormalized: "software engineer",
+      locationNormalized: "san francisco ca united states",
+      contentFingerprint: "fingerprint-null-legacy",
+    });
+
+    const job = await repository.getJob("job-null-legacy");
+
+    expect(job).toMatchObject({
+      _id: "job-null-legacy",
+      title: "Software Engineer",
+      company: "Acme",
+      country: "United States",
+      state: undefined,
+      city: undefined,
+      resolvedUrl: undefined,
+      canonicalUrl: undefined,
+      postedAt: undefined,
+      lastValidatedAt: undefined,
+      experienceLevel: undefined,
+      experienceClassification: undefined,
+      rawSourceMetadata: {},
+    });
+    expect(job?.sourceProvenance).toEqual([
+      {
+        sourcePlatform: "greenhouse",
+        sourceJobId: "role-null-legacy",
+        sourceUrl: "https://example.com/jobs/null-legacy",
+        applyUrl: "https://example.com/jobs/null-legacy/apply",
+        discoveredAt: "2026-03-29T00:00:00.000Z",
+        rawSourceMetadata: {},
+      },
+    ]);
+  });
+
   it("creates the expected MongoDB indexes", async () => {
     const db = new FakeDb();
     await ensureDatabaseIndexes(db);

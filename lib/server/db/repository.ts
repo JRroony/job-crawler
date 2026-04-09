@@ -22,6 +22,7 @@ import type {
 } from "@/lib/types";
 import {
   crawlDiagnosticsSchema,
+  experienceClassificationSchema,
   crawlProviderSummarySchema,
   crawlRunDocumentSchema,
   crawlSourceResultSchema,
@@ -30,6 +31,7 @@ import {
   persistableJobSchema,
   sanitizeSearchFiltersInput,
   searchDocumentSchema,
+  sourceProvenanceSchema,
 } from "@/lib/types";
 
 type SortSpec = Record<string, 1 | -1>;
@@ -373,11 +375,12 @@ function dedupeStrings(values: string[]) {
 }
 
 function sanitizePersistableJob(job: PersistableJob): PersistableJob {
+  const normalized = normalizeStoredJobFields(job as Record<string, unknown>);
   const {
     _id: _ignoredId,
     crawlRunIds: _ignoredCrawlRunIds,
     ...persistable
-  } = job as PersistableJob & { _id?: string; crawlRunIds?: string[] };
+  } = normalized as PersistableJob & { _id?: string; crawlRunIds?: string[] };
 
   return persistableJobSchema.parse(persistable);
 }
@@ -421,19 +424,7 @@ function parseStoredCrawlRun(document: Record<string, unknown>) {
 }
 
 function parseStoredJob(document: Record<string, unknown>) {
-  const rawSourceMetadata = isRecord(document.rawSourceMetadata) ? document.rawSourceMetadata : {};
-  const sourceProvenance = normalizeSourceProvenance(document, rawSourceMetadata);
-  const sourceLookupKeys = normalizeSourceLookupKeys(document, sourceProvenance);
-  const crawlRunIds = normalizeStringArray(document.crawlRunIds);
-
-  return jobListingSchema.parse({
-    ...document,
-    rawSourceMetadata,
-    sourceProvenance,
-    sourceLookupKeys,
-    crawlRunIds,
-    linkStatus: typeof document.linkStatus === "string" ? document.linkStatus : "unknown",
-  });
+  return jobListingSchema.parse(normalizeStoredJobFields(document));
 }
 
 function parseStoredLinkValidation(document: Record<string, unknown>) {
@@ -501,7 +492,13 @@ function normalizeSourceProvenance(
   rawSourceMetadata: Record<string, unknown>,
 ) {
   if (Array.isArray(document.sourceProvenance) && document.sourceProvenance.length > 0) {
-    return document.sourceProvenance;
+    const normalizedRecords = document.sourceProvenance
+      .map((record) => normalizeStoredProvenanceRecord(record, rawSourceMetadata))
+      .filter((record): record is SourceProvenance => Boolean(record));
+
+    if (normalizedRecords.length > 0) {
+      return normalizedRecords;
+    }
   }
 
   const fallback = buildFallbackSourceProvenance(document, rawSourceMetadata);
@@ -528,30 +525,105 @@ function buildFallbackSourceProvenance(
   document: Record<string, unknown>,
   rawSourceMetadata: Record<string, unknown>,
 ) {
+  const sourceUrl = normalizeOptionalDocumentString(document.sourceUrl);
+  const applyUrl = normalizeOptionalDocumentString(document.applyUrl);
+  const discoveredAt = normalizeOptionalDocumentString(document.discoveredAt);
+
   if (
     !isNonEmptyString(document.sourcePlatform) ||
     !isNonEmptyString(document.sourceJobId) ||
-    !isNonEmptyString(document.sourceUrl) ||
-    !isNonEmptyString(document.applyUrl) ||
-    !isNonEmptyString(document.discoveredAt)
+    !sourceUrl ||
+    !applyUrl ||
+    !discoveredAt
   ) {
     return undefined;
   }
 
-  return {
+  return sourceProvenanceSchema.parse({
     sourcePlatform: document.sourcePlatform,
     sourceJobId: document.sourceJobId,
-    sourceUrl: document.sourceUrl,
-    applyUrl: document.applyUrl,
-    resolvedUrl: isNonEmptyString(document.resolvedUrl) ? document.resolvedUrl : undefined,
-    canonicalUrl: isNonEmptyString(document.canonicalUrl) ? document.canonicalUrl : undefined,
-    discoveredAt: document.discoveredAt,
+    sourceUrl,
+    applyUrl,
+    resolvedUrl: normalizeOptionalDocumentString(document.resolvedUrl),
+    canonicalUrl: normalizeOptionalDocumentString(document.canonicalUrl),
+    discoveredAt,
     rawSourceMetadata,
-  };
+  });
 }
 
 function normalizeStringArray(value: unknown) {
   return Array.isArray(value) ? value.filter(isNonEmptyString) : [];
+}
+
+function normalizeStoredJobFields(document: Record<string, unknown>) {
+  const rawSourceMetadata = isRecord(document.rawSourceMetadata) ? document.rawSourceMetadata : {};
+  const sourceProvenance = normalizeSourceProvenance(document, rawSourceMetadata);
+  const sourceLookupKeys = normalizeSourceLookupKeys(document, sourceProvenance);
+  const crawlRunIds = normalizeStringArray(document.crawlRunIds);
+
+  return {
+    ...document,
+    country: normalizeOptionalDocumentString(document.country),
+    state: normalizeOptionalDocumentString(document.state),
+    city: normalizeOptionalDocumentString(document.city),
+    experienceLevel: document.experienceLevel == null ? undefined : document.experienceLevel,
+    experienceClassification: normalizeExperienceClassification(document.experienceClassification),
+    resolvedUrl: normalizeOptionalDocumentString(document.resolvedUrl),
+    canonicalUrl: normalizeOptionalDocumentString(document.canonicalUrl),
+    postedAt: normalizeOptionalDocumentString(document.postedAt),
+    lastValidatedAt: normalizeOptionalDocumentString(document.lastValidatedAt),
+    rawSourceMetadata,
+    sourceProvenance,
+    sourceLookupKeys,
+    crawlRunIds,
+    linkStatus: typeof document.linkStatus === "string" ? document.linkStatus : "unknown",
+  };
+}
+
+function normalizeStoredProvenanceRecord(
+  record: unknown,
+  fallbackRawSourceMetadata: Record<string, unknown>,
+) {
+  if (!isRecord(record)) {
+    return undefined;
+  }
+
+  const parsed = sourceProvenanceSchema.safeParse({
+    sourcePlatform: record.sourcePlatform,
+    sourceJobId: record.sourceJobId,
+    sourceUrl: normalizeOptionalDocumentString(record.sourceUrl),
+    applyUrl: normalizeOptionalDocumentString(record.applyUrl),
+    resolvedUrl: normalizeOptionalDocumentString(record.resolvedUrl),
+    canonicalUrl: normalizeOptionalDocumentString(record.canonicalUrl),
+    discoveredAt: normalizeOptionalDocumentString(record.discoveredAt),
+    rawSourceMetadata: isRecord(record.rawSourceMetadata)
+      ? record.rawSourceMetadata
+      : fallbackRawSourceMetadata,
+  });
+
+  return parsed.success ? parsed.data : undefined;
+}
+
+function normalizeExperienceClassification(value: unknown) {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = experienceClassificationSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function normalizeOptionalDocumentString(value: unknown) {
+  if (value == null) {
+    return undefined;
+  }
+
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function isNonEmptyString(value: unknown): value is string {

@@ -32,6 +32,16 @@ import {
 } from "@/lib/types";
 
 export class ResourceNotFoundError extends Error {}
+export class InputValidationError extends Error {
+  constructor(private readonly error: ZodError) {
+    super("Invalid search filters.");
+    this.name = "InputValidationError";
+  }
+
+  flatten() {
+    return this.error.flatten();
+  }
+}
 
 type Runtime = {
   repository?: JobCrawlerRepository;
@@ -52,7 +62,14 @@ export async function runSearchFromFilters(
   rawFilters: unknown,
   runtime: Runtime = {},
 ) {
-  const filters = searchFiltersSchema.parse(normalizeSearchIntentInput(rawFilters));
+  const normalizedInput = normalizeSearchIntentInput(rawFilters);
+  const parsedFilters = searchFiltersSchema.safeParse(normalizedInput);
+
+  if (!parsedFilters.success) {
+    throw new InputValidationError(parsedFilters.error);
+  }
+
+  const filters = parsedFilters.data;
   console.info("[crawl:normalized-filters]", filters);
   const repository = await resolveRepository(runtime.repository);
   const now = runtime.now ?? new Date();
@@ -205,8 +222,10 @@ export async function listRecentSearches(runtime: Runtime = {}) {
   return repository.listRecentSearches();
 }
 
-export function isInputValidationError(error: unknown) {
-  return error instanceof ZodError;
+export function isInputValidationError(
+  error: unknown,
+): error is InputValidationError {
+  return error instanceof InputValidationError;
 }
 
 type ExecuteCrawlInput = {

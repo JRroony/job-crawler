@@ -10,7 +10,7 @@ const PROJECT_ROOT = path.resolve(__dirname, "..");
 // curated sources unless the shell already opted into broader discovery.
 process.env.PUBLIC_SEARCH_DISCOVERY_ENABLED ??= "false";
 
-const configuredPlatforms = parseCsv(process.env.VERIFY_CRAWL_PLATFORMS) ?? ["lever"];
+const configuredPlatforms = parseCsv(process.env.VERIFY_CRAWL_PLATFORMS) ?? ["greenhouse"];
 
 const VERIFY_CRAWL_CONFIG = {
   // Configure the acceptance-test query here.
