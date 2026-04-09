@@ -21,17 +21,30 @@ function databaseNameFromUri(uri: string) {
 }
 
 const env = getEnv();
-const clientPromise =
-  globalThis.__jobCrawlerMongoClientPromise ??
-  new MongoClient(env.MONGODB_URI).connect();
-
-if (process.env.NODE_ENV !== "production") {
-  globalThis.__jobCrawlerMongoClientPromise = clientPromise;
-}
 
 export async function getMongoDb() {
-  const client = await clientPromise;
+  const client = await getMongoClient();
   const db = client.db(databaseNameFromUri(env.MONGODB_URI));
   await ensureDatabaseIndexes(db);
   return db;
+}
+
+async function getMongoClient() {
+  const cachedPromise = globalThis.__jobCrawlerMongoClientPromise;
+  if (cachedPromise) {
+    return cachedPromise;
+  }
+
+  const connectionPromise = new MongoClient(env.MONGODB_URI)
+    .connect()
+    .catch((error) => {
+      if (globalThis.__jobCrawlerMongoClientPromise === connectionPromise) {
+        globalThis.__jobCrawlerMongoClientPromise = undefined;
+      }
+
+      throw error;
+    });
+
+  globalThis.__jobCrawlerMongoClientPromise = connectionPromise;
+  return connectionPromise;
 }

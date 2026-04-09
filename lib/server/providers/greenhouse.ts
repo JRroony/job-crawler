@@ -171,6 +171,13 @@ export function createGreenhouseProvider() {
         0,
       );
 
+      console.info("[greenhouse:crawl-summary]", {
+        sourceCount: sources.length,
+        fetchedCount,
+        matchedCount: jobs.length,
+        warningCount: warnings.length,
+      });
+
       return finalizeProviderResult({
         provider: "greenhouse",
         jobs,
@@ -285,18 +292,23 @@ function extractGreenhouseTokenFromUrl(value?: string) {
   try {
     const url = new URL(value);
     const segments = url.pathname.split("/").filter(Boolean);
+    const embeddedToken = cleanString(url.searchParams.get("for") ?? undefined)?.toLowerCase();
+
+    if (segments[0] === "embed") {
+      return embeddedToken;
+    }
 
     if (url.hostname === "boards.greenhouse.io") {
-      return cleanString(segments[0]);
+      return cleanString(segments[0])?.toLowerCase();
     }
 
     if (url.hostname === "job-boards.greenhouse.io") {
-      return cleanString(segments[0]);
+      return cleanString(segments[0])?.toLowerCase();
     }
 
     if (url.hostname === "boards-api.greenhouse.io") {
       return segments[0] === "v1" && segments[1] === "boards"
-        ? cleanString(segments[2])
+        ? cleanString(segments[2])?.toLowerCase()
         : undefined;
     }
 

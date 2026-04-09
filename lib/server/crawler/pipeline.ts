@@ -94,25 +94,16 @@ export async function executeCrawlPipeline(
     const providerRouting = selectedProviders.map((provider, index) => ({
       provider: provider.provider,
       sourceCount: providerSources[index].length,
-      sources: providerSources[index].map((source) => ({
-        id: source.id,
-        platform: source.platform,
-        token: source.token,
-        companyHint: source.companyHint,
-        discoveryMethod: source.discoveryMethod,
-      })),
     }));
 
     console.info("[crawl:provider-routing]", {
       searchId: search._id,
       normalizedFilters,
-      discoveredSources: discoveredSources.map((source) => ({
-        id: source.id,
-        platform: source.platform,
-        token: source.token,
-        companyHint: source.companyHint,
-        discoveryMethod: source.discoveryMethod,
-      })),
+      discoveredSourceCount: discoveredSources.length,
+      discoveredPlatformCounts: discoveredSources.reduce<Record<string, number>>((counts, source) => {
+        counts[source.platform] = (counts[source.platform] ?? 0) + 1;
+        return counts;
+      }, {}),
       selectedProviders: selectedProviders.map((provider) => provider.provider),
       providerRouting,
     });
@@ -252,6 +243,13 @@ export async function executeCrawlPipeline(
     );
     diagnostics.validationDeferred = deferredCount;
     const savedJobs = await input.repository.persistJobs(crawlRun._id, jobsReadyToPersist);
+
+    console.info("[crawl:summary]", {
+      searchId: search._id,
+      fetchedCount: totalFetchedJobs,
+      matchedCount: totalMatchedJobs,
+      savedCount: savedJobs.length,
+    });
 
     for (const sourceResult of sourceResults) {
       const savedCount = savedJobs.filter((job) =>

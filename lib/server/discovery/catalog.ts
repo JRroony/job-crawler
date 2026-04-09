@@ -18,21 +18,6 @@ type CatalogEntry = {
 
 const curatedPublicSourceCatalog: CatalogEntry[] = [
   {
-    platform: "greenhouse",
-    token: "openai",
-    companyHint: "OpenAI",
-  },
-  {
-    platform: "greenhouse",
-    token: "stripe",
-    companyHint: "Stripe",
-  },
-  {
-    platform: "greenhouse",
-    token: "coinbase",
-    companyHint: "Coinbase",
-  },
-  {
     platform: "lever",
     token: "figma",
     companyHint: "Figma",

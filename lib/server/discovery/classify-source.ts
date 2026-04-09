@@ -149,17 +149,22 @@ function extractGreenhouseToken(url: URL) {
   }
 
   const segments = url.pathname.split("/").filter(Boolean);
+  const embeddedToken = normalizeGreenhouseToken(url.searchParams.get("for"));
+
+  if (segments[0] === "embed") {
+    return embeddedToken;
+  }
 
   if (url.hostname === "boards.greenhouse.io") {
-    return cleanString(segments[0]);
+    return normalizeGreenhouseToken(segments[0]);
   }
 
   if (url.hostname === "job-boards.greenhouse.io") {
-    return cleanString(segments[0]);
+    return normalizeGreenhouseToken(segments[0]);
   }
 
   if (segments[0] === "v1" && segments[1] === "boards") {
-    return cleanString(segments[2]);
+    return normalizeGreenhouseToken(segments[2]);
   }
 
   return undefined;
@@ -271,6 +276,11 @@ function resolveCompanyPageConfidence(
 
 function cleanString(value?: string) {
   const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function normalizeGreenhouseToken(value?: string | null) {
+  const trimmed = value?.trim().toLowerCase();
   return trimmed ? trimmed : undefined;
 }
 

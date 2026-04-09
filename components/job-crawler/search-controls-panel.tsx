@@ -54,22 +54,22 @@ export function SearchControlsPanel(props: SearchControlsPanelProps) {
               Set the crawl scope before you spend time on the result set.
             </h1>
             <p className="mt-3 text-sm leading-7 text-slate sm:text-base">
-              This form is organized the way a real crawler workflow works: define the target,
-              choose how strict matching should be, decide which provider families are active, then
-              pick how aggressively links should be validated during the run.
+              This MVP is tuned to make Greenhouse reliable first: define the target, choose how
+              strict matching should be, decide which provider families are active, then pick how
+              aggressively links should be validated during the run.
             </p>
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
             <SummaryCallout
               label="Discovery scope"
-              value="Configured seeds plus public ATS discovery"
-              detail="Configured sources still seed coverage, but the crawler can now discover additional public ATS sources from the search intent."
+              value="Greenhouse registry first"
+              detail="Greenhouse now starts from a maintained board registry, with public ATS discovery used only to add more sources when it works."
             />
             <SummaryCallout
               label="Default behavior"
-              value="All implemented platforms"
-              detail="If you do not customize platform selection, the crawl runs every supported provider family."
+              value="Greenhouse is the reliable MVP path"
+              detail="Other provider families remain available, but Greenhouse is the platform this MVP is explicitly hardened around."
             />
           </div>
         </div>

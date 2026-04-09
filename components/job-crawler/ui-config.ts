@@ -25,26 +25,26 @@ export const selectablePlatformOptions: Array<{
   {
     platform: "greenhouse",
     label: "Greenhouse",
-    detail: "Configured seeds plus public board discovery",
-    availability: "Enabled",
+    detail: "Registry-backed board crawl with public discovery as a supplement",
+    availability: "MVP focus",
   },
   {
     platform: "lever",
     label: "Lever",
-    detail: "Configured seeds plus public posting discovery",
-    availability: "Enabled",
+    detail: "Available, but not the reliability focus of this MVP",
+    availability: "Secondary",
   },
   {
     platform: "ashby",
     label: "Ashby",
-    detail: "Configured seeds plus public board discovery",
-    availability: "Enabled",
+    detail: "Available, but not the reliability focus of this MVP",
+    availability: "Secondary",
   },
   {
     platform: "company_page",
     label: "Company page",
-    detail: "Configured JSON feeds and career pages",
-    availability: "Enabled",
+    detail: "Available for configured feeds and pages, but not the focus of this MVP",
+    availability: "Secondary",
   },
 ];
 

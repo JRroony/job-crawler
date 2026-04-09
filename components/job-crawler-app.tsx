@@ -407,9 +407,9 @@ export function describeZeroResultState(result: CrawlResponse): ZeroResultState 
 
   if (diagnostics.discoveredSources === 0) {
     return {
-      title: "No public sources were discovered",
+      title: "No runnable sources were discovered",
       description:
-        "The crawler did not find any configured public boards or company pages for the selected platform scope.",
+        "The crawler did not find any registry-backed or publicly discovered sources for the selected platform scope.",
       highlights: buildOperationalHighlights(diagnostics, { includeFilters: false }),
     };
   }

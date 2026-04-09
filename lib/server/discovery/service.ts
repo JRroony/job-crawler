@@ -3,6 +3,7 @@ import "server-only";
 import { slugToLabel } from "@/lib/server/crawler/helpers";
 import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
+import { lookupGreenhouseCompanyHint } from "@/lib/server/discovery/greenhouse-registry";
 import { discoverSourcesFromPublicSearch } from "@/lib/server/discovery/public-search";
 import { resolveOperationalCrawlerPlatforms } from "@/lib/types";
 import type {
@@ -77,9 +78,9 @@ export function discoverConfiguredSources(input: DiscoveryInput & { env: Discove
       classifySourceCandidate({
         url: `https://boards.greenhouse.io/${token}`,
         token,
-        companyHint: slugToLabel(token),
+        companyHint: lookupGreenhouseCompanyHint(token) ?? slugToLabel(token),
         confidence: "high",
-        discoveryMethod: "configured_env",
+        discoveryMethod: "platform_registry",
       }),
     ),
     ...input.env.leverSiteTokens.map((token) =>
@@ -157,13 +158,15 @@ function logDiscoveryTrace(
     publicSearchEnabled: boolean;
   },
 ) {
-  console.info("[discovery:trace]", {
+  console.info("[discovery:summary]", {
     filters,
-    configuredSources: summarizeSources(trace.configuredSources),
-    curatedSources: summarizeSources(trace.curatedSources),
-    publicSources: summarizeSources(trace.publicSources),
-    discoveredBeforeFiltering: summarizeSources(trace.discoveredBeforeFiltering),
-    discoveredAfterFiltering: summarizeSources(trace.discoveredSources),
+    configuredCount: trace.configuredSources.length,
+    curatedCount: trace.curatedSources.length,
+    publicCount: trace.publicSources.length,
+    discoveredBeforeFilteringCount: trace.discoveredBeforeFiltering.length,
+    discoveredAfterFilteringCount: trace.discoveredSources.length,
+    platformCounts: summarizePlatformCounts(trace.discoveredSources),
+    discoveryMethodCounts: summarizeDiscoveryMethodCounts(trace.discoveredSources),
     publicSearchEnabled: trace.publicSearchEnabled,
   });
 
@@ -175,8 +178,8 @@ function logDiscoveryTrace(
     trace.discoveredBeforeFiltering.length > 0
       ? "Selected platforms filtered every discovered source before provider routing."
       : trace.publicSearchEnabled
-        ? "Configured sources, curated catalog sources, and public ATS search all returned zero runnable sources."
-        : "Configured sources and curated catalog sources returned zero runnable sources while public ATS search was disabled.";
+        ? "Registry-backed seeds, supplemental catalog sources, and public ATS search all returned zero runnable sources."
+        : "Registry-backed seeds and supplemental catalog sources returned zero runnable sources while public ATS search was disabled.";
 
   console.warn("[discovery:zero-sources]", {
     filters,
@@ -184,14 +187,16 @@ function logDiscoveryTrace(
   });
 }
 
-function summarizeSources(sources: DiscoveredSource[]) {
-  return sources.map((source) => ({
-    id: source.id,
-    platform: source.platform,
-    token: source.token,
-    companyHint: source.companyHint,
-    discoveryMethod: source.discoveryMethod,
-    confidence: source.confidence,
-    url: source.url,
-  }));
+function summarizePlatformCounts(sources: DiscoveredSource[]) {
+  return sources.reduce<Record<string, number>>((counts, source) => {
+    counts[source.platform] = (counts[source.platform] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function summarizeDiscoveryMethodCounts(sources: DiscoveredSource[]) {
+  return sources.reduce<Record<string, number>>((counts, source) => {
+    counts[source.discoveryMethod] = (counts[source.discoveryMethod] ?? 0) + 1;
+    return counts;
+  }, {});
 }

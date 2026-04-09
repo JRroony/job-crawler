@@ -4,6 +4,7 @@ import type { Db } from "mongodb";
 
 import { buildSourceLookupKey, createId } from "@/lib/server/crawler/helpers";
 import { collectionNames } from "@/lib/server/db/indexes";
+import { getMemoryDb } from "@/lib/server/db/memory";
 import { getMongoDb } from "@/lib/server/mongodb";
 import type {
   CrawlDiagnostics,
@@ -55,6 +56,8 @@ export type DatabaseAdapter = {
 };
 
 export type PersistableJob = PersistableJobDocument;
+
+let hasWarnedMemoryFallback = false;
 
 export class JobCrawlerRepository {
   constructor(private readonly db: DatabaseAdapter) {}
@@ -275,8 +278,23 @@ export class JobCrawlerRepository {
 }
 
 export async function getRepository(db?: DatabaseAdapter | Db) {
-  const database = db ?? (await getMongoDb());
-  return new JobCrawlerRepository(database as DatabaseAdapter);
+  if (db) {
+    return new JobCrawlerRepository(db as DatabaseAdapter);
+  }
+
+  try {
+    return new JobCrawlerRepository((await getMongoDb()) as DatabaseAdapter);
+  } catch (error) {
+    if (!hasWarnedMemoryFallback) {
+      hasWarnedMemoryFallback = true;
+      console.warn(
+        "[db:fallback] MongoDB is unavailable; using in-memory persistence for this process.",
+        error instanceof Error ? { message: error.message } : { error },
+      );
+    }
+
+    return new JobCrawlerRepository(getMemoryDb());
+  }
 }
 
 function mergeJobRecords(

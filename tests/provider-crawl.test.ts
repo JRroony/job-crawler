@@ -51,6 +51,56 @@ async function crawlProvider(
 }
 
 describe("provider crawl status and live parsing", () => {
+  it("crawls a Greenhouse boards-api response into normalized jobs", async () => {
+    const provider = createGreenhouseProvider();
+    const fetchImpl = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          jobs: [
+            {
+              id: "backend-role",
+              title: "Software Engineer, Backend",
+              absolute_url: "https://boards.greenhouse.io/openai/jobs/backend-role",
+              first_published: "2026-03-10T00:00:00.000Z",
+              company_name: "OpenAI",
+              location: {
+                name: "San Francisco, CA",
+              },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Software Engineer",
+      },
+      sources: [greenhouseSource("openai")],
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.fetchedCount).toBe(1);
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0]).toMatchObject({
+      title: "Software Engineer, Backend",
+      company: "OpenAI",
+      country: "United States",
+      state: "California",
+      city: "San Francisco",
+      sourcePlatform: "greenhouse",
+      sourceUrl: "https://boards.greenhouse.io/openai/jobs/backend-role",
+    });
+  });
+
   it("marks a Greenhouse crawl as failed when every configured board fetch fails", async () => {
     const provider = createGreenhouseProvider();
     const fetchImpl = vi.fn(async () => {

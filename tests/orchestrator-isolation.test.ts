@@ -154,7 +154,7 @@ describe("crawl orchestration", () => {
     expect(leverCrawl).toHaveBeenCalledTimes(1);
   });
 
-  it("routes curated greenhouse fallback sources into the greenhouse provider", async () => {
+  it("routes registry-backed Greenhouse sources into the Greenhouse provider", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const now = new Date("2026-04-08T12:00:00.000Z");
     const seenTokens: string[] = [];
@@ -180,7 +180,7 @@ describe("crawl orchestration", () => {
         return discoverSources({
           ...input,
           env: {
-            greenhouseBoardTokens: [],
+            greenhouseBoardTokens: ["openai", "benchling", "datadog"],
             leverSiteTokens: [],
             ashbyBoardTokens: [],
             companyPageSources: [],
@@ -208,6 +208,7 @@ describe("crawl orchestration", () => {
 
     expect(seenTokens.length).toBeGreaterThan(0);
     expect(seenTokens).toContain("openai");
+    expect(seenTokens).toContain("benchling");
   });
 
   it("normalizes query-like role input before discovery runs", async () => {
@@ -250,7 +251,7 @@ describe("crawl orchestration", () => {
     });
   });
 
-  it("returns jobs in the crawl response when curated greenhouse fallback sources are available", async () => {
+  it("returns jobs in the crawl response when registry-backed Greenhouse sources are available", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const now = new Date("2026-04-08T12:00:00.000Z");
     const discovery: DiscoveryService = {
@@ -258,7 +259,7 @@ describe("crawl orchestration", () => {
         return discoverSources({
           ...input,
           env: {
-            greenhouseBoardTokens: [],
+            greenhouseBoardTokens: ["openai", "benchling", "datadog"],
             leverSiteTokens: [],
             ashbyBoardTokens: [],
             companyPageSources: [],

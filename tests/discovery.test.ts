@@ -63,6 +63,28 @@ describe("source discovery", () => {
     });
   });
 
+  it("classifies embedded Greenhouse board URLs into the real board token", () => {
+    const embeddedBoard = classifySourceCandidate({
+      url: "https://boards.greenhouse.io/embed/job_board?for=Benchling",
+      discoveryMethod: "future_search",
+    });
+    const embeddedBoardScript = classifySourceCandidate({
+      url: "https://job-boards.greenhouse.io/embed/job_board?for=discord",
+      discoveryMethod: "future_search",
+    });
+
+    expect(embeddedBoard).toMatchObject({
+      platform: "greenhouse",
+      token: "benchling",
+      boardUrl: "https://boards.greenhouse.io/benchling",
+    });
+    expect(embeddedBoardScript).toMatchObject({
+      platform: "greenhouse",
+      token: "discord",
+      boardUrl: "https://boards.greenhouse.io/discord",
+    });
+  });
+
   it("discovers configured env and manual sources into typed discovered sources", () => {
     const sources = discoverConfiguredSources({
       filters: {
@@ -91,7 +113,7 @@ describe("source discovery", () => {
         expect.objectContaining({
           platform: "greenhouse",
           token: "openai",
-          discoveryMethod: "configured_env",
+          discoveryMethod: "platform_registry",
         }),
         expect.objectContaining({
           platform: "lever",
@@ -150,7 +172,7 @@ describe("source discovery", () => {
       <html>
         <body>
           <a href="https://boards.greenhouse.io/acme/jobs/123">Acme</a>
-          <a href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fjob-boards.greenhouse.io%2Fwidgetco%2Fjobs%2F456">WidgetCo</a>
+          <a href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fboards.greenhouse.io%2Fembed%2Fjob_board%3Ffor%3DBenchling">Benchling</a>
           <a href="https://jobs.lever.co/ignored/abc">Ignored Lever</a>
         </body>
       </html>
@@ -185,7 +207,7 @@ describe("source discovery", () => {
         }),
         expect.objectContaining({
           platform: "greenhouse",
-          token: "widgetco",
+          token: "benchling",
           discoveryMethod: "future_search",
         }),
       ]),
@@ -193,7 +215,7 @@ describe("source discovery", () => {
     expect(sources.every((source) => source.platform === "greenhouse")).toBe(true);
   });
 
-  it("falls back to the curated greenhouse catalog when env seeds are empty", async () => {
+  it("returns non-zero Greenhouse registry sources even when public search is disabled", async () => {
     const sources = await discoverSources({
       filters: {
         title: "Software Engineer",
@@ -206,11 +228,11 @@ describe("source discovery", () => {
           status: 500,
         })) as unknown as typeof fetch,
       env: {
-        greenhouseBoardTokens: [],
+        greenhouseBoardTokens: ["openai", "benchling", "datadog"],
         leverSiteTokens: [],
         ashbyBoardTokens: [],
         companyPageSources: [],
-        PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
         PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
       },
     });
@@ -222,24 +244,69 @@ describe("source discovery", () => {
         expect.objectContaining({
           platform: "greenhouse",
           token: "openai",
-          discoveryMethod: "curated_catalog",
+          discoveryMethod: "platform_registry",
+        }),
+        expect.objectContaining({
+          platform: "greenhouse",
+          token: "benchling",
+          discoveryMethod: "platform_registry",
         }),
       ]),
     );
   });
 
-  it("keeps explicit greenhouse platform selection active for curated fallback sources", () => {
-    const greenhouseOnly = discoverCatalogSources(["greenhouse"]);
+  it("merges registry-backed Greenhouse sources with public search additions without duplicates", async () => {
+    const html = `
+      <html>
+        <body>
+          <a href="https://boards.greenhouse.io/openai/jobs/123">OpenAI</a>
+          <a href="https://boards.greenhouse.io/benchling/jobs/456">Benchling</a>
+          <a href="https://boards.greenhouse.io/datadog/jobs/789">Datadog</a>
+        </body>
+      </html>
+    `;
+    const fetchImpl = (async () =>
+      new Response(html, {
+        status: 200,
+        headers: {
+          "content-type": "text/html",
+        },
+      })) as unknown as typeof fetch;
 
-    expect(greenhouseOnly.length).toBeGreaterThan(0);
-    expect(greenhouseOnly.every((source) => source.platform === "greenhouse")).toBe(true);
-  });
-
-  it("returns zero sources only when no supported platform remains in scope", async () => {
     const sources = await discoverSources({
       filters: {
         title: "Software Engineer",
-        platforms: ["workday"],
+        platforms: ["greenhouse"],
+      },
+      now: new Date("2026-04-08T00:00:00.000Z"),
+      fetchImpl,
+      env: {
+        greenhouseBoardTokens: ["openai", "benchling"],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
+        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
+      },
+    });
+
+    expect(sources.filter((source) => source.platform === "greenhouse")).toHaveLength(3);
+    expect(sources.map((source) => source.token)).toEqual(
+      expect.arrayContaining(["openai", "benchling", "datadog"]),
+    );
+  });
+
+  it("does not add legacy greenhouse catalog sources on top of the registry path", () => {
+    const greenhouseOnly = discoverCatalogSources(["greenhouse"]);
+
+    expect(greenhouseOnly).toEqual([]);
+  });
+
+  it("returns zero sources only when the registry is empty and public search also returns nothing", async () => {
+    const sources = await discoverSources({
+      filters: {
+        title: "Software Engineer",
+        platforms: ["greenhouse"],
       },
       now: new Date("2026-04-08T00:00:00.000Z"),
       env: {

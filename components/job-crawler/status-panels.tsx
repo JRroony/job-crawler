@@ -144,9 +144,9 @@ export function NoticeBanner(props: {
 
 export function LoadingPanel() {
   const steps = [
-    "Discovering configured public sources",
-    "Running enabled provider families",
-    "Normalizing, deduping, and preparing results",
+    "Discovering registry-backed and supplemental public sources",
+    "Running the enabled provider families",
+    "Normalizing, deduping, and preparing saved jobs",
   ];
 
   return (
@@ -180,53 +180,6 @@ export function LoadingPanel() {
             />
           ))}
         </div>
-      </div>
-    </section>
-  );
-}
-
-export function OperationalHonestyPanel() {
-  const notes = [
-    {
-      label: "Enabled today",
-      detail: "Greenhouse, Lever, Ashby, and company-page crawls run only against configured public sources.",
-      tone: "neutral",
-    },
-    {
-      label: "Limited public-only paths",
-      detail: "LinkedIn and Indeed stay visible for transparency, but they are not active crawler targets in this UI.",
-      tone: "amber",
-    },
-    {
-      label: "Disabled until implemented",
-      detail: "Workday remains clearly marked as unavailable so the UI does not overclaim support.",
-      tone: "neutral",
-    },
-  ] as const;
-
-  return (
-    <section className="rounded-[28px] border border-ink/10 bg-white/88 p-5 shadow-soft backdrop-blur">
-      <p className="font-mono text-xs uppercase tracking-[0.24em] text-ember">
-        Platform honesty
-      </p>
-      <h2 className="mt-3 text-2xl font-semibold text-ink">
-        What this crawler does and does not cover
-      </h2>
-      <div className="mt-4 grid gap-3">
-        {notes.map((note) => (
-          <div
-            key={note.label}
-            className={cn(
-              "rounded-[22px] border px-4 py-4",
-              note.tone === "amber"
-                ? "border-amber-200 bg-amber-50/80"
-                : "border-ink/10 bg-sand/45",
-            )}
-          >
-            <div className="text-sm font-semibold text-ink">{note.label}</div>
-            <div className="mt-2 text-sm leading-6 text-slate">{note.detail}</div>
-          </div>
-        ))}
       </div>
     </section>
   );

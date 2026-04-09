@@ -4,7 +4,7 @@ Job Crawler is a Next.js App Router application for running transparent, source-
 
 The project is intentionally conservative:
 
-- discovery starts from configured seeds and limited public ATS search, not open-ended scraping of arbitrary pages
+- Greenhouse discovery starts from a maintained board registry, with public ATS search used only as an additive supplement
 - providers only run against discovered sources they explicitly support
 - link validation is deferred by default unless the selected crawl mode asks for inline validation
 - unsupported or partial platforms stay labeled as such in the UI instead of being presented as active crawlers
@@ -58,7 +58,7 @@ npm test
 ## Current product behavior
 
 - Search by target title, country, state, city, experience levels, experience matching mode, crawl mode, and selected platforms.
-- Discover configured seeds and query-discovered public ATS sources before any provider-specific fetch work starts.
+- Discover registry-backed Greenhouse boards, configured sources, and query-discovered public ATS sources before any provider-specific fetch work starts.
 - Route sources only to the provider families that support them.
 - Normalize all results into one `JobListing` shape with source provenance, experience classification, validation state, and dedupe keys.
 - Deduplicate by canonical URL, resolved URL, apply URL, source lookup keys, and finally normalized content fingerprint.
@@ -70,7 +70,7 @@ npm test
 The crawler now runs in a discovery-first pipeline:
 
 1. `searchFiltersSchema` validates and normalizes the requested search filters.
-2. Discovery resolves configured seeds plus query-discovered public ATS sources for the selected platform scope.
+2. Discovery resolves the Greenhouse registry, configured seeds, and query-discovered public ATS sources for the selected platform scope.
 3. Source-driven providers receive only the discovered source types they support.
 4. Providers normalize raw records into shared job seeds.
 5. The pipeline applies title, location, and experience filtering.
@@ -124,6 +124,8 @@ Implemented platform families:
 - Lever
 - Ashby
 - Company page
+
+Greenhouse is the reliability focus of the current MVP. The other enabled families remain available, but they are not the hard requirement this iteration is optimized around.
 
 Visible but not active crawler targets:
 
@@ -186,9 +188,17 @@ tests/
 ### Source discovery and providers
 
 - `lib/server/discovery/service.ts`
-  Resolves configured public sources from environment/config and narrows them to the selected implemented platforms.
+  Resolves the Greenhouse registry, configured public sources, and optional public-search additions, then narrows them to the selected implemented platforms.
+- `lib/server/discovery/greenhouse-registry.ts`
+  Holds the built-in Greenhouse board registry and helpers for merging env-provided additions.
 - `lib/server/providers/*`
   Source-driven providers. Each provider only handles the source family it explicitly supports.
+
+## Extending the Greenhouse registry
+
+- The app ships with a maintained built-in Greenhouse board registry so Greenhouse crawling is not dependent on search-engine discovery.
+- To add more public Greenhouse boards locally, append comma-separated tokens in `.env.local` with `GREENHOUSE_BOARD_REGISTRY_APPEND`.
+- `GREENHOUSE_BOARD_TOKENS` is still supported as a legacy alias, but `GREENHOUSE_BOARD_REGISTRY_APPEND` is the preferred setting going forward.
 
 ### Persistence
 
