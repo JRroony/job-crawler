@@ -226,6 +226,35 @@ export const crawlSourceStatuses = [
 
 export const crawlSourceStatusSchema = z.enum(crawlSourceStatuses);
 
+export const publicSearchDiscoveryDiagnosticsSchema = z.object({
+  generatedQueries: z.number().int().nonnegative().default(0),
+  executedQueries: z.number().int().nonnegative().default(0),
+  skippedQueries: z.number().int().nonnegative().default(0),
+  maxQueries: z.number().int().nonnegative().default(0),
+  maxSources: z.number().int().nonnegative().default(0),
+  maxResultsPerQuery: z.number().int().nonnegative().default(0),
+  roleQueryCount: z.number().int().nonnegative().default(0),
+  locationClauseCount: z.number().int().nonnegative().default(0),
+  rawResultsHarvested: z.number().int().nonnegative().default(0),
+  normalizedUrlsHarvested: z.number().int().nonnegative().default(0),
+  platformMatchedUrls: z.number().int().nonnegative().default(0),
+  sourcesAdded: z.number().int().nonnegative().default(0),
+  engineRequestCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
+  engineResultCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
+  dropReasonCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
+  sampleGeneratedQueries: z.array(z.string().min(1)).max(12).default([]),
+  sampleExecutedQueries: z.array(z.string().min(1)).max(12).default([]),
+});
+
+export const discoveryStageDiagnosticsSchema = z.object({
+  configuredSources: z.number().int().nonnegative().default(0),
+  curatedSources: z.number().int().nonnegative().default(0),
+  publicSources: z.number().int().nonnegative().default(0),
+  discoveredBeforeFiltering: z.number().int().nonnegative().default(0),
+  discoveredAfterFiltering: z.number().int().nonnegative().default(0),
+  publicSearch: publicSearchDiscoveryDiagnosticsSchema.optional(),
+});
+
 export const crawlDiagnosticsSchema = z.object({
   discoveredSources: z.number().int().nonnegative().default(0),
   crawledSources: z.number().int().nonnegative().default(0),
@@ -235,6 +264,7 @@ export const crawlDiagnosticsSchema = z.object({
   excludedByExperience: z.number().int().nonnegative().default(0),
   dedupedOut: z.number().int().nonnegative().default(0),
   validationDeferred: z.number().int().nonnegative().default(0),
+  discovery: discoveryStageDiagnosticsSchema.optional(),
 });
 
 export const crawlProviderSummarySchema = z.object({
@@ -469,3 +499,7 @@ export type LinkStatus = z.infer<typeof linkStatusSchema>;
 export type CompanyPageSourceConfig = z.infer<typeof companyPageSourceConfigSchema>;
 export type CrawlResponse = z.infer<typeof crawlResponseSchema>;
 export type CrawlDiagnostics = CrawlRun["diagnostics"];
+export type PublicSearchDiscoveryDiagnostics = z.infer<
+  typeof publicSearchDiscoveryDiagnosticsSchema
+>;
+export type DiscoveryStageDiagnostics = z.infer<typeof discoveryStageDiagnosticsSchema>;

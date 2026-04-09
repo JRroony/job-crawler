@@ -198,20 +198,40 @@ const experienceMatchers: Array<{ level: ExperienceLevel; patterns: RegExp[] }> 
     ],
   },
   {
+    level: "staff",
+    patterns: [
+      /\bstaff\b/,
+      /\bprincipal\b/,
+      /\bdistinguished\b/,
+      /\bfellow\b/,
+      /\bmember of technical staff\b/,
+      /\bmts\b/,
+      /\blevel 4\b/,
+      /\blevel 5\b/,
+      /\biv\b/,
+      /\bv\b/,
+    ],
+  },
+  {
+    level: "senior",
+    patterns: [
+      /\bsenior\b/,
+      /\bsr\b/,
+      /\blead\b/,
+      /\barchitect\b/,
+      /\bmanager\b/,
+      /\bdirector\b/,
+      /\blevel 3\b/,
+      /\biii\b/,
+    ],
+  },
+  {
     level: "junior",
     patterns: [/\bjunior\b/, /\bassociate\b/, /\bentry associate\b/],
   },
   {
-    level: "staff",
-    patterns: [/\bstaff\b/, /\bprincipal\b/, /\bdistinguished\b/],
-  },
-  {
-    level: "senior",
-    patterns: [/\bsenior\b/, /\bsr\b/, /\blead\b/, /\bmanager\b/],
-  },
-  {
     level: "mid",
-    patterns: [/\bmid\b/, /\bii\b/, /\biii\b/, /\blevel 2\b/, /\blevel 3\b/, /\bexperienced\b/],
+    patterns: [/\bmid\b/, /\bii\b/, /\blevel 2\b/, /\bexperienced\b/],
   },
 ];
 
@@ -244,25 +264,45 @@ const metadataExperienceMatchers: Array<{ level: ExperienceLevel; patterns: RegE
     ],
   },
   {
+    level: "staff",
+    patterns: [
+      /\bstaff\b/,
+      /\bprincipal\b/,
+      /\bdistinguished\b/,
+      /\bfellow\b/,
+      /\bmember of technical staff\b/,
+      /\bmts\b/,
+      /\blevel 4\b/,
+      /\blevel 5\b/,
+      /\biv\b/,
+      /\bv\b/,
+    ],
+  },
+  {
+    level: "senior",
+    patterns: [
+      /\bsenior\b/,
+      /\bsr\b/,
+      /\blead\b/,
+      /\barchitect\b/,
+      /\bmanager\b/,
+      /\bdirector\b/,
+      /\blevel 3\b/,
+      /\biii\b/,
+    ],
+  },
+  {
     level: "junior",
     patterns: [/\bjunior\b/, /\bassociate\b/],
   },
   {
-    level: "staff",
-    patterns: [/\bstaff\b/, /\bprincipal\b/, /\bdistinguished\b/],
-  },
-  {
-    level: "senior",
-    patterns: [/\bsenior\b/, /\bsr\b/],
-  },
-  {
     level: "mid",
-    patterns: [/\bmid\b/, /\bmid level\b/, /\blevel 2\b/, /\blevel 3\b/, /\bexperienced\b/],
+    patterns: [/\bmid\b/, /\bmid level\b/, /\blevel 2\b/, /\bexperienced\b/],
   },
 ];
 
 const experienceMetadataHintPattern =
-  /\b(intern|internship|co op|cooperative education|apprentice|working student|student program|student opportunity|student role|student position|for students|new grad|new graduate|recent grad|recent graduate|entry level|early career|junior|associate|mid level|senior|staff|principal|distinguished|level 2|level 3|experienced|years|year|yrs|yoe|experience)\b/;
+  /\b(intern|internship|co op|cooperative education|apprentice|working student|student program|student opportunity|student role|student position|for students|new grad|new graduate|recent grad|recent graduate|entry level|early career|junior|associate|mid level|senior|staff|principal|distinguished|fellow|member of technical staff|mts|lead|architect|manager|director|level [2-5]|ii|iii|iv|v|experienced|years|year|yrs|yoe|experience)\b/;
 
 const negativeExperienceMetadataHintPatterns = [
   /\bif you are an? (?:intern|new grad|new graduate|staff|junior|senior|associate|working student|apprentice)\b/,
@@ -274,7 +314,7 @@ const negativeExperienceMetadataHintPatterns = [
 ];
 
 const experiencePromptSignalPattern =
-  /\b(intern(ship)?|co op|cooperative education|apprentice(ship)?|working student|student(?: program| opportunity| role| position)?|for students|campus|university recruiting|new grads?|new graduates?|recent grads?|recent graduates?|graduate program|entry(?: |-)?level|early career|early talent|junior|jr|associate|mid(?: |-)?level|senior|sr|staff|principal|distinguished|lead|manager|experienced|career level|seniority|level [2-5]|ii|iii|iv|v|requirements?|qualifications?|minimum qualifications?|preferred qualifications?|years?|yrs?|yoe)\b/i;
+  /\b(intern(ship)?|co op|cooperative education|apprentice(ship)?|working student|student(?: program| opportunity| role| position)?|for students|campus|university recruiting|new grads?|new graduates?|recent grads?|recent graduates?|graduate program|entry(?: |-)?level|early career|early talent|junior|jr|associate|mid(?: |-)?level|senior|sr|staff|principal|distinguished|fellow|member of technical staff|mts|lead|architect|manager|director|experienced|career level|seniority|level [2-5]|ii|iii|iv|v|requirements?|qualifications?|minimum qualifications?|preferred qualifications?|years?|yrs?|yoe)\b/i;
 
 const experiencePromptYearPattern =
   /\b\d+(?:\.\d+)?\s*(?:\+|plus)?\s*(?:-|to|–|—)?\s*\d*(?:\.\d+)?\s*(?:years?|yrs?|yoe)\b/i;
@@ -365,6 +405,17 @@ const broadSoftwareNegativePhrases = [
   "finance",
   "account",
   "legal",
+] as const;
+
+const broadSoftwareDiscoveryRoleQueries = [
+  "software engineer",
+  "software developer",
+  "software development engineer",
+  "backend engineer",
+  "full stack engineer",
+  "platform engineer",
+  "frontend engineer",
+  "swe",
 ] as const;
 
 const titleRoleDefinitions: TitleRoleDefinition[] = [
@@ -876,6 +927,30 @@ function resolveExperienceMatchMode(filters: SearchFilters): ExperienceMatchMode
 
 export function normalizeTitleToCanonicalForm(value?: string) {
   return analyzeTitle(value).canonical;
+}
+
+export function buildDiscoveryRoleQueries(value?: string) {
+  const analyzed = analyzeTitle(value);
+  const queries: string[] = [];
+  const seen = new Set<string>();
+
+  const push = (candidate?: string) => {
+    const normalized = normalizeComparableText(candidate);
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+
+    seen.add(normalized);
+    queries.push(normalized);
+  };
+
+  if (isBroadSoftwareQuery(analyzed)) {
+    broadSoftwareDiscoveryRoleQueries.forEach(push);
+    return queries;
+  }
+
+  push(analyzed.canonical);
+  return queries;
 }
 
 export function getTitleMatchResult(jobTitle: string, queryTitle: string): TitleMatchResult {

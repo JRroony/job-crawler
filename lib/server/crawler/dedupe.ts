@@ -33,7 +33,7 @@ function isDuplicate(left: DedupeCandidate, right: DedupeCandidate) {
     return true;
   }
 
-  return left.contentFingerprint === right.contentFingerprint;
+  return left.sourceLookupKeys.some((lookupKey) => right.sourceLookupKeys.includes(lookupKey));
 }
 
 function mergeCandidates(left: DedupeCandidate, right: DedupeCandidate): DedupeCandidate {

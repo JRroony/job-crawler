@@ -54,6 +54,40 @@ describe("experience classification", () => {
     });
   });
 
+  it.each([
+    {
+      label: "lead description",
+      hints: ["Lead Software Engineer, distributed systems"],
+      expected: "senior",
+    },
+    {
+      label: "level iii metadata",
+      hints: ["Software Engineer III"],
+      expected: "senior",
+    },
+    {
+      label: "member of technical staff metadata",
+      hints: ["Member of Technical Staff"],
+      expected: "staff",
+    },
+    {
+      label: "principal metadata",
+      hints: ["Principal Software Engineer"],
+      expected: "staff",
+    },
+  ])("does not down-level $label to mid", ({ hints, expected }) => {
+    const classification = classifyExperience({
+      title: "Software Engineer",
+      structuredExperienceHints: hints,
+    });
+
+    expect(classification).toMatchObject({
+      inferredLevel: expected,
+      source: "structured_metadata",
+      isUnspecified: false,
+    });
+  });
+
   it("falls back to unspecified when no experience clues exist", () => {
     const classification = classifyExperience({
       title: "Software Engineer",

@@ -6,8 +6,22 @@ import { getDefaultGreenhouseRegistryEntries } from "@/lib/server/discovery/gree
 import {
   buildPublicSearchQueryPlan,
   discoverSourcesFromPublicSearch,
+  discoverSourcesFromPublicSearchDetailed,
 } from "@/lib/server/discovery/public-search";
 import { discoverConfiguredSources, discoverSources } from "@/lib/server/discovery/service";
+
+const discoveryEnvDefaults = {
+  greenhouseBoardTokens: ["openai"],
+  leverSiteTokens: ["figma"],
+  ashbyBoardTokens: ["notion"],
+  companyPageSources: [],
+  PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
+  PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 8,
+  PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 120,
+  PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 72,
+  PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: 4,
+  GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 24,
+};
 
 describe("source discovery", () => {
   it("classifies known ATS URLs and generic career pages", () => {
@@ -128,6 +142,7 @@ describe("source discovery", () => {
       },
       now: new Date("2026-04-07T00:00:00.000Z"),
       env: {
+        ...discoveryEnvDefaults,
         greenhouseBoardTokens: ["openai"],
         leverSiteTokens: ["figma"],
         ashbyBoardTokens: ["notion"],
@@ -138,8 +153,6 @@ describe("source discovery", () => {
             url: "https://careers.acme.com/feed.json",
           },
         ],
-        PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
-        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 8,
       },
     });
 
@@ -179,6 +192,7 @@ describe("source discovery", () => {
       },
       now: new Date("2026-04-07T00:00:00.000Z"),
       env: {
+        ...discoveryEnvDefaults,
         greenhouseBoardTokens: ["openai"],
         leverSiteTokens: ["figma"],
         ashbyBoardTokens: ["notion"],
@@ -189,8 +203,6 @@ describe("source discovery", () => {
             url: "https://careers.acme.com/feed.json",
           },
         ],
-        PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
-        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 8,
       },
     });
 
@@ -263,8 +275,18 @@ describe("source discovery", () => {
       },
     );
 
-    expect(plan.maxSources).toBe(24);
-    expect(plan.queries).toHaveLength(24);
+    expect(plan.maxSources).toBe(120);
+    expect(plan.maxQueries).toBe(72);
+    expect(plan.roleQueries).toEqual([
+      "software engineer",
+      "software developer",
+      "software development engineer",
+      "backend engineer",
+      "full stack engineer",
+      "platform engineer",
+      "frontend engineer",
+      "swe",
+    ]);
     expect(plan.platformPlans).toEqual([
       expect.objectContaining({
         platform: "greenhouse",
@@ -274,6 +296,7 @@ describe("source discovery", () => {
         locationClauses: [
           "",
           "remote us",
+          "remote usa",
           "remote united states",
           "seattle wa",
           "bellevue wa",
@@ -284,8 +307,28 @@ describe("source discovery", () => {
           "palo alto ca",
           "austin tx",
           "new york ny",
+          "boston ma",
+          "chicago il",
+          "washington dc",
+          "arlington va",
+          "reston va",
+          "herndon va",
+          "denver co",
+          "atlanta ga",
+          "los angeles ca",
+          "irvine ca",
+          "santa clara ca",
         ],
       }),
+    ]);
+    expect(plan.queries.length).toBeGreaterThan(300);
+    expect(plan.queries.slice(0, 6).map((query) => query.query)).toEqual([
+      "site:boards.greenhouse.io software engineer",
+      "site:job-boards.greenhouse.io software engineer",
+      "site:boards.greenhouse.io software engineer remote us",
+      "site:job-boards.greenhouse.io software engineer remote us",
+      "site:boards.greenhouse.io software engineer remote usa",
+      "site:job-boards.greenhouse.io software engineer remote usa",
     ]);
     expect(new Set(plan.queries.map((query) => query.query)).size).toBe(plan.queries.length);
     expect(plan.queries.some((query) => query.query.includes("\""))).toBe(false);
@@ -330,7 +373,7 @@ describe("source discovery", () => {
     );
     expect(locationClauses).not.toContain("remote us");
     expect(locationClauses).not.toContain("seattle wa");
-    expect(locationClauses.length).toBeLessThanOrEqual(11);
+    expect(locationClauses.length).toBeLessThanOrEqual(23);
   });
 
   it("scopes explicit Greenhouse city searches to the explicit city clause plus the broad fallback", () => {
@@ -355,15 +398,19 @@ describe("source discovery", () => {
       }),
       locationClauses: ["", "seattle wa"],
     });
-    expect(plan.queries.map((query) => query.query)).toEqual([
+    expect(plan.queries.slice(0, 8).map((query) => query.query)).toEqual([
       "site:boards.greenhouse.io software engineer",
       "site:job-boards.greenhouse.io software engineer",
       "site:boards.greenhouse.io software engineer seattle wa",
       "site:job-boards.greenhouse.io software engineer seattle wa",
+      "site:boards.greenhouse.io software developer",
+      "site:job-boards.greenhouse.io software developer",
+      "site:boards.greenhouse.io software developer seattle wa",
+      "site:job-boards.greenhouse.io software developer seattle wa",
     ]);
   });
 
-  it("falls back from challenged DuckDuckGo HTML to Bing RSS and keeps greenhouse discovery queries broad", async () => {
+  it("prefers Bing RSS first, skips DuckDuckGo when Bing already returns enough Greenhouse matches, and keeps queries broad", async () => {
     const requests: string[] = [];
     const bingRss = `<?xml version="1.0" encoding="utf-8" ?>
       <rss version="2.0">
@@ -374,30 +421,17 @@ describe("source discovery", () => {
           <item>
             <link>https://www.boards.greenhouse.io/voltrondata/jobs/4351155006</link>
           </item>
+          <item>
+            <link>https://boards.greenhouse.io/chalkinc/jobs/4031707005</link>
+          </item>
+          <item>
+            <link>https://boards.greenhouse.io/datadog/jobs/1234567</link>
+          </item>
         </channel>
       </rss>`;
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       requests.push(url);
-
-      if (url.startsWith("https://html.duckduckgo.com/")) {
-        return new Response(
-          `
-            <html>
-              <body>
-                <form id="challenge-form"></form>
-                <div>Unfortunately, bots use DuckDuckGo too.</div>
-              </body>
-            </html>
-          `,
-          {
-            status: 200,
-            headers: {
-              "content-type": "text/html",
-            },
-          },
-        );
-      }
 
       if (url.startsWith("https://www.bing.com/search")) {
         return new Response(bingRss, {
@@ -447,17 +481,33 @@ describe("source discovery", () => {
         "site:job-boards.greenhouse.io software engineer",
       ]),
     );
+    expect(requests.some((requestUrl) => requestUrl.startsWith("https://html.duckduckgo.com/"))).toBe(false);
     expect(requestedQueries.some((query) => query?.includes("United States"))).toBe(false);
     expect(requestedQueries.some((query) => query?.includes("\""))).toBe(false);
     expect(requestedQueries.some((query) => query?.includes("Senior"))).toBe(false);
   });
 
-  it("stops issuing lower-priority public search queries once 24 unique sources have been found", async () => {
+  it("respects the configured query budget, returns more than 24 sources when allowed, and reports funnel diagnostics", async () => {
     let queryIndex = 0;
     const requestedQueries: string[] = [];
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const query = new URL(String(input)).searchParams.get("q") ?? "";
-      requestedQueries.push(query);
+      const requestUrl = String(input);
+      const query = new URL(requestUrl).searchParams.get("q") ?? "";
+      if (requestUrl.startsWith("https://html.duckduckgo.com/")) {
+        requestedQueries.push(query);
+      }
+
+      if (requestUrl.startsWith("https://www.bing.com/search")) {
+        return new Response(
+          `<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel></channel></rss>`,
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/rss+xml",
+            },
+          },
+        );
+      }
 
       const html = `
         <html>
@@ -487,9 +537,11 @@ describe("source discovery", () => {
       },
       {
         maxResultsPerQuery: 4,
+        maxQueries: 8,
+        maxSources: 40,
       },
     );
-    const sources = await discoverSourcesFromPublicSearch(
+    const result = await discoverSourcesFromPublicSearchDetailed(
       {
         title: "Software Engineer",
         country: "United States",
@@ -498,11 +550,34 @@ describe("source discovery", () => {
       {
         fetchImpl,
         maxResultsPerQuery: 4,
+        maxQueries: 8,
+        maxSources: 40,
       },
     );
 
-    expect(sources).toHaveLength(24);
-    expect(requestedQueries).toEqual(plan.queries.slice(0, 6).map((query) => query.query));
+    expect(result.sources).toHaveLength(32);
+    expect(result.diagnostics).toMatchObject({
+      generatedQueries: plan.queries.length,
+      executedQueries: 8,
+      skippedQueries: plan.queries.length - 8,
+      maxQueries: 8,
+      maxSources: 40,
+      maxResultsPerQuery: 4,
+      rawResultsHarvested: 32,
+      platformMatchedUrls: 32,
+      sourcesAdded: 32,
+    });
+    expect(result.diagnostics.dropReasonCounts.query_budget).toBe(plan.queries.length - 8);
+    expect(requestedQueries).toEqual([
+      "site:boards.greenhouse.io software engineer",
+      "site:job-boards.greenhouse.io software engineer",
+      "site:boards.greenhouse.io software engineer remote us",
+      "site:job-boards.greenhouse.io software engineer remote us",
+      "site:boards.greenhouse.io software engineer remote usa",
+      "site:job-boards.greenhouse.io software engineer remote usa",
+      "site:boards.greenhouse.io software engineer remote united states",
+      "site:job-boards.greenhouse.io software engineer remote united states",
+    ]);
   });
 
   it("returns non-zero Greenhouse registry sources even when public search is disabled", async () => {
@@ -518,6 +593,7 @@ describe("source discovery", () => {
           status: 500,
         })) as unknown as typeof fetch,
       env: {
+        ...discoveryEnvDefaults,
         greenhouseBoardTokens: ["openai", "benchling", "datadog"],
         leverSiteTokens: [],
         ashbyBoardTokens: [],
@@ -571,6 +647,7 @@ describe("source discovery", () => {
       now: new Date("2026-04-08T00:00:00.000Z"),
       fetchImpl,
       env: {
+        ...discoveryEnvDefaults,
         greenhouseBoardTokens: ["openai", "benchling"],
         leverSiteTokens: [],
         ashbyBoardTokens: [],
@@ -600,6 +677,7 @@ describe("source discovery", () => {
       },
       now: new Date("2026-04-08T00:00:00.000Z"),
       env: {
+        ...discoveryEnvDefaults,
         greenhouseBoardTokens: [],
         leverSiteTokens: [],
         ashbyBoardTokens: [],

@@ -18,6 +18,10 @@ const envSchema = z.object({
     .default("true")
     .transform((value) => value === "true"),
   PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: z.coerce.number().int().positive().default(16),
+  PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: z.coerce.number().int().positive().default(120),
+  PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: z.coerce.number().int().positive().default(72),
+  PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: z.coerce.number().int().positive().default(4),
+  GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: z.coerce.number().int().positive().default(24),
 });
 
 type ParsedEnv = z.infer<typeof envSchema>;
@@ -52,6 +56,14 @@ export function getEnv() {
         process.env.PUBLIC_SEARCH_DISCOVERY_ENABLED ?? "true",
       PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS:
         process.env.PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS ?? "16",
+      PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES:
+        process.env.PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES ?? "120",
+      PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES:
+        process.env.PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES ?? "72",
+      PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY:
+        process.env.PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY ?? "4",
+      GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES:
+        process.env.GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES ?? "24",
     });
   }
 

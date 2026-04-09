@@ -263,7 +263,7 @@ export function buildUsDiscoveryLocationClauses(
 
   if (intent.kind === "broad_us") {
     const metroClauses = metrosByPriority
-      .slice(0, Math.max(0, maxClauses - 3))
+      .slice(0, Math.max(0, maxClauses - 4))
       .map((metro) => formatMetroClause(metro.city, metro.stateCode));
 
     return {
@@ -271,6 +271,7 @@ export function buildUsDiscoveryLocationClauses(
       clauses: dedupeLocationClauses([
         "",
         "remote us",
+        "remote usa",
         "remote united states",
         ...metroClauses,
       ]).slice(0, maxClauses),

@@ -195,6 +195,91 @@ describe("JobCrawlerRepository", () => {
     expect(storedJobs[0].postedAt).toBe("2026-03-21T00:00:00.000Z");
   });
 
+  it("keeps distinct same-title same-location jobs separate when their source ids and URLs differ", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      {
+        title: "Software Engineer",
+      },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const crawlRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+    );
+
+    await repository.persistJobs(crawlRun._id, [
+      {
+        title: "Software Engineer",
+        company: "Acme",
+        country: "United States",
+        state: "California",
+        city: "San Francisco",
+        locationText: "San Francisco, California, United States",
+        experienceLevel: "mid",
+        sourcePlatform: "greenhouse",
+        sourceJobId: "role-a",
+        sourceUrl: "https://example.com/jobs/a",
+        applyUrl: "https://example.com/jobs/a/apply",
+        postedAt: "2026-03-20T00:00:00.000Z",
+        discoveredAt: "2026-03-29T00:00:00.000Z",
+        linkStatus: "unknown",
+        rawSourceMetadata: {},
+        sourceProvenance: [
+          {
+            sourcePlatform: "greenhouse",
+            sourceJobId: "role-a",
+            sourceUrl: "https://example.com/jobs/a",
+            applyUrl: "https://example.com/jobs/a/apply",
+            discoveredAt: "2026-03-29T00:00:00.000Z",
+            rawSourceMetadata: {},
+          },
+        ],
+        sourceLookupKeys: ["greenhouse:role-a"],
+        companyNormalized: "acme",
+        titleNormalized: "software engineer",
+        locationNormalized: "san francisco california united states",
+        contentFingerprint: "fingerprint-1",
+      },
+      {
+        title: "Software Engineer",
+        company: "Acme",
+        country: "United States",
+        state: "California",
+        city: "San Francisco",
+        locationText: "San Francisco, California, United States",
+        experienceLevel: "mid",
+        sourcePlatform: "greenhouse",
+        sourceJobId: "role-b",
+        sourceUrl: "https://example.com/jobs/b",
+        applyUrl: "https://example.com/jobs/b/apply",
+        postedAt: "2026-03-21T00:00:00.000Z",
+        discoveredAt: "2026-03-29T00:00:00.000Z",
+        linkStatus: "unknown",
+        rawSourceMetadata: {},
+        sourceProvenance: [
+          {
+            sourcePlatform: "greenhouse",
+            sourceJobId: "role-b",
+            sourceUrl: "https://example.com/jobs/b",
+            applyUrl: "https://example.com/jobs/b/apply",
+            discoveredAt: "2026-03-29T00:00:00.000Z",
+            rawSourceMetadata: {},
+          },
+        ],
+        sourceLookupKeys: ["greenhouse:role-b"],
+        companyNormalized: "acme",
+        titleNormalized: "software engineer",
+        locationNormalized: "san francisco california united states",
+        contentFingerprint: "fingerprint-1",
+      },
+    ]);
+
+    const storedJobs = db.snapshot<JobListing>(collectionNames.jobs);
+    expect(storedJobs).toHaveLength(2);
+  });
+
   it("normalizes legacy saved search filters when they are read back", async () => {
     const db = new FakeDb();
     const repository = new JobCrawlerRepository(db);

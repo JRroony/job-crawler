@@ -7,9 +7,9 @@ type StateTone = "neutral" | "amber" | "red";
 
 export function MessageBanner(props: { message: string }) {
   return (
-    <div className="rounded-[24px] border border-red-200 bg-red-50 px-4 py-4">
+    <div className="rounded-[24px] border border-red-200/80 bg-red-50/85 px-4 py-4">
       <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-red-700">
-        Request issue
+        Search issue
       </div>
       <div className="mt-2 text-sm leading-6 text-red-800">{props.message}</div>
     </div>
@@ -29,22 +29,22 @@ export function StatePanel(props: {
   return (
     <section
       className={cn(
-        "rounded-[28px] border p-8 shadow-soft backdrop-blur",
-        tone === "neutral" && "border-ink/10 bg-white/88",
-        tone === "amber" && "border-amber-200 bg-amber-50/80",
-        tone === "red" && "border-red-200 bg-red-50/90",
+        "rounded-[28px] border p-8 shadow-[0_18px_48px_rgba(15,23,42,0.05)]",
+        tone === "neutral" && "border-ink/8 bg-white",
+        tone === "amber" && "border-amber-200/80 bg-amber-50/80",
+        tone === "red" && "border-red-200/80 bg-red-50/85",
       )}
     >
       <div className="mx-auto max-w-4xl text-center">
         <div
           className={cn(
             "inline-flex rounded-full px-3 py-1 font-mono text-[11px] uppercase tracking-[0.18em]",
-            tone === "neutral" && "border border-ink/10 bg-sand/50 text-slate",
+            tone === "neutral" && "border border-ink/8 bg-mist/50 text-slate",
             tone === "amber" && "border border-amber-200 bg-white/80 text-amber-900",
             tone === "red" && "border border-red-200 bg-white/80 text-red-700",
           )}
         >
-          Crawl state
+          Search state
         </div>
         <h2 className="mt-4 text-2xl font-semibold text-ink">{props.title}</h2>
         <p className="mx-auto mt-3 max-w-3xl text-base leading-7 text-slate">
@@ -57,7 +57,7 @@ export function StatePanel(props: {
           {props.highlights.map((highlight) => (
             <div
               key={highlight}
-              className="rounded-[22px] border border-ink/10 bg-white/70 px-4 py-4 text-sm leading-6 text-ink"
+              className="rounded-[22px] border border-ink/8 bg-white px-4 py-4 text-sm leading-6 text-ink"
             >
               {highlight}
             </div>
@@ -91,8 +91,8 @@ export function NoticeBanner(props: {
       className={cn(
         "rounded-[28px] border px-5 py-4",
         props.tone === "amber"
-          ? "border-amber-200 bg-amber-50"
-          : "border-tide/20 bg-[rgba(63,114,175,0.09)]",
+          ? "border-amber-200/80 bg-amber-50/85"
+          : "border-tide/20 bg-[rgba(63,114,175,0.07)]",
       )}
     >
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
@@ -144,18 +144,18 @@ export function NoticeBanner(props: {
 
 export function LoadingPanel() {
   const steps = [
-    "Discovering registry-backed and supplemental public sources",
-    "Running the enabled provider families",
-    "Normalizing, deduping, and preparing saved jobs",
+    "Discovering public job sources",
+    "Fetching matching jobs from enabled platforms",
+    "Normalizing and preparing the result list",
   ];
 
   return (
-    <section className="rounded-[28px] border border-ink/10 bg-white/88 p-8 shadow-soft backdrop-blur">
+    <section className="rounded-[28px] border border-ink/8 bg-white p-8 shadow-[0_18px_48px_rgba(15,23,42,0.05)]">
       <div className="font-mono text-xs uppercase tracking-[0.24em] text-ember">
-        Crawl in progress
+        Search in progress
       </div>
       <h2 className="mt-3 text-2xl font-semibold text-ink">
-        Building an operationally honest result set
+        Gathering fresh job results
       </h2>
       <div className="mt-5 grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
         <div className="space-y-3">

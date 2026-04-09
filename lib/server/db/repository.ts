@@ -254,8 +254,7 @@ export class JobCrawlerRepository {
       }
     }
 
-    const byFingerprint = await this.jobs().findOne({ contentFingerprint: job.contentFingerprint });
-    return byFingerprint ? parseStoredJob(byFingerprint) : null;
+    return null;
   }
 
   private searches() {

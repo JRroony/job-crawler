@@ -1,4 +1,8 @@
-import type { CompanyPageSourceConfig, SearchFilters } from "@/lib/types";
+import type {
+  CompanyPageSourceConfig,
+  DiscoveryStageDiagnostics,
+  SearchFilters,
+} from "@/lib/types";
 
 export const discoveredPlatforms = [
   "greenhouse",
@@ -90,8 +94,14 @@ export type DiscoveryInput = {
   fetchImpl?: typeof fetch;
 };
 
+export type DiscoveryExecution = {
+  sources: DiscoveredSource[];
+  diagnostics: DiscoveryStageDiagnostics;
+};
+
 export type DiscoveryService = {
   discover(input: DiscoveryInput): Promise<DiscoveredSource[]>;
+  discoverWithDiagnostics?(input: DiscoveryInput): Promise<DiscoveryExecution>;
 };
 
 export function isGreenhouseSource(source: DiscoveredSource): source is GreenhouseDiscoveredSource {

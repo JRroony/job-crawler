@@ -71,22 +71,28 @@ describe("dedupeJobs", () => {
     expect(result[0].sourceProvenance).toHaveLength(2);
   });
 
-  it("falls back to normalized company title and location", () => {
+  it("does not merge distinct jobs that only share company, title, and location", () => {
     const result = dedupeJobs([
       createCandidate({
         canonicalUrl: undefined,
         resolvedUrl: undefined,
+        applyUrl: "https://example.com/job/a/apply",
+        sourceUrl: "https://example.com/job/a",
+        sourceJobId: "role-a",
+        sourceLookupKeys: ["greenhouse:role-a"],
       }),
       createCandidate({
         canonicalUrl: undefined,
         resolvedUrl: undefined,
-        sourcePlatform: "ashby",
-        sourceJobId: "3",
-        sourceLookupKeys: ["ashby:3"],
+        applyUrl: "https://example.com/job/b/apply",
+        sourceUrl: "https://example.com/job/b",
+        sourcePlatform: "greenhouse",
+        sourceJobId: "role-b",
+        sourceLookupKeys: ["greenhouse:role-b"],
       }),
     ]);
 
-    expect(result).toHaveLength(1);
+    expect(result).toHaveLength(2);
   });
 
   it("dedupes by apply URL when validation metadata is still unknown", () => {
@@ -115,6 +121,24 @@ describe("dedupeJobs", () => {
             rawSourceMetadata: {},
           },
         ],
+      }),
+    ]);
+
+    expect(result).toHaveLength(1);
+  });
+
+  it("dedupes by shared source lookup keys when the same job reappears with incomplete URL metadata", () => {
+    const result = dedupeJobs([
+      createCandidate({
+        canonicalUrl: undefined,
+        resolvedUrl: undefined,
+        applyUrl: "https://example.com/job/apply?ref=one",
+      }),
+      createCandidate({
+        canonicalUrl: undefined,
+        resolvedUrl: undefined,
+        applyUrl: "https://example.com/job/apply?ref=two",
+        sourceLookupKeys: ["greenhouse:1"],
       }),
     ]);
 

@@ -4,23 +4,24 @@
 
 :root {
   color-scheme: light;
+  --page-background: #f6f8fb;
+  --page-background-accent: rgba(13, 59, 102, 0.08);
+  --page-background-warmth: rgba(239, 106, 50, 0.08);
+  --surface-border: rgba(16, 24, 32, 0.08);
 }
 
 html {
   min-height: 100%;
   background:
-    radial-gradient(circle at 12% 16%, rgba(239, 106, 50, 0.2), transparent 0 24%),
-    radial-gradient(circle at 88% 12%, rgba(13, 59, 102, 0.16), transparent 0 28%),
-    radial-gradient(circle at 50% 100%, rgba(40, 75, 63, 0.1), transparent 0 32%),
-    linear-gradient(180deg, #f7f1e8 0%, #f1eadf 100%);
+    radial-gradient(circle at top left, var(--page-background-warmth), transparent 0 24%),
+    radial-gradient(circle at top right, var(--page-background-accent), transparent 0 28%),
+    linear-gradient(180deg, #fbfcfe 0%, var(--page-background) 100%);
 }
 
 body {
   min-height: 100vh;
   font-family: var(--font-display), sans-serif;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.48), rgba(255, 255, 255, 0)),
-    radial-gradient(circle at top, rgba(255, 255, 255, 0.35), transparent 34%);
+  background: transparent;
   text-rendering: optimizeLegibility;
 }
 

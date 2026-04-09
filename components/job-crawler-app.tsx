@@ -2,9 +2,6 @@
 
 import { useMemo, useState } from "react";
 
-import { RecentSearchesPanel } from "@/components/job-crawler/recent-searches-panel";
-import { SearchControlsPanel } from "@/components/job-crawler/search-controls-panel";
-import { SourceCoveragePanel } from "@/components/job-crawler/source-coverage-panel";
 import {
   LoadingPanel,
   MessageBanner,
@@ -18,11 +15,22 @@ import {
   resolveCrawlMode,
   resolveRequestedPlatforms,
   resolveSelectedPlatforms,
+  togglePlatformSelection,
 } from "@/components/job-crawler/ui-config";
+import { DiagnosticsDrawer } from "@/components/job-search/diagnostics-drawer";
+import { FilterBar } from "@/components/job-search/filter-bar";
+import {
+  buildLocationInputValue,
+  defaultClientResultFilters,
+  filterJobsForDisplay,
+  parseLocationInput,
+} from "@/components/job-search/helpers";
+import { SearchBar } from "@/components/job-search/search-bar";
 import { ResultsTable } from "@/components/results-table";
 import type {
   CrawlDiagnostics,
   CrawlResponse,
+  ExperienceLevel,
   SearchDocument,
   SearchFilters,
 } from "@/lib/types";
@@ -38,7 +46,7 @@ import {
   sanitizeSearchFiltersInput,
   searchFiltersSchema,
 } from "@/lib/types";
-import { labelForExperience } from "@/lib/utils";
+import { formatRelativeMoment, labelForExperience } from "@/lib/utils";
 
 type JobCrawlerAppProps = {
   initialSearches: SearchDocument[];
@@ -103,6 +111,9 @@ export function JobCrawlerApp({
   initialError,
 }: JobCrawlerAppProps) {
   const [filters, setFilters] = useState<SearchFilters>(initialFilters);
+  const [keywordInput, setKeywordInput] = useState(initialFilters.title);
+  const [locationInput, setLocationInput] = useState(buildLocationInputValue(initialFilters));
+  const [clientResultFilters, setClientResultFilters] = useState(defaultClientResultFilters);
   const [recentSearches, setRecentSearches] = useState<SearchDocument[]>(() =>
     initialSearches.map(normalizeSearchDocumentForClient),
   );
@@ -113,6 +124,36 @@ export function JobCrawlerApp({
     initialError ? "initial_load" : null,
   );
   const [revalidatingIds, setRevalidatingIds] = useState<string[]>([]);
+
+  function buildLiveFilters(baseFilters: SearchFilters = filters) {
+    return normalizeSearchFiltersForClient({
+      ...baseFilters,
+      title: keywordInput,
+      ...parseLocationInput(locationInput),
+    });
+  }
+
+  function hydrateSearchForm(nextFilters: SearchFilters) {
+    setFilters(nextFilters);
+    setKeywordInput(nextFilters.title);
+    setLocationInput(buildLocationInputValue(nextFilters));
+  }
+
+  function clearSearchForm() {
+    hydrateSearchForm(initialFilters);
+    setClientResultFilters(defaultClientResultFilters);
+    setMessage("");
+    setErrorKind(null);
+  }
+
+  function clearBrowseFilters() {
+    setFilters((current) => ({
+      ...current,
+      platforms: undefined,
+      experienceLevels: undefined,
+    }));
+    setClientResultFilters(defaultClientResultFilters);
+  }
 
   async function submitSearch(nextFilters: SearchFilters) {
     const payloadResult = buildSearchRequestPayload(nextFilters);
@@ -176,7 +217,9 @@ export function JobCrawlerApp({
   async function rerunActiveSearch(searchId?: string) {
     const id = searchId ?? activeResult?.search._id;
     if (!id) {
-      await submitSearch(filters);
+      const nextFilters = buildLiveFilters();
+      hydrateSearchForm(nextFilters);
+      await submitSearch(nextFilters);
       return;
     }
 
@@ -263,7 +306,7 @@ export function JobCrawlerApp({
     const normalizedPayload = normalizeCrawlResponseForClient(payload);
 
     setActiveResult(normalizedPayload);
-    setFilters(normalizedPayload.search.filters);
+    hydrateSearchForm(normalizedPayload.search.filters);
     setViewState(resolveViewState(normalizedPayload));
     setErrorKind(null);
   }
@@ -275,7 +318,13 @@ export function JobCrawlerApp({
         : [],
     [activeResult],
   );
-  const selectedFilters = buildFilterBadges(filters);
+  const visibleJobs = useMemo(
+    () =>
+      activeResult
+        ? filterJobsForDisplay(activeResult.jobs, filters, clientResultFilters)
+        : [],
+    [activeResult, clientResultFilters, filters],
+  );
   const resultNotice = activeResult ? describeResultNotice(activeResult) : null;
   const zeroResultState =
     activeResult && activeResult.jobs.length === 0
@@ -285,39 +334,102 @@ export function JobCrawlerApp({
     viewState === "error" && !activeResult
       ? describeBlockingErrorState(errorKind, message)
       : null;
+  const resultsLocation = activeResult
+    ? buildLocationInputValue(activeResult.search.filters) || "All locations"
+    : buildLocationInputValue(buildLiveFilters()) || "All locations";
 
   return (
-    <main className="min-h-screen bg-[linear-gradient(180deg,#f5f2eb_0%,#eef3f8_100%)] text-ink">
-      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-        <div className="grid gap-6 xl:grid-cols-[1.4fr_0.6fr]">
-          <SearchControlsPanel
-            filters={filters}
-            selectedFilters={selectedFilters}
+    <main className="min-h-screen bg-[linear-gradient(180deg,#f7f8fb_0%,#f2f5f9_100%)] text-ink">
+      <div className="mx-auto max-w-[1440px] px-4 py-8 sm:px-6 lg:px-8">
+        <div className="space-y-4">
+          <SearchBar
+            keyword={keywordInput}
+            location={locationInput}
             isLoading={viewState === "loading"}
-            setFilters={setFilters}
+            onKeywordChange={setKeywordInput}
+            onLocationChange={setLocationInput}
             onSubmit={(event) => {
               event.preventDefault();
-              void submitSearch(filters);
+              const nextFilters = buildLiveFilters();
+              hydrateSearchForm(nextFilters);
+              void submitSearch(nextFilters);
             }}
-            onReset={() => setFilters(initialFilters)}
+            onReset={clearSearchForm}
           />
 
-          <div className="space-y-6">
-            {message && !blockingErrorState ? (
-              <MessageBanner message={message} />
-            ) : null}
+          <FilterBar
+            filters={filters}
+            resultFilters={clientResultFilters}
+            onTogglePlatform={(platform) =>
+              setFilters((current) => ({
+                ...current,
+                platforms: togglePlatformSelection(current.platforms, platform),
+              }))
+            }
+            onToggleExperience={(level) =>
+              setFilters((current) => ({
+                ...current,
+                experienceLevels: toggleExperienceLevel(current.experienceLevels, level),
+              }))
+            }
+            onToggleRemoteOnly={() =>
+              setClientResultFilters((current) => ({
+                ...current,
+                remoteOnly: !current.remoteOnly,
+              }))
+            }
+            onToggleVisaFriendlyOnly={() =>
+              setClientResultFilters((current) => ({
+                ...current,
+                visaFriendlyOnly: !current.visaFriendlyOnly,
+              }))
+            }
+            onPostedDateChange={(postedDate) =>
+              setClientResultFilters((current) => ({
+                ...current,
+                postedDate,
+              }))
+            }
+            onClear={clearBrowseFilters}
+          />
 
-            <RecentSearchesPanel
-              searches={recentSearches}
-              activeSearchId={activeResult?.search._id}
-              onLoad={(searchId) => void loadSearch(searchId)}
-              onRerun={(searchId) => void rerunActiveSearch(searchId)}
-              describeSearchMeta={describeSearchMeta}
-            />
-          </div>
+          <DiagnosticsDrawer
+            activeResult={
+              activeResult
+                ? {
+                    ...activeResult,
+                    sourceResults: visibleSourceResults,
+                  }
+                : null
+            }
+            recentSearches={recentSearches}
+            filters={filters}
+            onLoadSearch={(searchId) => void loadSearch(searchId)}
+            onRerunSearch={(searchId) => void rerunActiveSearch(searchId)}
+            onSetCrawlMode={(crawlMode) =>
+              setFilters((current) => ({
+                ...current,
+                crawlMode: crawlMode ?? "fast",
+              }))
+            }
+            onSetExperienceMatchMode={(experienceMatchMode) =>
+              setFilters((current) => ({
+                ...current,
+                experienceMatchMode: experienceMatchMode ?? "balanced",
+              }))
+            }
+            onToggleIncludeUnspecified={() =>
+              setFilters((current) => ({
+                ...current,
+                includeUnspecifiedExperience: !current.includeUnspecifiedExperience,
+              }))
+            }
+          />
+
+          {message && !blockingErrorState ? <MessageBanner message={message} /> : null}
         </div>
 
-        <div className="mt-8 space-y-6">
+        <div className="mt-6 space-y-6">
           {resultNotice ? (
             <NoticeBanner
               title={resultNotice.title}
@@ -327,18 +439,14 @@ export function JobCrawlerApp({
             />
           ) : null}
 
-          {visibleSourceResults.length > 0 ? (
-            <SourceCoveragePanel sourceResults={visibleSourceResults} />
-          ) : null}
-
           {viewState === "loading" ? (
             <LoadingPanel />
           ) : null}
 
           {viewState === "idle" ? (
             <StatePanel
-              title="Start with a clear job target"
-              description="Choose the role, location scope, experience policy, active platforms, and crawl mode before starting the crawl."
+              title="Start with a job search"
+              description="Enter a role and location, then refine the results with platform, experience, remote, visa, and posted-date filters."
               tone="neutral"
             />
           ) : null}
@@ -374,11 +482,36 @@ export function JobCrawlerApp({
           ) : null}
 
           {activeResult && activeResult.jobs.length > 0 ? (
-            <ResultsTable
-              jobs={activeResult.jobs}
-              onRevalidate={revalidateSingleJob}
-              revalidatingIds={revalidatingIds}
-            />
+            <>
+              <section className="rounded-[28px] border border-ink/8 bg-white px-5 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.05)] sm:px-6">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                  <div>
+                    <div className="text-sm font-medium uppercase tracking-[0.18em] text-slate/65">
+                      Current search
+                    </div>
+                    <h2 className="mt-2 text-2xl font-semibold tracking-tight text-ink">
+                      {activeResult.search.filters.title}
+                    </h2>
+                    <p className="mt-2 text-sm leading-6 text-slate">
+                      {resultsLocation} • updated {formatRelativeMoment(activeResult.search.updatedAt)}
+                    </p>
+                  </div>
+                  <div className="text-sm text-slate">
+                    {visibleJobs.length === activeResult.jobs.length
+                      ? `${visibleJobs.length} jobs ready to browse`
+                      : `${visibleJobs.length} of ${activeResult.jobs.length} jobs shown`}
+                  </div>
+                </div>
+              </section>
+
+              <ResultsTable
+                jobs={visibleJobs}
+                totalJobs={activeResult.jobs.length}
+                emptyMessage="No jobs match the current browse filters. Clear a few filters or rerun the search."
+                onRevalidate={revalidateSingleJob}
+                revalidatingIds={revalidatingIds}
+              />
+            </>
           ) : null}
         </div>
       </div>
@@ -500,6 +633,13 @@ function buildOperationalHighlights(
   highlights.push(
     `Discovered ${diagnostics.discoveredSources} source${diagnostics.discoveredSources === 1 ? "" : "s"} and crawled ${diagnostics.crawledSources}.`,
   );
+
+  if (diagnostics.discovery?.publicSearch) {
+    const publicSearch = diagnostics.discovery.publicSearch;
+    highlights.push(
+      `Public search generated ${publicSearch.generatedQueries} queries, executed ${publicSearch.executedQueries}, harvested ${publicSearch.rawResultsHarvested} raw results, and added ${publicSearch.sourcesAdded} sources.`,
+    );
+  }
 
   if (diagnostics.providerFailures > 0) {
     highlights.push(
@@ -911,6 +1051,22 @@ function validateSearchFiltersForClient(filters: Pick<SearchFilters, "title">) {
 function toUiOptionalString(value: unknown) {
   const normalized = normalizeOptionalSearchString(value);
   return typeof normalized === "string" ? normalized : "";
+}
+
+function toggleExperienceLevel(
+  selectedLevels: SearchFilters["experienceLevels"],
+  level: ExperienceLevel,
+) {
+  const nextLevels = new Set(selectedLevels ?? []);
+
+  if (nextLevels.has(level)) {
+    nextLevels.delete(level);
+  } else {
+    nextLevels.add(level);
+  }
+
+  const normalized = experienceLevels.filter((candidate) => nextLevels.has(candidate));
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function normalizeEnumValue<T extends string>(

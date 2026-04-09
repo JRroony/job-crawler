@@ -186,6 +186,10 @@ describe("crawl orchestration", () => {
             companyPageSources: [],
             PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
             PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
+            PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 120,
+            PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 72,
+            PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: 4,
+            GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 24,
           },
         });
       },
@@ -265,6 +269,10 @@ describe("crawl orchestration", () => {
             companyPageSources: [],
             PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
             PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
+            PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 120,
+            PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 72,
+            PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: 4,
+            GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 24,
           },
         });
       },

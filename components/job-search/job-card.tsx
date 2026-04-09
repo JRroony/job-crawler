@@ -1,0 +1,64 @@
+"use client";
+
+import React from "react";
+
+import type { JobListing } from "@/lib/types";
+import { cn, formatPostedDate } from "@/lib/utils";
+import { labelForProviderPlatform } from "@/components/job-crawler/ui-config";
+import { getJobTags } from "@/components/job-search/helpers";
+
+type JobCardProps = {
+  job: JobListing;
+  selected: boolean;
+  onSelect: (jobId: string) => void;
+};
+
+export function JobCard(props: JobCardProps) {
+  const tags = getJobTags(props.job);
+
+  return (
+    <button
+      type="button"
+      onClick={() => props.onSelect(props.job._id)}
+      aria-pressed={props.selected}
+      className={cn(
+        "w-full rounded-[24px] border px-4 py-4 text-left transition",
+        props.selected
+          ? "border-ink/20 bg-mist/60 shadow-[0_18px_40px_rgba(15,23,42,0.08)]"
+          : "border-ink/8 bg-white hover:border-ink/18 hover:bg-mist/35",
+      )}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="line-clamp-2 text-base font-semibold leading-6 text-ink">
+            {props.job.title}
+          </div>
+          <div className="mt-1 truncate text-sm text-slate">{props.job.company}</div>
+        </div>
+
+        <div className="rounded-full border border-ink/8 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate">
+          {labelForProviderPlatform(props.job.sourcePlatform)}
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate">
+        <span>{props.job.locationText}</span>
+        <span className="text-slate/35">•</span>
+        <span>{formatPostedDate(props.job.postedAt)}</span>
+      </div>
+
+      {tags.length > 0 ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {tags.map((tag) => (
+            <span
+              key={tag}
+              className="rounded-full border border-ink/8 bg-white px-3 py-1 text-[11px] font-medium uppercase tracking-[0.14em] text-slate"
+            >
+              {tag}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </button>
+  );
+}

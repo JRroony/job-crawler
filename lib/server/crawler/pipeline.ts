@@ -83,11 +83,21 @@ export async function executeCrawlPipeline(
 
   try {
     // Boundary: discovery is the only stage that knows where candidate sources come from.
-    const discoveredSources = await input.discovery.discover({
-      filters: normalizedFilters,
-      now: input.now,
-      fetchImpl: input.fetchImpl,
-    });
+    const discoveryExecution = input.discovery.discoverWithDiagnostics
+      ? await input.discovery.discoverWithDiagnostics({
+          filters: normalizedFilters,
+          now: input.now,
+          fetchImpl: input.fetchImpl,
+        })
+      : {
+          sources: await input.discovery.discover({
+            filters: normalizedFilters,
+            now: input.now,
+            fetchImpl: input.fetchImpl,
+          }),
+          diagnostics: undefined,
+        };
+    const discoveredSources = discoveryExecution.sources;
     const providerSources = selectedProviders.map((provider) =>
       discoveredSources.filter((source) => provider.supportsSource(source)),
     );
@@ -123,6 +133,7 @@ export async function executeCrawlPipeline(
     const diagnostics = createEmptyDiagnostics({
       discoveredSources: discoveredSources.length,
       crawledSources: providerSources.reduce((total, sources) => total + sources.length, 0),
+      discovery: discoveryExecution.diagnostics,
     });
 
     // Boundary: providers only extract from already classified sources.

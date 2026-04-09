@@ -151,6 +151,24 @@ describe("matchesFilters country matching", () => {
         locationText: "Austin, Texas",
       }),
     },
+    {
+      label: "Washington, DC",
+      job: createJob({
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Washington, DC",
+      }),
+    },
+    {
+      label: "Remote USA",
+      job: createJob({
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Remote USA",
+      }),
+    },
   ])("matches a United States country-only filter against inferred US location $label", ({ job }) => {
     expect(
       matchesFilters(

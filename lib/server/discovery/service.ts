@@ -4,9 +4,10 @@ import { slugToLabel } from "@/lib/server/crawler/helpers";
 import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import { lookupGreenhouseCompanyHint } from "@/lib/server/discovery/greenhouse-registry";
-import { discoverSourcesFromPublicSearch } from "@/lib/server/discovery/public-search";
+import { discoverSourcesFromPublicSearchDetailed } from "@/lib/server/discovery/public-search";
 import { resolveOperationalCrawlerPlatforms } from "@/lib/types";
 import type {
+  DiscoveryExecution,
   DiscoveredSource,
   DiscoveryInput,
   DiscoveryService,
@@ -21,11 +22,22 @@ type DiscoveryEnvSnapshot = Pick<
   | "companyPageSources"
   | "PUBLIC_SEARCH_DISCOVERY_ENABLED"
   | "PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS"
+  | "PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES"
+  | "PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES"
+  | "PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY"
+  | "GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES"
 >;
 
 export const defaultDiscoveryService: DiscoveryService = {
   async discover(input) {
-    return discoverSources({
+    const result = await discoverSourcesDetailed({
+      ...input,
+      env: getEnv(),
+    });
+    return result.sources;
+  },
+  async discoverWithDiagnostics(input) {
+    return discoverSourcesDetailed({
       ...input,
       env: getEnv(),
     });
@@ -33,6 +45,13 @@ export const defaultDiscoveryService: DiscoveryService = {
 };
 
 export async function discoverSources(input: DiscoveryInput & { env: DiscoveryEnvSnapshot }) {
+  const result = await discoverSourcesDetailed(input);
+  return result.sources;
+}
+
+export async function discoverSourcesDetailed(
+  input: DiscoveryInput & { env: DiscoveryEnvSnapshot },
+): Promise<DiscoveryExecution> {
   const selectedPlatforms = input.filters.platforms
     ? new Set<string>(resolveOperationalCrawlerPlatforms(input.filters.platforms))
     : null;
@@ -41,12 +60,20 @@ export async function discoverSources(input: DiscoveryInput & { env: DiscoveryEn
     discoverCatalogSources(input.filters.platforms),
     selectedPlatforms,
   );
-  const publicSources = input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED
-    ? await discoverSourcesFromPublicSearch(input.filters, {
+  const publicSearchResult = input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED
+    ? await discoverSourcesFromPublicSearchDetailed(input.filters, {
         fetchImpl: input.fetchImpl,
         maxResultsPerQuery: input.env.PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS,
+        maxSources: input.env.PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES,
+        maxQueries: input.env.PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES,
+        queryConcurrency: input.env.PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY,
+        maxGreenhouseLocationClauses: input.env.GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES,
       })
-    : [];
+    : {
+        sources: [] as DiscoveredSource[],
+        diagnostics: undefined,
+      };
+  const publicSources = publicSearchResult.sources;
   const discoveredBeforeFiltering = dedupeDiscoveredSources([
     ...configuredSources,
     ...curatedSources,
@@ -64,9 +91,24 @@ export async function discoverSources(input: DiscoveryInput & { env: DiscoveryEn
     discoveredBeforeFiltering,
     discoveredSources,
     publicSearchEnabled: input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED,
+    publicSearchDiagnostics: publicSearchResult.diagnostics,
   });
 
-  return discoveredSources;
+  return {
+    sources: discoveredSources,
+    diagnostics: {
+      configuredSources: configuredSources.length,
+      curatedSources: curatedSources.length,
+      publicSources: publicSources.length,
+      discoveredBeforeFiltering: discoveredBeforeFiltering.length,
+      discoveredAfterFiltering: discoveredSources.length,
+      ...(publicSearchResult.diagnostics
+        ? {
+            publicSearch: publicSearchResult.diagnostics,
+          }
+        : {}),
+    },
+  };
 }
 
 export function discoverConfiguredSources(input: DiscoveryInput & { env: DiscoveryEnvSnapshot }) {
@@ -156,6 +198,9 @@ function logDiscoveryTrace(
     discoveredBeforeFiltering: DiscoveredSource[];
     discoveredSources: DiscoveredSource[];
     publicSearchEnabled: boolean;
+    publicSearchDiagnostics?: Awaited<
+      ReturnType<typeof discoverSourcesFromPublicSearchDetailed>
+    >["diagnostics"];
   },
 ) {
   console.info("[discovery:summary]", {
@@ -168,6 +213,7 @@ function logDiscoveryTrace(
     platformCounts: summarizePlatformCounts(trace.discoveredSources),
     discoveryMethodCounts: summarizeDiscoveryMethodCounts(trace.discoveredSources),
     publicSearchEnabled: trace.publicSearchEnabled,
+    publicSearch: trace.publicSearchDiagnostics,
   });
 
   if (trace.discoveredSources.length > 0) {

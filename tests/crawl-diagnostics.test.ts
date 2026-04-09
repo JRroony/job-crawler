@@ -228,4 +228,112 @@ describe("crawl diagnostics", () => {
       warningCount: 0,
     });
   });
+
+  it("surfaces structured discovery funnel diagnostics when the discovery service provides them", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-03-29T12:00:00.000Z");
+
+    const provider = createStubProvider("greenhouse", async () => {
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: 1,
+        fetchedCount: 1,
+        matchedCount: 1,
+        warningCount: 0,
+        jobs: [
+          {
+            title: "Software Engineer",
+            company: "Acme",
+            country: "United States",
+            locationText: "Remote, United States",
+            sourcePlatform: "greenhouse",
+            sourceJobId: "role-1",
+            sourceUrl: "https://example.com/jobs/role-1",
+            applyUrl: "https://example.com/jobs/role-1/apply",
+            canonicalUrl: "https://example.com/jobs/role-1",
+            discoveredAt: now.toISOString(),
+            rawSourceMetadata: {},
+          },
+        ],
+      };
+    });
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [];
+      },
+      async discoverWithDiagnostics() {
+        return {
+          sources: [
+            classifySourceCandidate({
+              url: "https://boards.greenhouse.io/openai",
+              token: "openai",
+              confidence: "high",
+              discoveryMethod: "configured_env",
+            }),
+          ],
+          diagnostics: {
+            configuredSources: 20,
+            curatedSources: 0,
+            publicSources: 5,
+            discoveredBeforeFiltering: 25,
+            discoveredAfterFiltering: 1,
+            publicSearch: {
+              generatedQueries: 96,
+              executedQueries: 24,
+              skippedQueries: 72,
+              maxQueries: 24,
+              maxSources: 120,
+              maxResultsPerQuery: 8,
+              roleQueryCount: 6,
+              locationClauseCount: 12,
+              rawResultsHarvested: 80,
+              normalizedUrlsHarvested: 64,
+              platformMatchedUrls: 18,
+              sourcesAdded: 5,
+              engineRequestCounts: {
+                bing_rss: 24,
+              },
+              engineResultCounts: {
+                bing_rss: 64,
+              },
+              dropReasonCounts: {
+                query_budget: 72,
+              },
+              sampleGeneratedQueries: ["site:boards.greenhouse.io software engineer"],
+              sampleExecutedQueries: ["site:boards.greenhouse.io software engineer"],
+            },
+          },
+        };
+      },
+    };
+
+    const result = await runSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    expect(result.diagnostics.discovery).toMatchObject({
+      configuredSources: 20,
+      publicSources: 5,
+      discoveredBeforeFiltering: 25,
+      discoveredAfterFiltering: 1,
+      publicSearch: {
+        generatedQueries: 96,
+        executedQueries: 24,
+        sourcesAdded: 5,
+      },
+    });
+  });
 });
