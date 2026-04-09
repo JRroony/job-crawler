@@ -14,6 +14,8 @@ const greenhouseHosts = new Set([
   "boards.greenhouse.io",
   "job-boards.greenhouse.io",
   "boards-api.greenhouse.io",
+  "www.boards.greenhouse.io",
+  "www.job-boards.greenhouse.io",
 ]);
 
 const leverHosts = new Set([
@@ -148,6 +150,7 @@ function extractGreenhouseToken(url: URL) {
     return undefined;
   }
 
+  const hostname = normalizeHostname(url.hostname);
   const segments = url.pathname.split("/").filter(Boolean);
   const embeddedToken = normalizeGreenhouseToken(url.searchParams.get("for"));
 
@@ -155,11 +158,11 @@ function extractGreenhouseToken(url: URL) {
     return embeddedToken;
   }
 
-  if (url.hostname === "boards.greenhouse.io") {
+  if (hostname === "boards.greenhouse.io") {
     return normalizeGreenhouseToken(segments[0]);
   }
 
-  if (url.hostname === "job-boards.greenhouse.io") {
+  if (hostname === "job-boards.greenhouse.io") {
     return normalizeGreenhouseToken(segments[0]);
   }
 
@@ -202,7 +205,7 @@ function isWorkdayUrl(url: URL) {
 }
 
 function isGreenhouseUrl(url: URL) {
-  return greenhouseHosts.has(url.hostname);
+  return greenhouseHosts.has(url.hostname) || greenhouseHosts.has(normalizeHostname(url.hostname));
 }
 
 function isLeverUrl(url: URL) {
@@ -282,6 +285,10 @@ function cleanString(value?: string) {
 function normalizeGreenhouseToken(value?: string | null) {
   const trimmed = value?.trim().toLowerCase();
   return trimmed ? trimmed : undefined;
+}
+
+function normalizeHostname(value: string) {
+  return value.replace(/^www\./i, "").toLowerCase();
 }
 
 function buildSourceId(platform: DiscoveredSource["platform"], key: string) {

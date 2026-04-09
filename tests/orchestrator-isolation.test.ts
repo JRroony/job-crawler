@@ -38,7 +38,7 @@ function expectNoDirectJobFetches(fetchImpl: unknown) {
   expect(
     calls.some(([input]) => {
       const url = String(input);
-      return !url.includes("duckduckgo.com");
+      return !url.includes("duckduckgo.com") && !url.includes("bing.com");
     }),
   ).toBe(false);
 }

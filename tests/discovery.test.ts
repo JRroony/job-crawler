@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
+import { getDefaultGreenhouseRegistryEntries } from "@/lib/server/discovery/greenhouse-registry";
 import { discoverSourcesFromPublicSearch } from "@/lib/server/discovery/public-search";
 import { discoverConfiguredSources, discoverSources } from "@/lib/server/discovery/service";
 
@@ -83,6 +84,38 @@ describe("source discovery", () => {
       token: "discord",
       boardUrl: "https://boards.greenhouse.io/discord",
     });
+  });
+
+  it("classifies www-prefixed Greenhouse board URLs into the real board token", () => {
+    const prefixedBoard = classifySourceCandidate({
+      url: "https://www.boards.greenhouse.io/voltrondata/jobs/4351155006",
+      discoveryMethod: "future_search",
+    });
+
+    expect(prefixedBoard).toMatchObject({
+      platform: "greenhouse",
+      token: "voltrondata",
+      boardUrl: "https://boards.greenhouse.io/voltrondata",
+    });
+  });
+
+  it("ships a materially larger default Greenhouse registry than the tiny initial seed set", () => {
+    const entries = getDefaultGreenhouseRegistryEntries();
+
+    expect(entries.length).toBeGreaterThanOrEqual(20);
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ token: "figma", companyHint: "Figma" }),
+        expect.objectContaining({ token: "chalkinc", companyHint: "Chalk" }),
+        expect.objectContaining({ token: "doordashusa", companyHint: "DoorDash" }),
+        expect.objectContaining({ token: "graphcore", companyHint: "Graphcore" }),
+        expect.objectContaining({ token: "alarmcom", companyHint: "Alarm.com" }),
+        expect.objectContaining({
+          token: "bottomlinetechnologies",
+          companyHint: "Bottomline",
+        }),
+      ]),
+    );
   });
 
   it("discovers configured env and manual sources into typed discovered sources", () => {
@@ -213,6 +246,95 @@ describe("source discovery", () => {
       ]),
     );
     expect(sources.every((source) => source.platform === "greenhouse")).toBe(true);
+  });
+
+  it("falls back from challenged DuckDuckGo HTML to Bing RSS and keeps greenhouse discovery queries broad", async () => {
+    const requests: string[] = [];
+    const bingRss = `<?xml version="1.0" encoding="utf-8" ?>
+      <rss version="2.0">
+        <channel>
+          <item>
+            <link>https://boards.greenhouse.io/figma/jobs/5616603004?gh_jid=5616603004</link>
+          </item>
+          <item>
+            <link>https://www.boards.greenhouse.io/voltrondata/jobs/4351155006</link>
+          </item>
+        </channel>
+      </rss>`;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      requests.push(url);
+
+      if (url.startsWith("https://html.duckduckgo.com/")) {
+        return new Response(
+          `
+            <html>
+              <body>
+                <form id="challenge-form"></form>
+                <div>Unfortunately, bots use DuckDuckGo too.</div>
+              </body>
+            </html>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "text/html",
+            },
+          },
+        );
+      }
+
+      if (url.startsWith("https://www.bing.com/search")) {
+        return new Response(bingRss, {
+          status: 200,
+          headers: {
+            "content-type": "application/rss+xml",
+          },
+        });
+      }
+
+      return new Response("", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const sources = await discoverSourcesFromPublicSearch(
+      {
+        title: "Senior Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        fetchImpl,
+        maxResultsPerQuery: 4,
+      },
+    );
+
+    const requestedQueries = requests.map((requestUrl) =>
+      new URL(requestUrl).searchParams.get("q"),
+    );
+
+    expect(sources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          platform: "greenhouse",
+          token: "figma",
+          discoveryMethod: "future_search",
+        }),
+        expect.objectContaining({
+          platform: "greenhouse",
+          token: "voltrondata",
+          discoveryMethod: "future_search",
+        }),
+      ]),
+    );
+    expect(requestedQueries).toEqual(
+      expect.arrayContaining([
+        "site:boards.greenhouse.io software engineer",
+        "site:job-boards.greenhouse.io software engineer",
+      ]),
+    );
+    expect(requestedQueries.some((query) => query?.includes("United States"))).toBe(false);
+    expect(requestedQueries.some((query) => query?.includes("\""))).toBe(false);
+    expect(requestedQueries.some((query) => query?.includes("Senior"))).toBe(false);
   });
 
   it("returns non-zero Greenhouse registry sources even when public search is disabled", async () => {

@@ -17,7 +17,7 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("true")
     .transform((value) => value === "true"),
-  PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: z.coerce.number().int().positive().default(8),
+  PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: z.coerce.number().int().positive().default(16),
 });
 
 type ParsedEnv = z.infer<typeof envSchema>;
@@ -51,7 +51,7 @@ export function getEnv() {
       PUBLIC_SEARCH_DISCOVERY_ENABLED:
         process.env.PUBLIC_SEARCH_DISCOVERY_ENABLED ?? "true",
       PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS:
-        process.env.PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS ?? "8",
+        process.env.PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS ?? "16",
     });
   }
 
