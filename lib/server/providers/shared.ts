@@ -84,7 +84,7 @@ export function buildSeed(input: {
     sourceUrl: input.sourceUrl,
     applyUrl: input.applyUrl ?? input.sourceUrl,
     canonicalUrl:
-      input.canonicalUrl ??
+      canonicalizeUrl(input.canonicalUrl ?? "") ??
       canonicalizeUrl(input.sourceUrl) ??
       canonicalizeUrl(input.applyUrl ?? input.sourceUrl),
     postedAt: input.postedAt,

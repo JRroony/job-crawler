@@ -23,12 +23,12 @@ export function DiagnosticsDrawer(props: DiagnosticsDrawerProps) {
   const sourceResults = props.activeResult?.sourceResults ?? [];
 
   return (
-    <details className="group rounded-[28px] border border-ink/8 bg-white px-5 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.05)]">
+    <details className="group rounded-[24px] border border-ink/8 bg-white/88 px-5 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.05)]">
       <summary className="flex cursor-pointer list-none items-center justify-between gap-4">
         <div>
-          <div className="text-sm font-semibold text-ink">Diagnostics and advanced search settings</div>
+          <div className="text-sm font-semibold text-ink">Advanced search and diagnostics</div>
           <div className="mt-1 text-sm text-slate">
-            Keep crawler detail available without letting it take over the main interface.
+            Keep crawler controls and run detail available without crowding the main results view.
           </div>
         </div>
         <span className="rounded-full border border-ink/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate transition group-open:bg-mist/45">

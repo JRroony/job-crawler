@@ -11,6 +11,7 @@ import {
   resolveJobExperienceClassification,
   runWithConcurrency,
 } from "@/lib/server/crawler/helpers";
+import { parseGreenhouseUrl } from "@/lib/server/discovery/greenhouse-url";
 import {
   toStoredValidation,
   validateJobLink,
@@ -543,7 +544,7 @@ function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): PersistableJo
         rawSourceMetadata: seed.rawSourceMetadata,
       },
     ],
-    sourceLookupKeys: [buildSourceLookupKey(seed.sourcePlatform, seed.sourceJobId)],
+    sourceLookupKeys: buildSeedSourceLookupKeys(seed),
     companyNormalized: normalizeComparableText(seed.company),
     titleNormalized: normalizeComparableText(seed.title),
     locationNormalized,
@@ -553,6 +554,39 @@ function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): PersistableJo
       location: locationNormalized,
     }),
   };
+}
+
+function buildSeedSourceLookupKeys(seed: NormalizedJobSeed) {
+  if (seed.sourcePlatform !== "greenhouse") {
+    return [buildSourceLookupKey(seed.sourcePlatform, seed.sourceJobId)];
+  }
+
+  const boardToken = resolveGreenhouseBoardToken(seed);
+  if (!boardToken) {
+    return [buildSourceLookupKey(seed.sourcePlatform, seed.sourceJobId)];
+  }
+
+  return [
+    `greenhouse:${normalizeComparableText(boardToken)}:${normalizeComparableText(seed.sourceJobId)}`,
+  ];
+}
+
+function resolveGreenhouseBoardToken(seed: NormalizedJobSeed) {
+  const metadataBoardToken =
+    typeof seed.rawSourceMetadata?.greenhouseBoardToken === "string"
+      ? seed.rawSourceMetadata.greenhouseBoardToken
+      : typeof seed.rawSourceMetadata?.boardToken === "string"
+        ? seed.rawSourceMetadata.boardToken
+        : undefined;
+  if (typeof metadataBoardToken === "string" && metadataBoardToken.trim()) {
+    return metadataBoardToken.trim().toLowerCase();
+  }
+
+  return (
+    parseGreenhouseUrl(seed.canonicalUrl ?? "")?.boardSlug ??
+    parseGreenhouseUrl(seed.sourceUrl)?.boardSlug ??
+    parseGreenhouseUrl(seed.applyUrl)?.boardSlug
+  );
 }
 
 function applyValidationDraft(job: PersistableJob, validation: LinkValidationDraft): PersistableJob {

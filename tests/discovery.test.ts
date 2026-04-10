@@ -117,6 +117,22 @@ describe("source discovery", () => {
     });
   });
 
+  it("classifies hosted Greenhouse detail URLs into board-level sources with stable identifiers", () => {
+    const hostedDetail = classifySourceCandidate({
+      url: "https://job-boards.greenhouse.io/gitlab/jobs/8455464002?gh_jid=8455464002&utm_source=linkedin",
+      discoveryMethod: "future_search",
+    });
+
+    expect(hostedDetail).toMatchObject({
+      platform: "greenhouse",
+      token: "gitlab",
+      jobId: "8455464002",
+      url: "https://boards.greenhouse.io/gitlab",
+      boardUrl: "https://boards.greenhouse.io/gitlab",
+      apiUrl: "https://boards-api.greenhouse.io/v1/boards/gitlab/jobs?content=true",
+    });
+  });
+
   it("ships a materially larger default Greenhouse registry than the tiny initial seed set", () => {
     const entries = getDefaultGreenhouseRegistryEntries();
 
@@ -124,6 +140,9 @@ describe("source discovery", () => {
     expect(entries).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ token: "figma", companyHint: "Figma" }),
+        expect.objectContaining({ token: "gitlab", companyHint: "GitLab" }),
+        expect.objectContaining({ token: "omadahealth", companyHint: "Omada Health" }),
+        expect.objectContaining({ token: "public", companyHint: "Public" }),
         expect.objectContaining({ token: "chalkinc", companyHint: "Chalk" }),
         expect.objectContaining({ token: "doordashusa", companyHint: "DoorDash" }),
         expect.objectContaining({ token: "graphcore", companyHint: "Graphcore" }),
@@ -264,6 +283,65 @@ describe("source discovery", () => {
     expect(sources.every((source) => source.platform === "greenhouse")).toBe(true);
   });
 
+  it("expands configured company career pages into Greenhouse board sources even when Greenhouse is the selected crawl platform", async () => {
+    const fetchImpl = vi.fn(async () => {
+      return new Response(
+        `
+          <html>
+            <body>
+              <a href="https://job-boards.greenhouse.io/gitlab/jobs/8455464002?gh_jid=8455464002&utm_source=linkedin">
+                Senior Data Analyst
+              </a>
+            </body>
+          </html>
+        `,
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const sources = await discoverSources({
+      filters: {
+        title: "Data Analyst",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      now: new Date("2026-04-07T00:00:00.000Z"),
+      fetchImpl,
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [
+          {
+            type: "html_page",
+            company: "GitLab",
+            url: "https://about.gitlab.com/jobs/",
+          },
+        ],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
+      },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://about.gitlab.com/jobs/",
+      expect.anything(),
+    );
+    expect(sources).toEqual([
+      expect.objectContaining({
+        platform: "greenhouse",
+        token: "gitlab",
+        jobId: "8455464002",
+        boardUrl: "https://boards.greenhouse.io/gitlab",
+      }),
+    ]);
+  });
+
   it("expands broad US Greenhouse discovery into ranked remote and metro clauses", () => {
     const plan = buildPublicSearchQueryPlan(
       {
@@ -330,6 +408,33 @@ describe("source discovery", () => {
     expect(new Set(plan.queries.map((query) => query.query)).size).toBe(plan.queries.length);
     expect(plan.queries.some((query) => query.query.includes("\""))).toBe(false);
     expect(plan.platformPlans[0]?.locationClauses).toHaveLength(24);
+  });
+
+  it("broadens data analyst discovery into close title variants instead of a single narrow query", () => {
+    const plan = buildPublicSearchQueryPlan(
+      {
+        title: "Data Analyst",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        maxResultsPerQuery: 4,
+      },
+    );
+
+    expect(plan.roleQueries).toEqual([
+      "data analyst",
+      "analytics analyst",
+      "business intelligence analyst",
+      "reporting analyst",
+      "insights analyst",
+      "product analyst",
+      "decision scientist",
+      "business analyst",
+      "operations analyst",
+      "analytics engineer",
+      "bi analyst",
+    ]);
   });
 
   it("scopes US state-only Greenhouse discovery to the direct state clause and same-state metros", () => {

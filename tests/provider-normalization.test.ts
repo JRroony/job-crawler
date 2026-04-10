@@ -284,4 +284,31 @@ describe("provider normalization", () => {
       isUnspecified: true,
     });
   });
+
+  it("canonicalizes hosted Greenhouse job URLs across boards hosts and strips tracking params", () => {
+    const job = normalizeGreenhouseJob({
+      companyToken: "gitlab",
+      discoveredAt: "2026-03-29T00:00:00.000Z",
+      job: {
+        id: 8455464002,
+        title: "Senior Data Analyst",
+        absolute_url:
+          "https://boards.greenhouse.io/gitlab/jobs/8455464002?gh_jid=8455464002&utm_source=linkedin",
+        first_published: "2026-03-20T00:00:00.000Z",
+        location: { name: "Remote, US" },
+      },
+    });
+
+    expect(job.sourcePlatform).toBe("greenhouse");
+    expect(job.sourceUrl).toBe(
+      "https://boards.greenhouse.io/gitlab/jobs/8455464002?gh_jid=8455464002&utm_source=linkedin",
+    );
+    expect(job.canonicalUrl).toBe(
+      "https://job-boards.greenhouse.io/gitlab/jobs/8455464002",
+    );
+    expect(job.rawSourceMetadata).toMatchObject({
+      greenhouseBoardToken: "gitlab",
+      greenhouseJobId: "8455464002",
+    });
+  });
 });

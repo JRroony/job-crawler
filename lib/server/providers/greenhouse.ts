@@ -5,6 +5,7 @@ import {
   normalizeComparableText,
   runWithConcurrency,
 } from "@/lib/server/crawler/helpers";
+import { parseGreenhouseUrl } from "@/lib/server/discovery/greenhouse-url";
 import {
   type GreenhouseDiscoveredSource,
   isGreenhouseSource,
@@ -78,6 +79,8 @@ export function normalizeGreenhouseJob(input: {
     ),
     rawSourceMetadata: {
       greenhouseJob: input.job,
+      greenhouseBoardToken: input.companyToken,
+      greenhouseJobId: String(input.job.id),
       greenhouseStructuredExperienceHints: structuredExperienceHints,
       greenhouseDescriptionExperienceHint: descriptionExperienceHint || undefined,
     },
@@ -334,37 +337,7 @@ function resolveGreenhouseToken(source: GreenhouseDiscoveredSource) {
 }
 
 function extractGreenhouseTokenFromUrl(value?: string) {
-  if (!value?.trim()) {
-    return undefined;
-  }
-
-  try {
-    const url = new URL(value);
-    const segments = url.pathname.split("/").filter(Boolean);
-    const embeddedToken = cleanString(url.searchParams.get("for") ?? undefined)?.toLowerCase();
-
-    if (segments[0] === "embed") {
-      return embeddedToken;
-    }
-
-    if (url.hostname === "boards.greenhouse.io") {
-      return cleanString(segments[0])?.toLowerCase();
-    }
-
-    if (url.hostname === "job-boards.greenhouse.io") {
-      return cleanString(segments[0])?.toLowerCase();
-    }
-
-    if (url.hostname === "boards-api.greenhouse.io") {
-      return segments[0] === "v1" && segments[1] === "boards"
-        ? cleanString(segments[2])?.toLowerCase()
-        : undefined;
-    }
-
-    return undefined;
-  } catch {
-    return undefined;
-  }
+  return value ? parseGreenhouseUrl(value)?.boardSlug : undefined;
 }
 
 function firstGreenhouseUrl(values: Array<string | undefined>) {

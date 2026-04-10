@@ -40,6 +40,7 @@ type BaseDiscoveredSource = {
 export type GreenhouseDiscoveredSource = BaseDiscoveredSource & {
   platform: "greenhouse";
   token?: string;
+  jobId?: string;
   boardUrl?: string;
   apiUrl?: string;
 };

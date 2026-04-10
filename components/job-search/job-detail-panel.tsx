@@ -33,7 +33,7 @@ export function JobDetailPanel(props: JobDetailPanelProps) {
   const postingUrl = jobPostingUrl(job);
 
   return (
-    <section className="rounded-[20px] border border-ink/10 bg-white p-6 shadow-sm">
+    <section className="rounded-[28px] border border-ink/10 bg-white/94 p-6 shadow-[0_18px_50px_rgba(15,23,42,0.07)] backdrop-blur">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
@@ -116,13 +116,12 @@ export function JobDetailPanel(props: JobDetailPanelProps) {
         />
       </div>
 
-      <div className="mt-6 rounded-[18px] border border-ink/8 bg-mist/35 px-5 py-5">
+      <div className="mt-6 rounded-[20px] border border-ink/8 bg-mist/35 px-5 py-5">
         <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
-          At a glance
+          Notes
         </div>
         <p className="mt-3 text-sm leading-7 text-slate">
-          This role was pulled from {labelForProviderPlatform(job.sourcePlatform)} and links
-          directly to the original public posting so you can inspect the source page immediately.
+          This role was pulled from {labelForProviderPlatform(job.sourcePlatform)} and links directly to the original public posting so you can verify the source without leaving the search flow.
           {job.sourceProvenance.length > 1
             ? ` The crawler merged ${job.sourceProvenance.length} matching source records into this listing.`
             : ""}

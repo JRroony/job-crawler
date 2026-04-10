@@ -60,10 +60,10 @@ export function ResultsTable({
   }, [selectedJobKey]);
 
   return (
-    <section className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(360px,0.82fr)]">
-      <div className="rounded-[20px] border border-ink/10 bg-white shadow-sm">
+    <section className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(380px,0.82fr)]">
+      <div className="rounded-[28px] border border-ink/10 bg-white/92 shadow-[0_18px_50px_rgba(15,23,42,0.06)] backdrop-blur">
         <div className="border-b border-ink/8 px-5 py-4">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
                 Results
@@ -74,14 +74,14 @@ export function ResultsTable({
                   : `${visibleCount} of ${fullCount} jobs`}
               </h2>
             </div>
-            <p className="max-w-md text-sm text-slate">
-              Browse the list on the left and keep the posting details pinned on the right.
-            </p>
+            <div className="rounded-full border border-ink/10 bg-mist/35 px-3 py-1.5 text-sm text-slate">
+              Original posting stays pinned on the right
+            </div>
           </div>
         </div>
 
         <div className="p-3 sm:p-4">
-          <div className="lg:max-h-[calc(100vh-15.5rem)] lg:overflow-y-auto lg:pr-1">
+          <div className="xl:max-h-[calc(100vh-15rem)] xl:overflow-y-auto xl:pr-1">
             <JobList
               jobs={jobs}
               selectedJobKey={selectedJobKey}
@@ -92,7 +92,7 @@ export function ResultsTable({
         </div>
       </div>
 
-      <div ref={detailPanelRef} className="lg:sticky lg:top-6 lg:self-start">
+      <div ref={detailPanelRef} className="xl:sticky xl:top-6 xl:self-start">
         <JobDetailPanel
           job={selectedJob}
           isRevalidating={Boolean(selectedJob && revalidatingIds.includes(selectedJob._id))}

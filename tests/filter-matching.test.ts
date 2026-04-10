@@ -286,6 +286,8 @@ describe("title relevance", () => {
   it("normalizes recognized title variants into a canonical form", () => {
     expect(normalizeTitleToCanonicalForm("Senior SWE")).toBe("software engineer");
     expect(normalizeTitleToCanonicalForm("Software Developer")).toBe("software engineer");
+    expect(normalizeTitleToCanonicalForm("Product Analyst")).toBe("data analyst");
+    expect(normalizeTitleToCanonicalForm("Decision Scientist")).toBe("data analyst");
     expect(normalizeTitleToCanonicalForm("Lead Product Manager")).toBe("product manager");
   });
 
@@ -343,6 +345,42 @@ describe("title relevance", () => {
     "Data Scientist",
   ])("does not overmatch %s for a software engineer query", (title) => {
     expect(getTitleMatchResult(title, "Software Engineer")).toMatchObject({
+      matches: false,
+      tier: "none",
+    });
+  });
+
+  it.each([
+    {
+      label: "data analyst synonym",
+      title: "Business Intelligence Analyst",
+      tier: "synonym",
+    },
+    {
+      label: "product analytics variant",
+      title: "Product Analyst",
+      tier: "synonym",
+    },
+    {
+      label: "decision science variant",
+      title: "Decision Scientist",
+      tier: "synonym",
+    },
+  ])("classifies $label for a data analyst query", ({ title, tier }) => {
+    expect(getTitleMatchResult(title, "Data Analyst")).toMatchObject({
+      matches: true,
+      tier,
+      canonicalQueryTitle: "data analyst",
+    });
+  });
+
+  it.each([
+    "Data Engineer",
+    "Data Scientist",
+    "Financial Analyst",
+    "Sales Analyst",
+  ])("does not overmatch %s for a data analyst query", (title) => {
+    expect(getTitleMatchResult(title, "Data Analyst")).toMatchObject({
       matches: false,
       tier: "none",
     });

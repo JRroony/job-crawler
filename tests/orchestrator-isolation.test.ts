@@ -1498,7 +1498,7 @@ describe("crawl orchestration", () => {
       companyNormalized: "acme",
       titleNormalized: "backend engineer",
       contentFingerprint: result.jobs[0].contentFingerprint,
-      sourceLookupKeys: ["greenhouse:job 1"],
+      sourceLookupKeys: ["greenhouse:acme:job 1"],
       crawlRunIds: [result.crawlRun._id],
     });
     expect(storedJobs[0].sourceProvenance).toEqual([

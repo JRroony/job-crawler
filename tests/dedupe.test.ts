@@ -144,4 +144,27 @@ describe("dedupeJobs", () => {
 
     expect(result).toHaveLength(1);
   });
+
+  it("keeps Greenhouse jobs from different boards distinct when the scoped identity differs", () => {
+    const result = dedupeJobs([
+      createCandidate({
+        sourceJobId: "8455464002",
+        sourceUrl: "https://job-boards.greenhouse.io/gitlab/jobs/8455464002",
+        applyUrl: "https://job-boards.greenhouse.io/gitlab/jobs/8455464002",
+        canonicalUrl: "https://job-boards.greenhouse.io/gitlab/jobs/8455464002",
+        resolvedUrl: undefined,
+        sourceLookupKeys: ["greenhouse:gitlab:8455464002"],
+      }),
+      createCandidate({
+        sourceJobId: "8455464002",
+        sourceUrl: "https://job-boards.greenhouse.io/openai/jobs/8455464002",
+        applyUrl: "https://job-boards.greenhouse.io/openai/jobs/8455464002",
+        canonicalUrl: "https://job-boards.greenhouse.io/openai/jobs/8455464002",
+        resolvedUrl: undefined,
+        sourceLookupKeys: ["greenhouse:openai:8455464002"],
+      }),
+    ]);
+
+    expect(result).toHaveLength(2);
+  });
 });

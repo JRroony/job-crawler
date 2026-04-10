@@ -4,19 +4,14 @@ import {
   normalizeComparableText,
   slugToLabel,
 } from "@/lib/server/crawler/helpers";
+import {
+  parseGreenhouseUrl,
+} from "@/lib/server/discovery/greenhouse-url";
 import type {
   DiscoveredSource,
   DiscoveryConfidence,
   SourceClassificationCandidate,
 } from "@/lib/server/discovery/types";
-
-const greenhouseHosts = new Set([
-  "boards.greenhouse.io",
-  "job-boards.greenhouse.io",
-  "boards-api.greenhouse.io",
-  "www.boards.greenhouse.io",
-  "www.job-boards.greenhouse.io",
-]);
 
 const leverHosts = new Set([
   "jobs.lever.co",
@@ -59,18 +54,19 @@ export function classifySourceCandidate(
     };
   }
 
-  const greenhouseToken = extractGreenhouseToken(parsedUrl);
-  if (greenhouseToken) {
-    const boardUrl = `https://boards.greenhouse.io/${greenhouseToken}`;
+  const greenhouseUrl = parseGreenhouseUrl(parsedUrl);
+  if (greenhouseUrl?.boardSlug) {
+    const boardUrl = greenhouseUrl.canonicalBoardUrl;
 
     return {
-      id: buildSourceId("greenhouse", greenhouseToken),
+      id: buildSourceId("greenhouse", greenhouseUrl.boardSlug),
       platform: "greenhouse",
-      url: boardUrl,
+      url: boardUrl ?? parsedUrl.toString(),
       boardUrl,
-      apiUrl: `https://boards-api.greenhouse.io/v1/boards/${greenhouseToken}/jobs?content=true`,
-      token: greenhouseToken,
-      companyHint: resolveCompanyHint(input.companyHint, greenhouseToken, parsedUrl),
+      apiUrl: greenhouseUrl.canonicalApiUrl,
+      token: greenhouseUrl.boardSlug,
+      jobId: greenhouseUrl.jobId,
+      companyHint: resolveCompanyHint(input.companyHint, greenhouseUrl.boardSlug, parsedUrl),
       confidence: resolvePlatformConfidence(input.confidence, "high"),
       discoveryMethod: input.discoveryMethod,
     };
@@ -145,34 +141,6 @@ function safeParseUrl(value: string) {
   }
 }
 
-function extractGreenhouseToken(url: URL) {
-  if (!isGreenhouseUrl(url)) {
-    return undefined;
-  }
-
-  const hostname = normalizeHostname(url.hostname);
-  const segments = url.pathname.split("/").filter(Boolean);
-  const embeddedToken = normalizeGreenhouseToken(url.searchParams.get("for"));
-
-  if (segments[0] === "embed") {
-    return embeddedToken;
-  }
-
-  if (hostname === "boards.greenhouse.io") {
-    return normalizeGreenhouseToken(segments[0]);
-  }
-
-  if (hostname === "job-boards.greenhouse.io") {
-    return normalizeGreenhouseToken(segments[0]);
-  }
-
-  if (segments[0] === "v1" && segments[1] === "boards") {
-    return normalizeGreenhouseToken(segments[2]);
-  }
-
-  return undefined;
-}
-
 function extractLeverToken(url: URL) {
   if (!isLeverUrl(url)) {
     return undefined;
@@ -205,7 +173,7 @@ function isWorkdayUrl(url: URL) {
 }
 
 function isGreenhouseUrl(url: URL) {
-  return greenhouseHosts.has(url.hostname) || greenhouseHosts.has(normalizeHostname(url.hostname));
+  return Boolean(parseGreenhouseUrl(url));
 }
 
 function isLeverUrl(url: URL) {
@@ -280,15 +248,6 @@ function resolveCompanyPageConfidence(
 function cleanString(value?: string) {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
-}
-
-function normalizeGreenhouseToken(value?: string | null) {
-  const trimmed = value?.trim().toLowerCase();
-  return trimmed ? trimmed : undefined;
-}
-
-function normalizeHostname(value: string) {
-  return value.replace(/^www\./i, "").toLowerCase();
 }
 
 function buildSourceId(platform: DiscoveredSource["platform"], key: string) {

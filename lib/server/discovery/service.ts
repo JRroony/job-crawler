@@ -3,6 +3,7 @@ import "server-only";
 import { slugToLabel } from "@/lib/server/crawler/helpers";
 import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
+import { expandCompanyPageSources } from "@/lib/server/discovery/company-page-expansion";
 import { lookupGreenhouseCompanyHint } from "@/lib/server/discovery/greenhouse-registry";
 import { discoverSourcesFromPublicSearchDetailed } from "@/lib/server/discovery/public-search";
 import { resolveOperationalCrawlerPlatforms } from "@/lib/types";
@@ -55,10 +56,20 @@ export async function discoverSourcesDetailed(
   const selectedPlatforms = input.filters.platforms
     ? new Set<string>(resolveOperationalCrawlerPlatforms(input.filters.platforms))
     : null;
-  const configuredSources = discoverConfiguredSources(input);
+  const unfilteredConfiguredSources = buildConfiguredSources(input);
+  const configuredSources = filterDiscoveredSources(
+    unfilteredConfiguredSources,
+    selectedPlatforms,
+  );
   const curatedSources = filterDiscoveredSources(
     discoverCatalogSources(input.filters.platforms),
     selectedPlatforms,
+  );
+  const companyPageExpandedSources = dedupeDiscoveredSources(
+    await expandCompanyPageSources(
+      dedupeDiscoveredSources([...unfilteredConfiguredSources, ...curatedSources]),
+      input.fetchImpl,
+    ),
   );
   const publicSearchResult = input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED
     ? await discoverSourcesFromPublicSearchDetailed(input.filters, {
@@ -77,6 +88,7 @@ export async function discoverSourcesDetailed(
   const discoveredBeforeFiltering = dedupeDiscoveredSources([
     ...configuredSources,
     ...curatedSources,
+    ...companyPageExpandedSources,
     ...publicSources,
   ]);
   const discoveredSources = filterDiscoveredSources(
@@ -87,6 +99,7 @@ export async function discoverSourcesDetailed(
   logDiscoveryTrace(input.filters, {
     configuredSources,
     curatedSources,
+    companyPageExpandedSources,
     publicSources,
     discoveredBeforeFiltering,
     discoveredSources,
@@ -115,6 +128,19 @@ export function discoverConfiguredSources(input: DiscoveryInput & { env: Discove
   const selectedPlatforms = input.filters.platforms
     ? new Set<string>(resolveOperationalCrawlerPlatforms(input.filters.platforms))
     : null;
+  const discoveredSources = buildConfiguredSources(input);
+
+  // Discovery is the first place we can honestly narrow the platform scope:
+  // when a user selects provider families, we stop surfacing configured sources
+  // for the unselected families before provider routing even begins.
+  if (!selectedPlatforms) {
+    return discoveredSources;
+  }
+
+  return filterDiscoveredSources(discoveredSources, selectedPlatforms);
+}
+
+function buildConfiguredSources(input: DiscoveryInput & { env: DiscoveryEnvSnapshot }) {
   const candidates = [
     ...input.env.greenhouseBoardTokens.map((token) =>
       classifySourceCandidate({
@@ -154,16 +180,7 @@ export function discoverConfiguredSources(input: DiscoveryInput & { env: Discove
     ),
   ];
 
-  const discoveredSources = dedupeDiscoveredSources(candidates);
-
-  // Discovery is the first place we can honestly narrow the platform scope:
-  // when a user selects provider families, we stop surfacing configured sources
-  // for the unselected families before provider routing even begins.
-  if (!selectedPlatforms) {
-    return discoveredSources;
-  }
-
-  return filterDiscoveredSources(discoveredSources, selectedPlatforms);
+  return dedupeDiscoveredSources(candidates);
 }
 
 function dedupeDiscoveredSources(sources: DiscoveredSource[]) {
@@ -194,6 +211,7 @@ function logDiscoveryTrace(
   trace: {
     configuredSources: DiscoveredSource[];
     curatedSources: DiscoveredSource[];
+    companyPageExpandedSources: DiscoveredSource[];
     publicSources: DiscoveredSource[];
     discoveredBeforeFiltering: DiscoveredSource[];
     discoveredSources: DiscoveredSource[];
@@ -207,6 +225,7 @@ function logDiscoveryTrace(
     filters,
     configuredCount: trace.configuredSources.length,
     curatedCount: trace.curatedSources.length,
+    companyPageExpandedCount: trace.companyPageExpandedSources.length,
     publicCount: trace.publicSources.length,
     discoveredBeforeFilteringCount: trace.discoveredBeforeFiltering.length,
     discoveredAfterFilteringCount: trace.discoveredSources.length,

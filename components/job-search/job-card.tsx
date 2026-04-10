@@ -23,10 +23,10 @@ export function JobCard(props: JobCardProps) {
       onClick={() => props.onSelect(props.selectionKey)}
       aria-pressed={props.selected}
       className={cn(
-        "w-full rounded-[18px] border px-4 py-4 text-left transition",
+        "w-full rounded-[22px] border px-4 py-4 text-left transition",
         props.selected
-          ? "border-[#0a66c2]/30 bg-[#0a66c2]/[0.06] shadow-sm"
-          : "border-ink/8 bg-white hover:border-ink/18 hover:bg-mist/35",
+          ? "border-[#0a66c2]/30 bg-[#0a66c2]/[0.06] shadow-[0_12px_28px_rgba(10,102,194,0.12)]"
+          : "border-ink/8 bg-white hover:border-ink/18 hover:bg-mist/35 hover:shadow-sm",
       )}
     >
       <div className="flex items-start justify-between gap-3">
@@ -53,7 +53,7 @@ export function JobCard(props: JobCardProps) {
           {tags.map((tag) => (
             <span
               key={tag}
-              className="rounded-full border border-ink/8 bg-white px-3 py-1 text-[11px] font-medium uppercase tracking-[0.14em] text-slate"
+              className="rounded-full border border-ink/8 bg-[#faf8f2] px-3 py-1 text-[11px] font-medium uppercase tracking-[0.14em] text-slate"
             >
               {tag}
             </span>

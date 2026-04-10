@@ -38,8 +38,8 @@ export function FilterBar(props: FilterBarProps) {
     props.resultFilters.postedDate !== "any";
 
   return (
-    <section className="rounded-[18px] border border-ink/10 bg-white px-4 py-3 shadow-sm sm:px-5">
-      <div className="flex flex-col gap-3">
+    <section className="rounded-[22px] border border-ink/10 bg-white/88 px-4 py-4 shadow-sm sm:px-5">
+      <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate/70">
@@ -61,35 +61,37 @@ export function FilterBar(props: FilterBarProps) {
           </button>
         </div>
 
-        <FilterGroup label="Platform">
-          {platformFilterOptions.map((option) => (
-            <FilterChip
-              key={option.value}
-              label={option.label}
-              selected={activePlatformSet.has(option.value)}
-              onClick={() => props.onTogglePlatform(option.value)}
-            />
-          ))}
-          {disabledPlatformFilterOptions.map((option) => (
-            <FilterChip
-              key={option.label}
-              label={`${option.label} · ${option.detail}`}
-              selected={false}
-              disabled
-            />
-          ))}
-        </FilterGroup>
+        <div className="grid gap-4 xl:grid-cols-[1.1fr_1fr]">
+          <FilterGroup label="Platform">
+            {platformFilterOptions.map((option) => (
+              <FilterChip
+                key={option.value}
+                label={option.label}
+                selected={activePlatformSet.has(option.value)}
+                onClick={() => props.onTogglePlatform(option.value)}
+              />
+            ))}
+            {disabledPlatformFilterOptions.map((option) => (
+              <FilterChip
+                key={option.label}
+                label={`${option.label} · ${option.detail}`}
+                selected={false}
+                disabled
+              />
+            ))}
+          </FilterGroup>
 
-        <FilterGroup label="Experience">
-          {experienceFilterOptions.map((option) => (
-            <FilterChip
-              key={option.value}
-              label={option.label}
-              selected={activeExperienceSet.has(option.value)}
-              onClick={() => props.onToggleExperience(option.value)}
-            />
-          ))}
-        </FilterGroup>
+          <FilterGroup label="Experience">
+            {experienceFilterOptions.map((option) => (
+              <FilterChip
+                key={option.value}
+                label={option.label}
+                selected={activeExperienceSet.has(option.value)}
+                onClick={() => props.onToggleExperience(option.value)}
+              />
+            ))}
+          </FilterGroup>
+        </div>
 
         <div className="grid gap-3 lg:grid-cols-[0.8fr_0.8fr_1fr]">
           <FilterGroup label="Work style">
@@ -126,7 +128,7 @@ export function FilterBar(props: FilterBarProps) {
 
 function FilterGroup(props: { label: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-2">
       <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate/60">
         {props.label}
       </div>
@@ -148,7 +150,7 @@ function FilterChip(props: {
       disabled={props.disabled}
       aria-pressed={props.selected}
       className={cn(
-        "rounded-full border px-3 py-1.5 text-sm transition",
+        "rounded-full border px-3.5 py-2 text-sm transition",
         props.disabled && "cursor-not-allowed border-ink/8 bg-white text-slate/45",
         !props.disabled &&
           props.selected &&

@@ -7,6 +7,7 @@ import {
   isRecognizedUsCity,
   resolveUsState,
 } from "@/lib/server/locations/us";
+import { canonicalizeGreenhouseUrl } from "@/lib/server/discovery/greenhouse-url";
 import type {
   ExperienceClassification,
   ExperienceInferenceConfidence,
@@ -48,6 +49,7 @@ type TitleRoleConcept =
   | "full_stack_engineer"
   | "platform_engineer"
   | "data_engineer"
+  | "data_analyst"
   | "qa_engineer"
   | "software_engineer_in_test"
   | "support_engineer"
@@ -61,6 +63,7 @@ type TitleRoleDefinition = {
   family: TitleRoleFamily;
   synonyms?: string[];
   abbreviations?: string[];
+  discoveryQueries?: string[];
   relevantToBroadSoftwareQueries?: boolean;
 };
 
@@ -457,6 +460,33 @@ const titleRoleDefinitions: TitleRoleDefinition[] = [
     synonyms: ["data engineering", "data platform engineer"],
   },
   {
+    concept: "data_analyst",
+    canonical: "data analyst",
+    family: "data",
+    synonyms: [
+      "analytics analyst",
+      "business intelligence analyst",
+      "reporting analyst",
+      "insights analyst",
+      "product analyst",
+      "decision scientist",
+    ],
+    abbreviations: ["bi analyst"],
+    discoveryQueries: [
+      "data analyst",
+      "analytics analyst",
+      "business intelligence analyst",
+      "reporting analyst",
+      "insights analyst",
+      "product analyst",
+      "decision scientist",
+      "business analyst",
+      "operations analyst",
+      "analytics engineer",
+      "bi analyst",
+    ],
+  },
+  {
     concept: "support_engineer",
     canonical: "support engineer",
     family: "support",
@@ -805,6 +835,11 @@ export function resolveJobExperienceLevel(
 }
 
 export function canonicalizeUrl(url: string) {
+  const canonicalGreenhouseUrl = canonicalizeGreenhouseUrl(url);
+  if (canonicalGreenhouseUrl) {
+    return canonicalGreenhouseUrl;
+  }
+
   try {
     const parsed = new URL(url);
     parsed.hash = "";
@@ -971,7 +1006,23 @@ export function buildDiscoveryRoleQueries(value?: string) {
     return queries;
   }
 
-  push(analyzed.canonical);
+  const matchingDefinition = analyzed.concept
+    ? titleRoleDefinitions.find((definition) => definition.concept === analyzed.concept)
+    : undefined;
+
+  if (matchingDefinition?.discoveryQueries?.length) {
+    matchingDefinition.discoveryQueries.forEach(push);
+    return queries;
+  }
+
+  push(matchingDefinition?.canonical ?? analyzed.canonical);
+  matchingDefinition?.synonyms?.slice(0, 3).forEach(push);
+  matchingDefinition?.abbreviations?.slice(0, 2).forEach(push);
+
+  if (queries.length === 0) {
+    push(analyzed.canonical);
+  }
+
   return queries;
 }
 

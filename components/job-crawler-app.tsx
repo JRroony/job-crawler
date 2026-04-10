@@ -17,6 +17,7 @@ import {
   togglePlatformSelection,
 } from "@/components/job-crawler/ui-config";
 import { FilterBar } from "@/components/job-search/filter-bar";
+import { DiagnosticsDrawer } from "@/components/job-search/diagnostics-drawer";
 import {
   buildLocationInputValue,
   defaultClientResultFilters,
@@ -324,13 +325,14 @@ export function JobCrawlerApp({
     viewState === "error" && !activeResult
       ? describeBlockingErrorState(errorKind, message)
       : null;
+  const resultNotice = activeResult ? describeResultNotice(activeResult) : null;
   const resultsLocation = activeResult
     ? buildLocationInputValue(activeResult.search.filters) || "All locations"
     : buildLocationInputValue(buildLiveFilters()) || "All locations";
 
   return (
-    <main className="min-h-screen bg-[#f3f2ef] text-ink">
-      <div className="mx-auto max-w-[1380px] px-4 py-5 sm:px-6 lg:px-8">
+    <main className="min-h-screen bg-[radial-gradient(circle_at_top,#fdfbf6_0%,#f4f1ea_42%,#efeae1_100%)] text-ink">
+      <div className="mx-auto max-w-[1420px] px-4 py-5 sm:px-6 lg:px-8">
         <div className="space-y-3">
           <SearchBar
             keyword={keywordInput}
@@ -431,8 +433,8 @@ export function JobCrawlerApp({
 
           {activeResult && activeResult.jobs.length > 0 ? (
             <>
-              <section className="rounded-[20px] border border-ink/10 bg-white px-5 py-4 shadow-sm">
-                <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+              <section className="rounded-[24px] border border-ink/10 bg-white/90 px-5 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                   <div>
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
                       Active search
@@ -444,13 +446,41 @@ export function JobCrawlerApp({
                       {resultsLocation} • updated {formatRelativeMoment(activeResult.search.updatedAt)}
                     </p>
                   </div>
-                  <div className="text-sm font-medium text-slate">
-                    {visibleJobs.length === activeResult.jobs.length
-                      ? `${visibleJobs.length} jobs ready to browse`
-                      : `${visibleJobs.length} of ${activeResult.jobs.length} jobs shown`}
+                  <div className="flex flex-wrap gap-2 text-sm font-medium text-slate">
+                    <span className="rounded-full border border-ink/10 bg-mist/40 px-3 py-1.5">
+                      {visibleJobs.length === activeResult.jobs.length
+                        ? `${visibleJobs.length} jobs`
+                        : `${visibleJobs.length} of ${activeResult.jobs.length} shown`}
+                    </span>
+                    <span className="rounded-full border border-ink/10 bg-mist/40 px-3 py-1.5">
+                      {activeResult.search.filters.platforms?.length
+                        ? activeResult.search.filters.platforms.join(", ")
+                        : "All active sources"}
+                    </span>
                   </div>
                 </div>
               </section>
+
+              {resultNotice ? (
+                <section className="rounded-[20px] border border-ink/10 bg-white/85 px-5 py-4 shadow-sm">
+                  <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <div className="text-sm font-semibold text-ink">{resultNotice.title}</div>
+                      <p className="mt-1 text-sm text-slate">{resultNotice.description}</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-sm text-slate">
+                      {(resultNotice.highlights ?? []).slice(0, 2).map((highlight) => (
+                        <span
+                          key={highlight}
+                          className="rounded-full border border-ink/10 bg-mist/40 px-3 py-1.5"
+                        >
+                          {highlight}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </section>
+              ) : null}
 
               <ResultsTable
                 jobs={visibleJobs}
@@ -460,6 +490,41 @@ export function JobCrawlerApp({
                 revalidatingIds={revalidatingIds}
               />
             </>
+          ) : null}
+
+          {activeResult || recentSearches.length > 0 ? (
+            <DiagnosticsDrawer
+              activeResult={activeResult}
+              recentSearches={recentSearches}
+              filters={filters}
+              onLoadSearch={(searchId) => void loadSearch(searchId)}
+              onRerunSearch={(searchId) => void rerunActiveSearch(searchId)}
+              onSetCrawlMode={(value) =>
+                setFilters((current) => ({
+                  ...current,
+                  crawlMode: value,
+                }))
+              }
+              onSetExperienceMatchMode={(value) =>
+                setFilters((current) => ({
+                  ...current,
+                  experienceMatchMode: value,
+                  includeUnspecifiedExperience:
+                    value === "broad"
+                      ? true
+                      : current.includeUnspecifiedExperience,
+                }))
+              }
+              onToggleIncludeUnspecified={() =>
+                setFilters((current) => ({
+                  ...current,
+                  includeUnspecifiedExperience:
+                    current.experienceMatchMode === "broad"
+                      ? true
+                      : !(current.includeUnspecifiedExperience === true),
+                }))
+              }
+            />
           ) : null}
         </div>
       </div>
