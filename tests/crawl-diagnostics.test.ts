@@ -301,7 +301,12 @@ describe("crawl diagnostics", () => {
               dropReasonCounts: {
                 query_budget: 72,
               },
+              sampleGeneratedRoleQueries: [
+                "software engineer",
+                "software developer",
+              ],
               sampleGeneratedQueries: ["site:boards.greenhouse.io software engineer"],
+              sampleExecutedRoleQueries: ["software engineer"],
               sampleExecutedQueries: ["site:boards.greenhouse.io software engineer"],
             },
           },

@@ -8,6 +8,15 @@ import {
   resolveUsState,
 } from "@/lib/server/locations/us";
 import { canonicalizeGreenhouseUrl } from "@/lib/server/discovery/greenhouse-url";
+import {
+  buildDiscoveryRoleQueries as buildTitleRetrievalDiscoveryRoleQueries,
+  getTitleMatchResult as getTitleRetrievalMatchResult,
+  normalizeTitleToCanonicalForm as normalizeTitleRetrievalCanonicalForm,
+} from "@/lib/server/title-retrieval";
+import type {
+  TitleMatchMode,
+  TitleMatchResult,
+} from "@/lib/server/title-retrieval";
 import type {
   ExperienceClassification,
   ExperienceInferenceConfidence,
@@ -23,75 +32,11 @@ type CountryAliasGroup = {
   aliases: string[];
 };
 
-type TitleMatchTier =
-  | "exact"
-  | "variant"
-  | "synonym"
-  | "abbreviation"
-  | "related"
-  | "generic"
-  | "none";
-
-type TitleAliasKind = "canonical" | "synonym" | "abbreviation";
-
-type TitleRoleFamily =
-  | "software"
-  | "data"
-  | "qa"
-  | "support"
-  | "sales"
-  | "design";
-
-type TitleRoleConcept =
-  | "software_engineer"
-  | "backend_engineer"
-  | "frontend_engineer"
-  | "full_stack_engineer"
-  | "platform_engineer"
-  | "data_engineer"
-  | "data_analyst"
-  | "qa_engineer"
-  | "software_engineer_in_test"
-  | "support_engineer"
-  | "sales_engineer"
-  | "product_designer"
-  | "data_scientist";
-
-type TitleRoleDefinition = {
-  concept: TitleRoleConcept;
-  canonical: string;
-  family: TitleRoleFamily;
-  synonyms?: string[];
-  abbreviations?: string[];
-  discoveryQueries?: string[];
-  relevantToBroadSoftwareQueries?: boolean;
-};
-
-type AnalyzedTitle = {
-  normalized: string;
-  baseNormalized: string;
-  canonical: string;
-  concept?: TitleRoleConcept;
-  family?: TitleRoleFamily;
-  aliasKind?: TitleAliasKind;
-  matchedPhrase?: string;
-  relevantToBroadSoftwareQueries: boolean;
-  remainderNormalized: string;
-};
-
-export type TitleMatchResult = {
-  matches: boolean;
-  tier: TitleMatchTier;
-  score: number;
-  canonicalQueryTitle: string;
-  canonicalJobTitle: string;
-};
-
 export type FilterExclusionReason = "title" | "location" | "experience";
 
 export type FilterEvaluation =
-  | { matches: true }
-  | { matches: false; reason: FilterExclusionReason };
+  | { matches: true; titleMatch: TitleMatchResult }
+  | { matches: false; reason: FilterExclusionReason; titleMatch?: TitleMatchResult };
 
 type ExperienceFilterableJob = Pick<
   JobListing,
@@ -366,234 +311,6 @@ const countryAliasesByConcept = new Map(
     group.aliases.map((alias) => normalizeComparableText(alias)),
   ] as const),
 );
-
-const seniorityPhrases = ["new grad", "entry level"];
-
-const seniorityTokens = new Set([
-  "associate",
-  "distinguished",
-  "graduate",
-  "jr",
-  "junior",
-  "lead",
-  "mid",
-  "principal",
-  "senior",
-  "sr",
-  "staff",
-  "i",
-  "ii",
-  "iii",
-  "iv",
-  "v",
-]);
-
-const broadSoftwarePositivePhrases = [
-  "software",
-  "developer",
-  "full stack",
-  "fullstack",
-  "front end",
-  "frontend",
-  "back end",
-  "backend",
-  "platform",
-  "mobile",
-  "ios",
-  "android",
-  "web",
-  "application",
-  "app",
-  "devops",
-  "site reliability",
-  "sre",
-  "infrastructure",
-] as const;
-
-const broadSoftwareNegativePhrases = [
-  "sales",
-  "support",
-  "customer",
-  "designer",
-  "design",
-  "quality",
-  "qa",
-  "test",
-  "data",
-  "scientist",
-  "recruit",
-  "marketing",
-  "finance",
-  "account",
-  "legal",
-] as const;
-
-const broadSoftwareDiscoveryRoleQueries = [
-  "software engineer",
-  "software developer",
-  "software development engineer",
-  "backend engineer",
-  "full stack engineer",
-  "platform engineer",
-  "frontend engineer",
-  "swe",
-] as const;
-
-const titleRoleDefinitions: TitleRoleDefinition[] = [
-  {
-    concept: "software_engineer_in_test",
-    canonical: "software engineer in test",
-    family: "qa",
-    synonyms: ["software engineer in test", "software developer in test"],
-    abbreviations: ["sdet"],
-  },
-  {
-    concept: "qa_engineer",
-    canonical: "qa engineer",
-    family: "qa",
-    synonyms: ["quality assurance engineer", "quality engineering", "test engineer"],
-  },
-  {
-    concept: "data_engineer",
-    canonical: "data engineer",
-    family: "data",
-    synonyms: ["data engineering", "data platform engineer"],
-  },
-  {
-    concept: "data_analyst",
-    canonical: "data analyst",
-    family: "data",
-    synonyms: [
-      "analytics analyst",
-      "business intelligence analyst",
-      "reporting analyst",
-      "insights analyst",
-      "product analyst",
-      "decision scientist",
-    ],
-    abbreviations: ["bi analyst"],
-    discoveryQueries: [
-      "data analyst",
-      "analytics analyst",
-      "business intelligence analyst",
-      "reporting analyst",
-      "insights analyst",
-      "product analyst",
-      "decision scientist",
-      "business analyst",
-      "operations analyst",
-      "analytics engineer",
-      "bi analyst",
-    ],
-  },
-  {
-    concept: "support_engineer",
-    canonical: "support engineer",
-    family: "support",
-  },
-  {
-    concept: "sales_engineer",
-    canonical: "sales engineer",
-    family: "sales",
-  },
-  {
-    concept: "product_designer",
-    canonical: "product designer",
-    family: "design",
-    synonyms: ["ux designer"],
-  },
-  {
-    concept: "data_scientist",
-    canonical: "data scientist",
-    family: "data",
-  },
-  {
-    concept: "software_engineer",
-    canonical: "software engineer",
-    family: "software",
-    synonyms: ["software developer", "software development engineer", "software engineering"],
-    abbreviations: ["swe", "sde"],
-  },
-  {
-    concept: "backend_engineer",
-    canonical: "backend engineer",
-    family: "software",
-    synonyms: [
-      "back end engineer",
-      "backend developer",
-      "back end developer",
-      "backend engineering",
-      "back end engineering",
-    ],
-    relevantToBroadSoftwareQueries: true,
-  },
-  {
-    concept: "frontend_engineer",
-    canonical: "frontend engineer",
-    family: "software",
-    synonyms: [
-      "front end engineer",
-      "frontend developer",
-      "front end developer",
-      "frontend engineering",
-      "front end engineering",
-    ],
-    relevantToBroadSoftwareQueries: true,
-  },
-  {
-    concept: "full_stack_engineer",
-    canonical: "full stack engineer",
-    family: "software",
-    synonyms: [
-      "fullstack engineer",
-      "full stack developer",
-      "fullstack developer",
-      "full stack engineering",
-      "fullstack engineering",
-    ],
-    relevantToBroadSoftwareQueries: true,
-  },
-  {
-    concept: "platform_engineer",
-    canonical: "platform engineer",
-    family: "software",
-    synonyms: ["platform developer", "platform engineering"],
-    relevantToBroadSoftwareQueries: true,
-  },
-];
-
-const titleRoleAliases = titleRoleDefinitions
-  .flatMap((definition) => [
-    {
-      concept: definition.concept,
-      canonical: definition.canonical,
-      family: definition.family,
-      kind: "canonical" as const,
-      phrase: normalizeComparableText(definition.canonical),
-      relevantToBroadSoftwareQueries: definition.relevantToBroadSoftwareQueries ?? false,
-    },
-    ...(definition.synonyms ?? []).map((phrase) => ({
-      concept: definition.concept,
-      canonical: definition.canonical,
-      family: definition.family,
-      kind: "synonym" as const,
-      phrase: normalizeComparableText(phrase),
-      relevantToBroadSoftwareQueries: definition.relevantToBroadSoftwareQueries ?? false,
-    })),
-    ...(definition.abbreviations ?? []).map((phrase) => ({
-      concept: definition.concept,
-      canonical: definition.canonical,
-      family: definition.family,
-      kind: "abbreviation" as const,
-      phrase: normalizeComparableText(phrase),
-      relevantToBroadSoftwareQueries: definition.relevantToBroadSoftwareQueries ?? false,
-    })),
-  ])
-  .sort(
-    (left, right) =>
-      right.phrase.split(" ").length - left.phrase.split(" ").length ||
-      right.phrase.length - left.phrase.length,
-  );
 
 export function createId() {
   return randomUUID();
@@ -888,12 +605,17 @@ export function matchesFiltersWithoutExperience(
 export function evaluateSearchFilters(
   job: ExperienceFilterableJob,
   filters: SearchFilters,
-  options: { includeExperience: boolean },
+  options: { includeExperience: boolean; titleMatchMode?: TitleMatchMode },
 ) : FilterEvaluation {
-  if (!getTitleMatchResult(job.title, filters.title).matches) {
+  const titleMatch = getTitleMatchResult(job.title, filters.title, {
+    mode: options.titleMatchMode,
+  });
+
+  if (!titleMatch.matches) {
     return {
       matches: false,
       reason: "title",
+      titleMatch,
     };
   }
 
@@ -937,6 +659,7 @@ export function evaluateSearchFilters(
 
   return {
     matches: true,
+    titleMatch,
   };
 }
 
@@ -983,97 +706,19 @@ function resolveExperienceMatchMode(filters: SearchFilters): ExperienceMatchMode
 }
 
 export function normalizeTitleToCanonicalForm(value?: string) {
-  return analyzeTitle(value).canonical;
+  return normalizeTitleRetrievalCanonicalForm(value);
 }
 
 export function buildDiscoveryRoleQueries(value?: string) {
-  const analyzed = analyzeTitle(value);
-  const queries: string[] = [];
-  const seen = new Set<string>();
-
-  const push = (candidate?: string) => {
-    const normalized = normalizeComparableText(candidate);
-    if (!normalized || seen.has(normalized)) {
-      return;
-    }
-
-    seen.add(normalized);
-    queries.push(normalized);
-  };
-
-  if (isBroadSoftwareQuery(analyzed)) {
-    broadSoftwareDiscoveryRoleQueries.forEach(push);
-    return queries;
-  }
-
-  const matchingDefinition = analyzed.concept
-    ? titleRoleDefinitions.find((definition) => definition.concept === analyzed.concept)
-    : undefined;
-
-  if (matchingDefinition?.discoveryQueries?.length) {
-    matchingDefinition.discoveryQueries.forEach(push);
-    return queries;
-  }
-
-  push(matchingDefinition?.canonical ?? analyzed.canonical);
-  matchingDefinition?.synonyms?.slice(0, 3).forEach(push);
-  matchingDefinition?.abbreviations?.slice(0, 2).forEach(push);
-
-  if (queries.length === 0) {
-    push(analyzed.canonical);
-  }
-
-  return queries;
+  return buildTitleRetrievalDiscoveryRoleQueries(value ?? "");
 }
 
-export function getTitleMatchResult(jobTitle: string, queryTitle: string): TitleMatchResult {
-  const query = analyzeTitle(queryTitle);
-  const title = analyzeTitle(jobTitle);
-
-  if (!query.normalized || !title.normalized) {
-    return buildTitleMatchResult("none", query, title);
-  }
-
-  if (query.normalized === title.normalized) {
-    return buildTitleMatchResult("exact", query, title);
-  }
-
-  if (query.baseNormalized === title.baseNormalized) {
-    return buildTitleMatchResult("variant", query, title, 460);
-  }
-
-  if (query.concept && query.concept === title.concept) {
-    if (query.aliasKind === "abbreviation" || title.aliasKind === "abbreviation") {
-      return buildTitleMatchResult("abbreviation", query, title);
-    }
-
-    if (query.aliasKind === "synonym" || title.aliasKind === "synonym") {
-      return buildTitleMatchResult("synonym", query, title);
-    }
-
-    return buildTitleMatchResult("variant", query, title, 430);
-  }
-
-  if (
-    isBroadSoftwareQuery(query) &&
-    title.family === "software" &&
-    title.relevantToBroadSoftwareQueries
-  ) {
-    return buildTitleMatchResult("related", query, title);
-  }
-
-  if (query.concept && title.concept && query.concept !== title.concept) {
-    return buildTitleMatchResult("none", query, title);
-  }
-
-  if (
-    containsAllNormalizedTerms(title.baseNormalized, query.baseNormalized) ||
-    containsAllNormalizedTerms(title.normalized, query.normalized)
-  ) {
-    return buildTitleMatchResult("generic", query, title);
-  }
-
-  return buildTitleMatchResult("none", query, title);
+export function getTitleMatchResult(
+  jobTitle: string,
+  queryTitle: string,
+  options?: { mode?: TitleMatchMode },
+): TitleMatchResult {
+  return getTitleRetrievalMatchResult(jobTitle, queryTitle, options);
 }
 
 function matchesCountryFilter(
@@ -1590,127 +1235,6 @@ function sortExperienceMatchersByPriority<T extends { level: ExperienceLevel }>(
     (left, right) =>
       experienceLevelPriority[right.level] - experienceLevelPriority[left.level],
   );
-}
-
-function analyzeTitle(value?: string): AnalyzedTitle {
-  const normalized = normalizeComparableText(value);
-  const baseNormalized = stripSeniorityModifiers(normalized);
-  const alias = findBestTitleAlias(baseNormalized) ?? findBestTitleAlias(normalized);
-  const inferredFamily = alias ? undefined : inferBroadTitleFamily(baseNormalized);
-  const canonical = alias?.canonical ?? baseNormalized;
-  const remainderNormalized = alias ? removeNormalizedPhrase(baseNormalized, alias.phrase) : "";
-
-  return {
-    normalized,
-    baseNormalized,
-    canonical,
-    concept: alias?.concept,
-    family: alias?.family ?? inferredFamily?.family,
-    aliasKind: alias?.kind,
-    matchedPhrase: alias?.phrase,
-    relevantToBroadSoftwareQueries:
-      alias?.relevantToBroadSoftwareQueries ?? inferredFamily?.relevantToBroadSoftwareQueries ?? false,
-    remainderNormalized,
-  };
-}
-
-function findBestTitleAlias(value: string) {
-  if (!value) {
-    return undefined;
-  }
-
-  return titleRoleAliases.find((alias) => containsNormalizedTerm(value, alias.phrase));
-}
-
-function stripSeniorityModifiers(value: string) {
-  if (!value) {
-    return "";
-  }
-
-  let stripped = value;
-  for (const phrase of seniorityPhrases) {
-    stripped = removeNormalizedPhrase(stripped, phrase);
-  }
-
-  return stripped
-    .split(" ")
-    .filter((token) => token && !seniorityTokens.has(token))
-    .join(" ");
-}
-
-function removeNormalizedPhrase(value: string, phrase: string) {
-  if (!value || !phrase) {
-    return value;
-  }
-
-  return value
-    .replace(new RegExp(`(^| )${escapeRegExp(phrase)}(?= |$)`), " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function isBroadSoftwareQuery(title: AnalyzedTitle) {
-  return title.concept === "software_engineer" && title.remainderNormalized.length === 0;
-}
-
-function inferBroadTitleFamily(value: string) {
-  if (!value) {
-    return undefined;
-  }
-
-  if (broadSoftwareNegativePhrases.some((phrase) => containsNormalizedTerm(value, phrase))) {
-    return undefined;
-  }
-
-  const hasEngineeringCore =
-    containsNormalizedTerm(value, "engineer") ||
-    containsNormalizedTerm(value, "developer");
-  if (!hasEngineeringCore) {
-    return undefined;
-  }
-
-  const hasSoftwareSignal = broadSoftwarePositivePhrases.some((phrase) =>
-    containsNormalizedTerm(value, phrase),
-  );
-  if (!hasSoftwareSignal) {
-    return undefined;
-  }
-
-  return {
-    family: "software" as const,
-    relevantToBroadSoftwareQueries: true,
-  };
-}
-
-function buildTitleMatchResult(
-  tier: TitleMatchTier,
-  query: AnalyzedTitle,
-  title: AnalyzedTitle,
-  overrideScore?: number,
-): TitleMatchResult {
-  const score =
-    overrideScore ??
-    {
-      exact: 500,
-      variant: 420,
-      synonym: 320,
-      abbreviation: 220,
-      related: 120,
-      generic: 40,
-      none: 0,
-    }[tier];
-
-  return {
-    matches: score > 0,
-    tier,
-    score,
-    canonicalQueryTitle: query.canonical,
-    canonicalJobTitle: title.canonical,
-  };
 }
 
 export function isValidationStale(lastValidatedAt: string | undefined, ttlMinutes: number, now = new Date()) {

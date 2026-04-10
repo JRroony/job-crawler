@@ -242,7 +242,9 @@ export const publicSearchDiscoveryDiagnosticsSchema = z.object({
   engineRequestCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
   engineResultCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
   dropReasonCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
+  sampleGeneratedRoleQueries: z.array(z.string().min(1)).max(12).default([]),
   sampleGeneratedQueries: z.array(z.string().min(1)).max(12).default([]),
+  sampleExecutedRoleQueries: z.array(z.string().min(1)).max(12).default([]),
   sampleExecutedQueries: z.array(z.string().min(1)).max(12).default([]),
 });
 

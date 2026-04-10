@@ -652,6 +652,13 @@ function buildOperationalHighlights(
     highlights.push(
       `Public search generated ${publicSearch.generatedQueries} queries, executed ${publicSearch.executedQueries}, harvested ${publicSearch.rawResultsHarvested} raw results, and added ${publicSearch.sourcesAdded} sources.`,
     );
+
+    if (publicSearch.sampleGeneratedRoleQueries.length > 0) {
+      const preview = publicSearch.sampleGeneratedRoleQueries.slice(0, 4);
+      highlights.push(
+        `Title variants explored: ${preview.join(", ")}${publicSearch.roleQueryCount > preview.length ? ", ..." : ""}.`,
+      );
+    }
   }
 
   if (diagnostics.providerFailures > 0) {

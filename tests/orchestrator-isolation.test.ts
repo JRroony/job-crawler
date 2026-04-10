@@ -1501,7 +1501,7 @@ describe("crawl orchestration", () => {
       sourceLookupKeys: ["greenhouse:acme:job 1"],
       crawlRunIds: [result.crawlRun._id],
     });
-    expect(storedJobs[0].sourceProvenance).toEqual([
+    expect(storedJobs[0].sourceProvenance).toMatchObject([
       {
         sourcePlatform: "greenhouse",
         sourceJobId: "job-1",
@@ -1509,9 +1509,9 @@ describe("crawl orchestration", () => {
         applyUrl: "https://example.com/job-1/apply",
         canonicalUrl: "https://example.com/job-1",
         discoveredAt: now.toISOString(),
-        rawSourceMetadata: {
+        rawSourceMetadata: expect.objectContaining({
           boardToken: "acme",
-        },
+        }),
       },
     ]);
     expect(storedJobs[0]?.resolvedUrl).toBeUndefined();

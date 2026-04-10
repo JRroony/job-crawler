@@ -300,7 +300,7 @@ describe("title relevance", () => {
     {
       label: "seniority-insensitive software variant",
       title: "Senior Software Engineer",
-      tier: "variant",
+      tier: "canonical_variant",
     },
     {
       label: "software synonym",
@@ -315,17 +315,17 @@ describe("title relevance", () => {
     {
       label: "related broad software role",
       title: "Backend Engineer",
-      tier: "related",
+      tier: "adjacent_concept",
     },
     {
       label: "mobile engineering role",
       title: "Mobile Engineer",
-      tier: "related",
+      tier: "adjacent_concept",
     },
     {
       label: "infrastructure engineering role",
       title: "Infrastructure Engineer",
-      tier: "related",
+      tier: "adjacent_concept",
     },
   ])("classifies $label", ({ title, tier }) => {
     expect(getTitleMatchResult(title, "Software Engineer")).toMatchObject({

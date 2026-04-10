@@ -2,6 +2,7 @@ import "server-only";
 
 import type { ExperienceClassification, SearchFilters } from "@/lib/types";
 import type { NormalizedJobSeed, ProviderResult } from "@/lib/server/providers/types";
+import type { TitleMatchResult } from "@/lib/server/title-retrieval";
 
 import {
   buildLocationText,
@@ -171,7 +172,7 @@ export function filterProviderSeeds(
     });
 
     if (evaluation.matches) {
-      matchedSeeds.push(seed);
+      matchedSeeds.push(attachTitleMatchMetadata(seed, evaluation.titleMatch));
       continue;
     }
 
@@ -187,6 +188,26 @@ export function filterProviderSeeds(
     jobs: matchedSeeds,
     excludedByTitle,
     excludedByLocation,
+  };
+}
+
+function attachTitleMatchMetadata(
+  seed: NormalizedJobSeed,
+  titleMatch: TitleMatchResult,
+) {
+  return {
+    ...seed,
+    rawSourceMetadata: {
+      ...seed.rawSourceMetadata,
+      crawlTitleMatch: {
+        tier: titleMatch.tier,
+        score: titleMatch.score,
+        canonicalQueryTitle: titleMatch.canonicalQueryTitle,
+        canonicalJobTitle: titleMatch.canonicalJobTitle,
+        explanation: titleMatch.explanation,
+        matchedTerms: titleMatch.matchedTerms,
+      },
+    },
   };
 }
 

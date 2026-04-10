@@ -22,6 +22,7 @@ import { getEnv } from "@/lib/server/env";
 import type { JobCrawlerRepository, PersistableJob } from "@/lib/server/db/repository";
 import type { DiscoveryService } from "@/lib/server/discovery/types";
 import type { CrawlProvider, NormalizedJobSeed } from "@/lib/server/providers/types";
+import type { TitleMatchResult } from "@/lib/server/title-retrieval";
 import {
   activeCrawlerPlatforms,
   crawlResponseSchema,
@@ -426,7 +427,7 @@ function filterSeedsForSearch(
     });
 
     if (evaluation.matches) {
-      matchedSeeds.push(seed);
+      matchedSeeds.push(withTitleMatchMetadata(seed, evaluation.titleMatch));
       continue;
     }
 
@@ -448,6 +449,23 @@ function filterSeedsForSearch(
     excludedByTitle,
     excludedByLocation,
     excludedByExperience,
+  };
+}
+
+function withTitleMatchMetadata(seed: NormalizedJobSeed, titleMatch: TitleMatchResult) {
+  return {
+    ...seed,
+    rawSourceMetadata: {
+      ...seed.rawSourceMetadata,
+      crawlTitleMatch: {
+        tier: titleMatch.tier,
+        score: titleMatch.score,
+        canonicalQueryTitle: titleMatch.canonicalQueryTitle,
+        canonicalJobTitle: titleMatch.canonicalJobTitle,
+        explanation: titleMatch.explanation,
+        matchedTerms: titleMatch.matchedTerms,
+      },
+    },
   };
 }
 

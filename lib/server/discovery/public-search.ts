@@ -1,7 +1,6 @@
 import "server-only";
 
 import {
-  buildDiscoveryRoleQueries,
   runWithConcurrency,
 } from "@/lib/server/crawler/helpers";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
@@ -11,6 +10,10 @@ import {
 } from "@/lib/server/locations/us";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import { safeFetchText } from "@/lib/server/net/fetcher";
+import {
+  buildTitleQueryVariants,
+  type TitleQueryVariant,
+} from "@/lib/server/title-retrieval";
 import type {
   ActiveCrawlerPlatform,
   PublicSearchDiscoveryDiagnostics,
@@ -54,6 +57,7 @@ export type PublicSearchQueryPlan = {
   maxQueries: number;
   maxSources: number;
   roleQueries: string[];
+  roleQueryVariants: TitleQueryVariant[];
   platformPlans: PublicSearchPlatformPlan[];
   queries: PublicSearchQuery[];
 };
@@ -199,6 +203,13 @@ export async function discoverSourcesFromPublicSearchDetailed(
         diagnostics.sampleExecutedQueries.push(query.query);
       }
 
+      if (
+        diagnostics.sampleExecutedRoleQueries.length < 12 &&
+        !diagnostics.sampleExecutedRoleQueries.includes(query.roleQuery)
+      ) {
+        diagnostics.sampleExecutedRoleQueries.push(query.roleQuery);
+      }
+
       let addedSourceCount = 0;
       for (const source of result.sources) {
         if (discovered.size >= plan.maxSources) {
@@ -277,17 +288,20 @@ export function buildPublicSearchQueryPlan(
     ): platform is SearchablePublicPlatform =>
       platform === "greenhouse" || platform === "lever" || platform === "ashby",
   );
-  const roleQueries = buildRoleQueries(filters.title);
-  if (roleQueries.length === 0) {
+  const roleQueryVariants = buildRoleQueries(filters.title);
+  if (roleQueryVariants.length === 0) {
     return {
       maxResultsPerQuery: options.maxResultsPerQuery,
       maxQueries: options.maxQueries ?? defaultMaxPublicSearchQueries,
       maxSources: options.maxSources ?? defaultMaxPublicSearchSources,
-      roleQueries,
+      roleQueries: [],
+      roleQueryVariants,
       platformPlans: [],
       queries: [],
     };
   }
+
+  const roleQueries = roleQueryVariants.map((variant) => variant.query);
 
   const platformPlans = selectedPlatforms.map((platform) => {
     const { locationIntent, locationClauses } = buildPlatformLocationPlan(
@@ -296,14 +310,14 @@ export function buildPublicSearchQueryPlan(
       options.maxGreenhouseLocationClauses ?? defaultMaxGreenhouseLocationClauses,
     );
     const hostCount = searchHostQueries[platform].length;
-    const queries = roleQueries.flatMap((roleQuery, roleIndex) =>
+    const queries = roleQueryVariants.flatMap((roleVariant, roleIndex) =>
       locationClauses.flatMap((locationClause, clauseIndex) =>
         searchHostQueries[platform].map((hostQuery, hostIndex) => ({
           platform,
           hostQuery,
-          roleQuery,
+          roleQuery: roleVariant.query,
           locationClause: locationClause || undefined,
-          query: [hostQuery, roleQuery, locationClause].filter(Boolean).join(" "),
+          query: [hostQuery, roleVariant.query, locationClause].filter(Boolean).join(" "),
           limit: options.maxResultsPerQuery,
           priority:
             roleIndex * locationClauses.length * hostCount +
@@ -326,6 +340,7 @@ export function buildPublicSearchQueryPlan(
     maxQueries: options.maxQueries ?? defaultMaxPublicSearchQueries,
     maxSources: options.maxSources ?? defaultMaxPublicSearchSources,
     roleQueries,
+    roleQueryVariants,
     platformPlans,
     queries: platformPlans
       .flatMap((platformPlan) => platformPlan.queries)
@@ -334,7 +349,9 @@ export function buildPublicSearchQueryPlan(
 }
 
 function buildRoleQueries(title: string) {
-  return buildDiscoveryRoleQueries(title);
+  return buildTitleQueryVariants(title, {
+    maxQueries: 12,
+  });
 }
 
 function buildPlatformLocationPlan(
@@ -651,7 +668,9 @@ function createEmptyPublicSearchDiagnostics(
     engineRequestCounts: {},
     engineResultCounts: {},
     dropReasonCounts: {},
+    sampleGeneratedRoleQueries: plan.roleQueries.slice(0, 12),
     sampleGeneratedQueries: plan.queries.slice(0, 12).map((query) => query.query),
+    sampleExecutedRoleQueries: [],
     sampleExecutedQueries: [],
   };
 }

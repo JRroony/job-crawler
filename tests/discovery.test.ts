@@ -356,14 +356,16 @@ describe("source discovery", () => {
 
     expect(plan.maxSources).toBe(120);
     expect(plan.maxQueries).toBe(72);
-    expect(plan.roleQueries).toEqual([
+    expect(plan.roleQueries.slice(0, 10)).toEqual([
       "software engineer",
       "software developer",
       "software development engineer",
       "backend engineer",
+      "frontend engineer",
       "full stack engineer",
       "platform engineer",
-      "frontend engineer",
+      "mobile engineer",
+      "java developer",
       "swe",
     ]);
     expect(plan.platformPlans).toHaveLength(1);
@@ -432,7 +434,6 @@ describe("source discovery", () => {
       "decision scientist",
       "business analyst",
       "operations analyst",
-      "analytics engineer",
       "bi analyst",
     ]);
   });
@@ -583,14 +584,13 @@ describe("source discovery", () => {
     );
     expect(requestedQueries).toEqual(
       expect.arrayContaining([
-        "site:boards.greenhouse.io software engineer",
-        "site:job-boards.greenhouse.io software engineer",
+        "site:boards.greenhouse.io senior software engineer",
+        "site:job-boards.greenhouse.io senior software engineer",
       ]),
     );
     expect(requests.some((requestUrl) => requestUrl.startsWith("https://html.duckduckgo.com/"))).toBe(false);
     expect(requestedQueries.some((query) => query?.includes("United States"))).toBe(false);
     expect(requestedQueries.some((query) => query?.includes("\""))).toBe(false);
-    expect(requestedQueries.some((query) => query?.includes("Senior"))).toBe(false);
   });
 
   it("respects the configured query budget, returns more than 24 sources when allowed, and reports funnel diagnostics", async () => {
