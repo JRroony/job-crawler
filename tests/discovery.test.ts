@@ -385,17 +385,19 @@ describe("source discovery", () => {
         "remote usa",
         "remote us",
         "united states remote",
+        "remote california",
+        "remote texas",
         "california",
         "ca usa",
         "texas",
         "tx usa",
         "new york state",
+        "ny usa",
         "washington state",
         "seattle wa",
         "seattle washington",
         "bellevue wa",
-        "san francisco ca",
-        "san jose ca",
+        "bellevue washington",
       ]),
     );
     expect(plan.queries.length).toBeGreaterThan(300);
@@ -424,18 +426,45 @@ describe("source discovery", () => {
       },
     );
 
-    expect(plan.roleQueries).toEqual([
-      "data analyst",
-      "analytics analyst",
-      "business intelligence analyst",
-      "reporting analyst",
-      "insights analyst",
-      "product analyst",
-      "decision scientist",
-      "business analyst",
-      "operations analyst",
-      "bi analyst",
-    ]);
+    expect(plan.roleQueries).toEqual(
+      expect.arrayContaining([
+        "data analyst",
+        "analytics analyst",
+        "business intelligence analyst",
+        "reporting analyst",
+        "insights analyst",
+        "product analyst",
+        "decision scientist",
+        "business analyst",
+        "operations analyst",
+        "bi analyst",
+      ]),
+    );
+  });
+
+  it("keeps data engineer discovery inside the data-engineering family", () => {
+    const plan = buildPublicSearchQueryPlan(
+      {
+        title: "Data Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        maxResultsPerQuery: 4,
+      },
+    );
+
+    expect(plan.roleQueries).toEqual(
+      expect.arrayContaining([
+        "data engineer",
+        "analytics engineer",
+        "data platform engineer",
+        "etl engineer",
+        "data warehouse engineer",
+        "data pipeline engineer",
+      ]),
+    );
+    expect(plan.roleQueries).not.toContain("software engineer");
   });
 
   it("scopes US state-only Greenhouse discovery to the direct state clause and same-state metros", () => {
@@ -466,6 +495,8 @@ describe("source discovery", () => {
     expect(locationClauses).toEqual(
       expect.arrayContaining([
         "ca usa",
+        "remote california",
+        "california remote",
         "san francisco ca",
         "san francisco california",
         "san jose ca",
@@ -702,6 +733,7 @@ describe("source discovery", () => {
         "remote united states",
         "remote usa",
         "remote us",
+        "remote california",
         "california",
         "ca usa",
         "texas",
@@ -735,6 +767,7 @@ describe("source discovery", () => {
           "united states",
           "usa",
           "remote us",
+          "remote california",
           "california",
         ]),
       }),
@@ -751,6 +784,7 @@ describe("source discovery", () => {
           "united states",
           "usa",
           "remote us",
+          "remote texas",
           "texas",
         ]),
       }),

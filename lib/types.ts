@@ -356,6 +356,46 @@ export const sourceProvenanceSchema = z.object({
   rawSourceMetadata: z.record(z.string(), z.unknown()).default({}),
 });
 
+export const resolvedLocationConfidenceLevels = [
+  "high",
+  "medium",
+  "low",
+  "none",
+] as const;
+
+export const resolvedLocationConfidenceSchema = z.enum(
+  resolvedLocationConfidenceLevels,
+);
+
+export const resolvedLocationEvidenceSources = [
+  "structured_fields",
+  "location_text",
+  "metadata",
+  "office_metadata",
+  "description",
+  "remote_hint",
+] as const;
+
+export const resolvedLocationEvidenceSourceSchema = z.enum(
+  resolvedLocationEvidenceSources,
+);
+
+export const resolvedLocationEvidenceSchema = z.object({
+  source: resolvedLocationEvidenceSourceSchema,
+  value: z.string().min(1),
+});
+
+export const resolvedLocationSchema = z.object({
+  country: z.string().optional(),
+  state: z.string().optional(),
+  stateCode: z.string().optional(),
+  city: z.string().optional(),
+  isRemote: z.boolean(),
+  isUnitedStates: z.boolean(),
+  confidence: resolvedLocationConfidenceSchema,
+  evidence: z.array(resolvedLocationEvidenceSchema).default([]),
+});
+
 export const jobListingSchema = z.object({
   _id: z.string().min(1),
   title: z.string().min(1),
@@ -364,6 +404,7 @@ export const jobListingSchema = z.object({
   state: z.string().optional(),
   city: z.string().optional(),
   locationText: z.string().min(1),
+  resolvedLocation: resolvedLocationSchema.optional(),
   experienceLevel: experienceLevelSchema.optional(),
   experienceClassification: experienceClassificationSchema.optional(),
   sourcePlatform: providerPlatformSchema,
@@ -486,6 +527,16 @@ export type ActiveCrawlerPlatform = z.infer<typeof activeCrawlerPlatformSchema>;
 export type CrawlMode = z.infer<typeof crawlModeSchema>;
 export type CrawlValidationMode = z.infer<typeof crawlValidationModeSchema>;
 export type SearchFilters = z.infer<typeof searchFiltersSchema>;
+export type ResolvedLocationConfidence = z.infer<
+  typeof resolvedLocationConfidenceSchema
+>;
+export type ResolvedLocationEvidenceSource = z.infer<
+  typeof resolvedLocationEvidenceSourceSchema
+>;
+export type ResolvedLocationEvidence = z.infer<
+  typeof resolvedLocationEvidenceSchema
+>;
+export type ResolvedLocation = z.infer<typeof resolvedLocationSchema>;
 export type JobListing = z.infer<typeof jobListingSchema>;
 export type PersistableJobDocument = z.infer<typeof persistableJobSchema>;
 export type SearchDocument = z.infer<typeof searchDocumentSchema>;

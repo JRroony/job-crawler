@@ -29,6 +29,7 @@ const familyInferenceOrder: TitleRoleFamily[] = [
   "support",
   "sales",
   "operations",
+  "data_engineering",
   "data_analytics",
   "software_engineering",
 ];
@@ -46,6 +47,7 @@ const roleGroupByHeadWord = new Map<string, TitleRoleGroup>([
   ["coordinator", "operations"],
   ["consultant", "sales"],
   ["designer", "writing"],
+  ["tester", "quality"],
 ]);
 
 export function analyzeTitle(value?: string): TitleAnalysis {
@@ -142,6 +144,12 @@ function inferRoleFamily(value: string) {
     return headWord === "analyst" ? matchedFamily : undefined;
   }
 
+  if (matchedFamily === "data_engineering") {
+    return headWord === "engineer" || headWord === "developer" || headWord === "architect"
+      ? matchedFamily
+      : undefined;
+  }
+
   if (matchedFamily === "product") {
     return headWord === "manager" ? matchedFamily : undefined;
   }
@@ -163,6 +171,35 @@ function inferRoleFamily(value: string) {
 
   if (matchedFamily === "sales") {
     return headWord === "engineer" || headWord === "consultant"
+      ? matchedFamily
+      : undefined;
+  }
+
+  if (matchedFamily === "quality_assurance") {
+    return headWord === "engineer" ||
+      headWord === "analyst" ||
+      headWord === "tester" ||
+      normalized.includes("sdet")
+      ? matchedFamily
+      : undefined;
+  }
+
+  if (matchedFamily === "support") {
+    return headWord === "engineer" || headWord === "specialist"
+      ? matchedFamily
+      : undefined;
+  }
+
+  if (matchedFamily === "recruiting") {
+    return headWord === "recruiter" ||
+      headWord === "sourcer" ||
+      normalized.includes("talent acquisition")
+      ? matchedFamily
+      : undefined;
+  }
+
+  if (matchedFamily === "writing_documentation") {
+    return headWord === "writer" || headWord === "specialist"
       ? matchedFamily
       : undefined;
   }

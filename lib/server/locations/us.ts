@@ -31,7 +31,7 @@ export type UsLocationAnalysis = {
 };
 
 export type UsDiscoveryLocationToken = {
-  kind: "country" | "remote" | "state" | "metro";
+  kind: "country" | "remote" | "state" | "remote_state" | "metro";
   value: string;
   priority: number;
 };
@@ -399,7 +399,13 @@ export function buildUsDiscoveryLocationTokens(
       intent.stateCode
         ? { kind: "state", value: buildStateCodeDiscoveryClause(intent.stateCode), priority: 6 }
         : undefined,
-      { kind: "country", value: "united states", priority: 7 },
+      intent.stateName
+        ? { kind: "remote_state", value: formatRemoteStateClause(intent.stateName), priority: 7 }
+        : undefined,
+      intent.stateName
+        ? { kind: "remote_state", value: formatStateRemoteClause(intent.stateName), priority: 8 }
+        : undefined,
+      { kind: "country", value: "united states", priority: 9 },
     ]);
 
     return {
@@ -421,6 +427,8 @@ export function buildUsDiscoveryLocationTokens(
       tokens: dedupeDiscoveryLocationTokens([
         { kind: "state", value: formatStateClause(intent.stateName), priority: 1 },
         { kind: "state", value: buildStateCodeDiscoveryClause(intent.stateCode), priority: 2 },
+        { kind: "remote_state", value: formatRemoteStateClause(intent.stateName), priority: 3 },
+        { kind: "remote_state", value: formatStateRemoteClause(intent.stateName), priority: 4 },
         ...metros,
       ]),
     };
@@ -454,6 +462,19 @@ export function buildUsDiscoveryLocationTokens(
     } satisfies UsDiscoveryLocationToken,
   ]);
 
+  const remoteStateTokens = stateEntriesByPriority.flatMap((state, index) => [
+    {
+      kind: "remote_state",
+      value: formatRemoteStateClause(state.name),
+      priority: 120 + index * 2,
+    } satisfies UsDiscoveryLocationToken,
+    {
+      kind: "remote_state",
+      value: formatStateRemoteClause(state.name),
+      priority: 121 + index * 2,
+    } satisfies UsDiscoveryLocationToken,
+  ]);
+
   const metroTokens = metrosByPriority.flatMap((metro) => [
     {
       kind: "metro",
@@ -472,6 +493,7 @@ export function buildUsDiscoveryLocationTokens(
     tokens: dedupeDiscoveryLocationTokens([
       ...countryTokens,
       ...remoteTokens,
+      ...remoteStateTokens,
       ...stateTokens,
       ...metroTokens,
     ]),
@@ -501,6 +523,9 @@ export function buildUsDiscoveryLocationClauses(
     const remoteClauses = tokenPlan.tokens
       .filter((token) => token.kind === "remote")
       .map((token) => token.value);
+    const remoteStateClauses = tokenPlan.tokens
+      .filter((token) => token.kind === "remote_state")
+      .map((token) => token.value);
     const metroClauses = tokenPlan.tokens
       .filter((token) => token.kind === "metro")
       .map((token) => token.value);
@@ -508,11 +533,18 @@ export function buildUsDiscoveryLocationClauses(
       .filter((token) => token.kind === "state")
       .map((token) => token.value);
     const remainingBudget = Math.max(0, maxClauses - 1 - countryClauses.length - remoteClauses.length);
+    const prioritizedRemoteStateCount = Math.min(
+      remoteStateClauses.length,
+      Math.max(2, Math.floor(remainingBudget / 4)),
+    );
     const prioritizedMetroCount = Math.min(
       metroClauses.length,
-      Math.max(4, Math.ceil(remainingBudget / 2)),
+      Math.max(4, Math.ceil((remainingBudget - prioritizedRemoteStateCount) / 3)),
     );
-    const prioritizedStateCount = Math.max(0, remainingBudget - prioritizedMetroCount);
+    const prioritizedStateCount = Math.max(
+      0,
+      remainingBudget - prioritizedRemoteStateCount - prioritizedMetroCount,
+    );
 
     return {
       intent: tokenPlan.intent,
@@ -520,8 +552,10 @@ export function buildUsDiscoveryLocationClauses(
         "",
         ...countryClauses,
         ...remoteClauses,
+        ...remoteStateClauses.slice(0, prioritizedRemoteStateCount),
         ...metroClauses.slice(0, prioritizedMetroCount),
         ...stateClauses.slice(0, prioritizedStateCount),
+        ...remoteStateClauses.slice(prioritizedRemoteStateCount),
         ...metroClauses.slice(prioritizedMetroCount),
         ...stateClauses.slice(prioritizedStateCount),
       ]).slice(0, maxClauses),
@@ -744,6 +778,14 @@ function formatStateClause(stateName: string) {
   }
 
   return normalizeLocationText(stateName);
+}
+
+function formatRemoteStateClause(stateName: string) {
+  return normalizeLocationText(`remote ${formatStateClause(stateName)}`);
+}
+
+function formatStateRemoteClause(stateName: string) {
+  return normalizeLocationText(`${formatStateClause(stateName)} remote`);
 }
 
 function containsNormalizedTerm(haystack: string, term: string) {

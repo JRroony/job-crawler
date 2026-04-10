@@ -9,6 +9,7 @@ import type {
   ExperienceClassification,
   ExperienceLevel,
   ProviderPlatform,
+  ResolvedLocation,
   SearchFilters,
 } from "@/lib/types";
 
@@ -21,6 +22,7 @@ export type NormalizedJobSeed = {
   state?: string;
   city?: string;
   locationText: string;
+  resolvedLocation?: ResolvedLocation;
   experienceLevel?: ExperienceLevel;
   experienceClassification?: ExperienceClassification;
   sourcePlatform: ProviderPlatform;

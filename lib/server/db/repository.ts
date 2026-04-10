@@ -30,6 +30,7 @@ import {
   jobListingSchema,
   linkValidationResultSchema,
   persistableJobSchema,
+  resolvedLocationSchema,
   sanitizeSearchFiltersInput,
   searchDocumentSchema,
   sourceProvenanceSchema,
@@ -560,12 +561,14 @@ function normalizeStoredJobFields(document: Record<string, unknown>) {
   const sourceProvenance = normalizeSourceProvenance(document, rawSourceMetadata);
   const sourceLookupKeys = normalizeSourceLookupKeys(document, sourceProvenance);
   const crawlRunIds = normalizeStringArray(document.crawlRunIds);
+  const resolvedLocation = normalizeResolvedLocation(document.resolvedLocation);
 
   return {
     ...document,
     country: normalizeOptionalDocumentString(document.country),
     state: normalizeOptionalDocumentString(document.state),
     city: normalizeOptionalDocumentString(document.city),
+    ...(resolvedLocation ? { resolvedLocation } : {}),
     experienceLevel: document.experienceLevel == null ? undefined : document.experienceLevel,
     experienceClassification: normalizeExperienceClassification(document.experienceClassification),
     resolvedUrl: normalizeOptionalDocumentString(document.resolvedUrl),
@@ -610,6 +613,37 @@ function normalizeExperienceClassification(value: unknown) {
   }
 
   const parsed = experienceClassificationSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function normalizeResolvedLocation(value: unknown) {
+  if (!value) {
+    return undefined;
+  }
+
+  const record = isRecord(value)
+    ? {
+        country: normalizeOptionalDocumentString(value.country),
+        state: normalizeOptionalDocumentString(value.state),
+        stateCode: normalizeOptionalDocumentString(value.stateCode),
+        city: normalizeOptionalDocumentString(value.city),
+        isRemote: value.isRemote === true,
+        isUnitedStates: value.isUnitedStates === true,
+        confidence:
+          typeof value.confidence === "string" ? value.confidence : "none",
+        evidence: Array.isArray(value.evidence)
+          ? value.evidence
+              .filter(isRecord)
+              .map((entry) => ({
+                source: entry.source,
+                value: normalizeOptionalDocumentString(entry.value),
+              }))
+              .filter((entry) => typeof entry.source === "string" && entry.value)
+          : [],
+      }
+    : value;
+
+  const parsed = resolvedLocationSchema.safeParse(record);
   return parsed.success ? parsed.data : undefined;
 }
 

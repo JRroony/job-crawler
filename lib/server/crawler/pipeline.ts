@@ -464,7 +464,21 @@ function withTitleMatchMetadata(seed: NormalizedJobSeed, titleMatch: TitleMatchR
         canonicalJobTitle: titleMatch.canonicalJobTitle,
         explanation: titleMatch.explanation,
         matchedTerms: titleMatch.matchedTerms,
+        penalties: titleMatch.penalties,
       },
+      ...(seed.resolvedLocation
+        ? {
+            crawlResolvedLocation: {
+              country: seed.resolvedLocation.country,
+              state: seed.resolvedLocation.state,
+              stateCode: seed.resolvedLocation.stateCode,
+              city: seed.resolvedLocation.city,
+              isRemote: seed.resolvedLocation.isRemote,
+              isUnitedStates: seed.resolvedLocation.isUnitedStates,
+              confidence: seed.resolvedLocation.confidence,
+            },
+          }
+        : {}),
     },
   };
 }
@@ -525,8 +539,9 @@ async function applyInlineValidationStrategy(
 }
 
 function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): PersistableJob {
+  const resolvedLocation = seed.resolvedLocation;
   const locationNormalized = normalizeComparableText(
-    `${seed.city ?? ""} ${seed.state ?? ""} ${seed.country ?? ""} ${seed.locationText}`,
+    `${resolvedLocation?.city ?? seed.city ?? ""} ${resolvedLocation?.state ?? seed.state ?? ""} ${resolvedLocation?.country ?? seed.country ?? ""} ${seed.locationText}`,
   );
   const experienceClassification = resolveJobExperienceClassification(seed);
   const discoveredAt = seed.discoveredAt || now.toISOString();
@@ -534,10 +549,11 @@ function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): PersistableJo
   return {
     title: seed.title,
     company: seed.company,
-    country: seed.country,
-    state: seed.state,
-    city: seed.city,
+    country: resolvedLocation?.country ?? seed.country,
+    state: resolvedLocation?.state ?? seed.state,
+    city: resolvedLocation?.city ?? seed.city,
     locationText: seed.locationText,
+    resolvedLocation,
     experienceLevel:
       experienceClassification.explicitLevel ??
       experienceClassification.inferredLevel,

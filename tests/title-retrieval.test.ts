@@ -30,6 +30,7 @@ describe("title retrieval analysis", () => {
   it("ships the generalized role families used by the taxonomy", () => {
     expect(listSupportedRoleFamilies()).toEqual([
       "software_engineering",
+      "data_engineering",
       "data_analytics",
       "product",
       "program_management",
@@ -73,6 +74,20 @@ describe("title retrieval query expansion", () => {
         "bi analyst",
       ]),
     );
+  });
+
+  it("expands data engineer searches into nearby data-platform concepts without broad software spillover", () => {
+    expect(queriesFor("Data Engineer")).toEqual(
+      expect.arrayContaining([
+        "data engineer",
+        "analytics engineer",
+        "data platform engineer",
+        "etl engineer",
+        "data warehouse engineer",
+        "data pipeline engineer",
+      ]),
+    );
+    expect(queriesFor("Data Engineer")).not.toContain("software engineer");
   });
 
   it("expands business analyst searches into adjacent analyst roles", () => {
@@ -172,6 +187,14 @@ describe("title retrieval scoring", () => {
       matches: true,
       tier: "adjacent_concept",
     });
+    expect(getTitleMatchResult("Analytics Engineer", "Data Engineer")).toMatchObject({
+      matches: true,
+      tier: "adjacent_concept",
+    });
+    expect(getTitleMatchResult("Data Platform Engineer", "Data Engineer")).toMatchObject({
+      matches: true,
+      tier: "adjacent_concept",
+    });
   });
 
   it("uses thresholds so broad fallback overlap can match in balanced mode without acting like an exact match", () => {
@@ -204,6 +227,29 @@ describe("title retrieval scoring", () => {
       tier: "none",
     });
     expect(getTitleMatchResult("Data Engineer", "Data Analyst")).toMatchObject({
+      matches: false,
+      tier: "none",
+    });
+    expect(getTitleMatchResult("Software Engineer", "Data Engineer")).toMatchObject({
+      matches: false,
+      tier: "none",
+    });
+    expect(getTitleMatchResult("Software Engineer", "Recruiter")).toMatchObject({
+      matches: false,
+      tier: "none",
+    });
+  });
+
+  it("keeps qa matching inside the QA and test family", () => {
+    expect(getTitleMatchResult("Test Engineer", "QA Engineer")).toMatchObject({
+      matches: true,
+      tier: "adjacent_concept",
+    });
+    expect(getTitleMatchResult("SDET", "QA Engineer")).toMatchObject({
+      matches: true,
+      tier: "adjacent_concept",
+    });
+    expect(getTitleMatchResult("Software Engineer", "QA Engineer")).toMatchObject({
       matches: false,
       tier: "none",
     });

@@ -93,6 +93,18 @@ export function buildTitleQueryVariants(
         family: adjacentConcept.family,
         conceptId: adjacentConcept.id,
       });
+      (adjacentConcept.aliases ?? []).forEach((alias) =>
+        push(alias, "adjacent_concept", {
+          family: adjacentConcept.family,
+          conceptId: adjacentConcept.id,
+        }),
+      );
+      (adjacentConcept.abbreviations ?? []).forEach((abbreviation) =>
+        push(abbreviation, "adjacent_concept", {
+          family: adjacentConcept.family,
+          conceptId: adjacentConcept.id,
+        }),
+      );
     });
 
     dedupeNormalizedValues(getTitleFamily(concept.family)?.broadDiscoveryQueries ?? []).forEach((query) =>

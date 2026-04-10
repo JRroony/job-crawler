@@ -3,6 +3,7 @@ import "server-only";
 import type { ExperienceClassification, SearchFilters } from "@/lib/types";
 import type { NormalizedJobSeed, ProviderResult } from "@/lib/server/providers/types";
 import type { TitleMatchResult } from "@/lib/server/title-retrieval";
+import { resolveJobLocation } from "@/lib/server/location-resolution";
 
 import {
   buildLocationText,
@@ -70,14 +71,22 @@ export function buildSeed(input: {
     experienceClassification.explicitLevel ?? experienceClassification.inferredLevel;
   const explicitCountry = normalizeCountry(input.explicitCountry);
   const explicitState = normalizeState(input.explicitState);
-
-  return {
-    title: input.title.trim(),
-    company: defaultCompanyName(input.companyToken, input.company),
+  const resolvedLocation = resolveJobLocation({
     country: explicitCountry ?? parsedLocation.country,
     state: explicitState ?? parsedLocation.state,
     city: input.explicitCity ?? parsedLocation.city,
     locationText,
+    rawSourceMetadata: input.rawSourceMetadata,
+  });
+
+  return {
+    title: input.title.trim(),
+    company: defaultCompanyName(input.companyToken, input.company),
+    country: resolvedLocation.country ?? explicitCountry ?? parsedLocation.country,
+    state: resolvedLocation.state ?? explicitState ?? parsedLocation.state,
+    city: resolvedLocation.city ?? input.explicitCity ?? parsedLocation.city,
+    locationText,
+    resolvedLocation,
     experienceLevel,
     experienceClassification,
     sourcePlatform: input.sourcePlatform,
@@ -206,7 +215,21 @@ function attachTitleMatchMetadata(
         canonicalJobTitle: titleMatch.canonicalJobTitle,
         explanation: titleMatch.explanation,
         matchedTerms: titleMatch.matchedTerms,
+        penalties: titleMatch.penalties,
       },
+      ...(seed.resolvedLocation
+        ? {
+            crawlResolvedLocation: {
+              country: seed.resolvedLocation.country,
+              state: seed.resolvedLocation.state,
+              stateCode: seed.resolvedLocation.stateCode,
+              city: seed.resolvedLocation.city,
+              isRemote: seed.resolvedLocation.isRemote,
+              isUnitedStates: seed.resolvedLocation.isUnitedStates,
+              confidence: seed.resolvedLocation.confidence,
+            },
+          }
+        : {}),
     },
   };
 }

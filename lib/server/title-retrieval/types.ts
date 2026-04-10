@@ -19,6 +19,7 @@ export type TitleMatchTier = (typeof titleMatchTiers)[number];
 
 export const titleRoleFamilies = [
   "software_engineering",
+  "data_engineering",
   "data_analytics",
   "product",
   "program_management",
@@ -84,6 +85,7 @@ export type TitleConceptDefinition = {
   abbreviations?: string[];
   adjacentConceptIds?: TitleConceptId[];
   broadDiscoveryQueries?: string[];
+  negativeConceptIds?: TitleConceptId[];
   negativeKeywords?: string[];
 };
 
@@ -135,5 +137,6 @@ export type TitleMatchResult = {
   jobFamily?: TitleRoleFamily;
   matchedConceptId?: TitleConceptId;
   matchedTerms: string[];
+  penalties: string[];
   explanation: string;
 };

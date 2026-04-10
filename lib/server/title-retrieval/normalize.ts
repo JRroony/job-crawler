@@ -44,7 +44,7 @@ const stopWords = new Set([
   "on",
   "the",
   "to",
-    "with",
+  "with",
 ]);
 
 const roleHeadWords = new Set([
@@ -59,6 +59,7 @@ const roleHeadWords = new Set([
   "recruiter",
   "specialist",
   "sourcer",
+  "tester",
   "writer",
 ]);
 

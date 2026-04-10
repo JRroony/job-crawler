@@ -209,4 +209,119 @@ describe("pipeline title retrieval", () => {
     ]);
     expect(result.diagnostics.excludedByTitle).toBe(1);
   });
+
+  it("combines title precision and resolved US filtering so only relevant US data-engineering jobs survive", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T13:00:00.000Z");
+
+    const provider = createStubProvider("greenhouse", async () => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: 1,
+      fetchedCount: 5,
+      matchedCount: 5,
+      warningCount: 0,
+      jobs: [
+        {
+          title: "Analytics Engineer",
+          company: "Acme",
+          locationText: "Austin, TX",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "analytics-engineer",
+          sourceUrl: "https://example.com/jobs/analytics-engineer",
+          applyUrl: "https://example.com/jobs/analytics-engineer/apply",
+          canonicalUrl: "https://example.com/jobs/analytics-engineer",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Data Platform Engineer",
+          company: "Acme",
+          locationText: "Remote - California",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "data-platform-engineer",
+          sourceUrl: "https://example.com/jobs/data-platform-engineer",
+          applyUrl: "https://example.com/jobs/data-platform-engineer/apply",
+          canonicalUrl: "https://example.com/jobs/data-platform-engineer",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Software Engineer",
+          company: "Acme",
+          locationText: "Bellevue, WA",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "software-engineer",
+          sourceUrl: "https://example.com/jobs/software-engineer",
+          applyUrl: "https://example.com/jobs/software-engineer/apply",
+          canonicalUrl: "https://example.com/jobs/software-engineer",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Recruiter",
+          company: "Acme",
+          locationText: "Seattle, Washington",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "recruiter",
+          sourceUrl: "https://example.com/jobs/recruiter",
+          applyUrl: "https://example.com/jobs/recruiter/apply",
+          canonicalUrl: "https://example.com/jobs/recruiter",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Data Engineer",
+          company: "Acme",
+          locationText: "Toronto, Ontario",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "data-engineer-canada",
+          sourceUrl: "https://example.com/jobs/data-engineer-canada",
+          applyUrl: "https://example.com/jobs/data-engineer-canada/apply",
+          canonicalUrl: "https://example.com/jobs/data-engineer-canada",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+      ],
+    }));
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+
+    const result = await runSearchFromFilters(
+      {
+        title: "Data Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    expect(result.jobs.map((job) => job.title)).toEqual([
+      "Analytics Engineer",
+      "Data Platform Engineer",
+    ]);
+    expect(result.jobs.map((job) => job.locationText)).toEqual([
+      "Austin, TX",
+      "Remote - California",
+    ]);
+    expect(result.diagnostics.excludedByTitle).toBe(2);
+    expect(result.diagnostics.excludedByLocation).toBe(1);
+  });
 });

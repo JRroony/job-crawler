@@ -3,6 +3,7 @@ import "server-only";
 import {
   areTitleConceptsAdjacent,
   getTitleConcept,
+  getTitleFamily,
 } from "@/lib/server/title-retrieval/catalog";
 import { analyzeTitle } from "@/lib/server/title-retrieval/analyze";
 import type {
@@ -13,9 +14,15 @@ import type {
 } from "@/lib/server/title-retrieval/types";
 
 const titleMatchThresholds: Record<TitleMatchMode, number> = {
-  strict: 700,
-  balanced: 360,
-  broad: 240,
+  strict: 760,
+  balanced: 420,
+  broad: 260,
+};
+
+type MatchPenalty = {
+  reason: string;
+  value: number;
+  hard?: boolean;
 };
 
 export function getTitleMatchResult(
@@ -38,9 +45,12 @@ export function getTitleMatchResult(
       score: 0,
       query,
       job,
+      penalties: [],
       explanation: "One of the titles was empty after normalization.",
     });
   }
+
+  const penalties = collectMatchPenalties(query, job);
 
   if (query.normalized === job.normalized) {
     return buildTitleMatchResult({
@@ -52,6 +62,7 @@ export function getTitleMatchResult(
       job,
       explanation: "The normalized titles are identical.",
       matchedTerms: sharedTerms(query, job),
+      penalties,
     });
   }
 
@@ -66,6 +77,7 @@ export function getTitleMatchResult(
       explanation: "The titles match after removing seniority and formatting modifiers.",
       matchedTerms: sharedTerms(query, job),
       matchedConceptId: query.primaryConceptId ?? job.primaryConceptId,
+      penalties,
     });
   }
 
@@ -90,6 +102,7 @@ export function getTitleMatchResult(
       job,
       matchedConceptId: sharedConceptId,
       matchedTerms: concept ? [concept.canonicalTitle] : sharedTerms(query, job),
+      penalties,
       explanation:
         tier === "abbreviation"
           ? "The titles resolve to the same concept through an abbreviation."
@@ -101,55 +114,46 @@ export function getTitleMatchResult(
 
   const adjacentConceptId = findAdjacentConcept(query, job);
   if (adjacentConceptId) {
-    return buildTitleMatchResult({
+    return buildScoredMatchResult({
       mode,
       threshold,
       tier: "adjacent_concept",
-      score: 640,
+      baseScore: 640,
       query,
       job,
       matchedConceptId: adjacentConceptId,
       matchedTerms: sharedTerms(query, job),
+      penalties,
       explanation: "The titles map to adjacent concepts in the same role family.",
-    });
-  }
-
-  if (query.family && job.family && query.family !== job.family) {
-    return buildTitleMatchResult({
-      mode,
-      threshold,
-      tier: "none",
-      score: 0,
-      query,
-      job,
-      explanation: "The titles map to different role families.",
     });
   }
 
   const sameFamilyScore = computeSameFamilyScore(query, job);
   if (sameFamilyScore > 0) {
-    return buildTitleMatchResult({
+    return buildScoredMatchResult({
       mode,
       threshold,
       tier: "same_family_related",
-      score: sameFamilyScore,
+      baseScore: sameFamilyScore,
       query,
       job,
       matchedTerms: sharedTerms(query, job),
+      penalties,
       explanation: "The titles share the same inferred family and overlapping role signals.",
     });
   }
 
   const genericScore = computeGenericTokenOverlapScore(query, job);
   if (genericScore > 0) {
-    return buildTitleMatchResult({
+    return buildScoredMatchResult({
       mode,
       threshold,
       tier: "generic_token_overlap",
-      score: genericScore,
+      baseScore: genericScore,
       query,
       job,
       matchedTerms: sharedTerms(query, job),
+      penalties,
       explanation: "The titles share meaningful modifier tokens and compatible role heads.",
     });
   }
@@ -158,10 +162,14 @@ export function getTitleMatchResult(
     mode,
     threshold,
     tier: "none",
-    score: 0,
+    score: scoreAfterPenalties(0, penalties),
     query,
     job,
-    explanation: "The titles do not share a concept, family, or strong token overlap.",
+    penalties,
+    explanation:
+      penalties.length > 0
+        ? `The titles do not clear the conflict penalties: ${penalties.map((penalty) => penalty.reason).join("; ")}.`
+        : "The titles do not share a concept, family, or strong token overlap.",
   });
 }
 
@@ -190,6 +198,10 @@ function computeSameFamilyScore(query: TitleAnalysis, job: TitleAnalysis) {
 }
 
 function computeGenericTokenOverlapScore(query: TitleAnalysis, job: TitleAnalysis) {
+  if (query.family && job.family && query.family !== job.family) {
+    return 0;
+  }
+
   const sharedMeaningful = sharedMeaningfulTerms(query, job);
   if (sharedMeaningful.length === 0) {
     return 0;
@@ -212,12 +224,42 @@ function computeGenericTokenOverlapScore(query: TitleAnalysis, job: TitleAnalysi
 
   return Math.min(
     460,
-    240 +
+    250 +
       sharedMeaningful.length * 70 +
       (compatibleRoleGroup ? 50 : 0) +
       (queryCovered ? 60 : 0) +
       (jobCovered ? 20 : 0),
   );
+}
+
+function buildScoredMatchResult(input: {
+  mode: TitleMatchMode;
+  threshold: number;
+  tier: Exclude<TitleMatchTier, "none">;
+  baseScore: number;
+  query: TitleAnalysis;
+  job: TitleAnalysis;
+  matchedConceptId?: string;
+  matchedTerms?: string[];
+  penalties: MatchPenalty[];
+  explanation: string;
+}) {
+  const score = scoreAfterPenalties(input.baseScore, input.penalties);
+  const hasHardPenalty = input.penalties.some((penalty) => penalty.hard);
+
+  if (score <= 0 || hasHardPenalty) {
+    return buildTitleMatchResult({
+      ...input,
+      tier: "none",
+      score,
+      explanation: `${input.explanation} Penalized by: ${input.penalties.map((penalty) => penalty.reason).join("; ")}.`,
+    });
+  }
+
+  return buildTitleMatchResult({
+    ...input,
+    score,
+  });
 }
 
 function buildTitleMatchResult(input: {
@@ -229,6 +271,7 @@ function buildTitleMatchResult(input: {
   job: TitleAnalysis;
   matchedConceptId?: string;
   matchedTerms?: string[];
+  penalties: MatchPenalty[];
   explanation: string;
 }) {
   return {
@@ -243,8 +286,101 @@ function buildTitleMatchResult(input: {
     jobFamily: input.job.family,
     matchedConceptId: input.matchedConceptId,
     matchedTerms: input.matchedTerms ?? [],
+    penalties: input.penalties.map((penalty) => penalty.reason),
     explanation: input.explanation,
   } satisfies TitleMatchResult;
+}
+
+function scoreAfterPenalties(baseScore: number, penalties: MatchPenalty[]) {
+  return Math.max(
+    0,
+    penalties.reduce((score, penalty) => score - penalty.value, baseScore),
+  );
+}
+
+function collectMatchPenalties(query: TitleAnalysis, job: TitleAnalysis) {
+  const penalties: MatchPenalty[] = [];
+  const queryConcept = getTitleConcept(query.primaryConceptId);
+  const jobConcept = getTitleConcept(job.primaryConceptId);
+  const queryFamily = getTitleFamily(query.family);
+  const jobFamily = getTitleFamily(job.family);
+  const conceptsAreAdjacent = query.matchedConceptIds.some((queryConceptId) =>
+    job.matchedConceptIds.some((jobConceptId) =>
+      areTitleConceptsAdjacent(queryConceptId, jobConceptId),
+    ),
+  );
+
+  if (query.family && job.family && query.family !== job.family && !conceptsAreAdjacent) {
+    penalties.push({
+      reason: `conflicting role families (${query.family} vs ${job.family})`,
+      value: 520,
+      hard: true,
+    });
+  }
+
+  if (
+    queryConcept?.negativeConceptIds?.some((conceptId) =>
+      conceptId === job.primaryConceptId || job.matchedConceptIds.includes(conceptId),
+    )
+  ) {
+    penalties.push({
+      reason: `query concept ${queryConcept.canonicalTitle} explicitly excludes ${job.canonicalTitle}`,
+      value: 420,
+      hard: true,
+    });
+  }
+
+  if (
+    jobConcept?.negativeConceptIds?.some((conceptId) =>
+      conceptId === query.primaryConceptId || query.matchedConceptIds.includes(conceptId),
+    )
+  ) {
+    penalties.push({
+      reason: `job concept ${jobConcept.canonicalTitle} explicitly excludes ${query.canonicalTitle}`,
+      value: 420,
+      hard: true,
+    });
+  }
+
+  collectKeywordPenalties(query.normalized, job.normalized, queryConcept?.negativeKeywords).forEach(
+    (penalty) => penalties.push(penalty),
+  );
+  collectKeywordPenalties(query.normalized, job.normalized, queryFamily?.negativeKeywords).forEach(
+    (penalty) => penalties.push(penalty),
+  );
+  collectKeywordPenalties(job.normalized, query.normalized, jobConcept?.negativeKeywords).forEach(
+    (penalty) => penalties.push(penalty),
+  );
+  collectKeywordPenalties(job.normalized, query.normalized, jobFamily?.negativeKeywords).forEach(
+    (penalty) => penalties.push(penalty),
+  );
+
+  return dedupePenalties(penalties);
+}
+
+function collectKeywordPenalties(
+  ownerTitle: string,
+  otherTitle: string,
+  keywords?: string[],
+) {
+  return (keywords ?? [])
+    .filter((keyword) => otherTitle.includes(keyword))
+    .map((keyword) => ({
+      reason: `negative keyword "${keyword}" conflicts with "${ownerTitle}"`,
+      value: 180,
+    }) satisfies MatchPenalty);
+}
+
+function dedupePenalties(penalties: MatchPenalty[]) {
+  const seen = new Set<string>();
+  return penalties.filter((penalty) => {
+    if (seen.has(penalty.reason)) {
+      return false;
+    }
+
+    seen.add(penalty.reason);
+    return true;
+  });
 }
 
 function findSharedConcept(query: TitleAnalysis, job: TitleAnalysis) {

@@ -7,6 +7,7 @@ import {
   isRecognizedUsCity,
   resolveUsState,
 } from "@/lib/server/locations/us";
+import { resolveJobLocation, resolveLocationText } from "@/lib/server/location-resolution";
 import { canonicalizeGreenhouseUrl } from "@/lib/server/discovery/greenhouse-url";
 import {
   buildDiscoveryRoleQueries as buildTitleRetrievalDiscoveryRoleQueries,
@@ -24,6 +25,7 @@ import type {
   ExperienceMatchMode,
   JobListing,
   ProviderPlatform,
+  ResolvedLocation,
   SearchFilters,
 } from "@/lib/types";
 
@@ -46,6 +48,7 @@ type ExperienceFilterableJob = Pick<
   | "state"
   | "city"
   | "locationText"
+  | "resolvedLocation"
   | "experienceLevel"
   | "experienceClassification"
   | "rawSourceMetadata"
@@ -349,7 +352,7 @@ export function parseLocationText(locationText?: string) {
   }
 
   const parts = cleaned.split(",").map((part) => part.trim()).filter(Boolean);
-  const analyzedUsLocation = analyzeUsLocation(cleaned);
+  const resolvedLocation = resolveLocationText(cleaned);
   if (parts.length === 0) {
     return {
       city: undefined,
@@ -361,9 +364,9 @@ export function parseLocationText(locationText?: string) {
 
   if (parts.length === 1) {
     return {
-      city: analyzedUsLocation.isRemote ? undefined : analyzedUsLocation.city,
-      state: analyzedUsLocation.stateName,
-      country: analyzedUsLocation.isUnitedStates ? "United States" : undefined,
+      city: resolvedLocation.isRemote ? undefined : resolvedLocation.city,
+      state: resolvedLocation.state,
+      country: resolvedLocation.isUnitedStates ? "United States" : undefined,
       locationText: parts[0],
     };
   }
@@ -376,12 +379,12 @@ export function parseLocationText(locationText?: string) {
 
     return {
       city:
-        analyzedUsLocation.isRemote || isRemote
+        resolvedLocation.isRemote || isRemote
           ? undefined
-          : analyzedUsLocation.city ?? parts[0],
-      state: analyzedUsLocation.stateName ?? usState,
+          : resolvedLocation.city ?? parts[0],
+      state: resolvedLocation.state ?? usState,
       country:
-        analyzedUsLocation.isUnitedStates || usState || countryConcept === "united states"
+        resolvedLocation.isUnitedStates || usState || countryConcept === "united states"
           ? "United States"
           : parts[1],
       locationText: cleaned,
@@ -389,9 +392,9 @@ export function parseLocationText(locationText?: string) {
   }
 
   return {
-    city: analyzedUsLocation.isRemote ? undefined : analyzedUsLocation.city ?? parts[0],
-    state: analyzedUsLocation.stateName ?? resolveUsState(parts[1]) ?? parts[1],
-    country: analyzedUsLocation.isUnitedStates ? "United States" : parts[2],
+    city: resolvedLocation.isRemote ? undefined : resolvedLocation.city ?? parts[0],
+    state: resolvedLocation.state ?? resolveUsState(parts[1]) ?? parts[1],
+    country: resolvedLocation.isUnitedStates ? "United States" : parts[2],
     locationText: cleaned,
   };
 }
@@ -607,6 +610,7 @@ export function evaluateSearchFilters(
   filters: SearchFilters,
   options: { includeExperience: boolean; titleMatchMode?: TitleMatchMode },
 ) : FilterEvaluation {
+  const resolvedLocation = resolveFilterableLocation(job);
   const titleMatch = getTitleMatchResult(job.title, filters.title, {
     mode: options.titleMatchMode,
   });
@@ -620,7 +624,7 @@ export function evaluateSearchFilters(
   }
 
   if (filters.country) {
-    if (!matchesCountryFilter(job, filters.country)) {
+    if (!matchesCountryFilter(job, filters.country, resolvedLocation)) {
       return {
         matches: false,
         reason: "location",
@@ -629,7 +633,7 @@ export function evaluateSearchFilters(
   }
 
   if (filters.state) {
-    if (!matchesStateFilter(job, filters.state)) {
+    if (!matchesStateFilter(job, filters.state, resolvedLocation)) {
       return {
         matches: false,
         reason: "location",
@@ -639,7 +643,9 @@ export function evaluateSearchFilters(
 
   if (filters.city) {
     const wanted = normalizeComparableText(filters.city);
-    const haystack = normalizeComparableText(`${job.city ?? ""} ${job.locationText}`);
+    const haystack = normalizeComparableText(
+      `${resolvedLocation.city ?? ""} ${job.city ?? ""} ${job.locationText}`,
+    );
     if (!haystack.includes(wanted)) {
       return {
         matches: false,
@@ -724,6 +730,7 @@ export function getTitleMatchResult(
 function matchesCountryFilter(
   job: Pick<JobListing, "country" | "state" | "city" | "locationText">,
   filterCountry: string,
+  resolvedLocation = resolveFilterableLocation(job),
 ) {
   const wantedConcept = resolveCountryConcept(filterCountry);
   if (!wantedConcept) {
@@ -731,15 +738,20 @@ function matchesCountryFilter(
   }
 
   if (wantedConcept === "united states") {
-    return inferJobCountryConcept(job) === wantedConcept;
+    return resolvedLocation.isUnitedStates;
   }
 
-  const inferredCountryConcept = inferJobCountryConcept(job);
+  const inferredCountryConcept =
+    resolvedLocation.isUnitedStates
+      ? "united states"
+      : resolveCountryConcept(resolvedLocation.country ?? job.country);
   if (inferredCountryConcept === wantedConcept) {
     return true;
   }
 
-  const haystack = normalizeComparableText(`${job.country ?? ""} ${job.locationText}`);
+  const haystack = normalizeComparableText(
+    `${resolvedLocation.country ?? ""} ${job.country ?? ""} ${job.locationText}`,
+  );
   if (!haystack) {
     return false;
   }
@@ -751,14 +763,17 @@ function matchesCountryFilter(
 function matchesStateFilter(
   job: Pick<JobListing, "state" | "locationText">,
   filterState: string,
+  resolvedLocation = resolveFilterableLocation(job),
 ) {
   const wantedUsState = resolveUsState(filterState);
   if (wantedUsState) {
-    return inferJobUsState(job) === wantedUsState;
+    return resolvedLocation.state === wantedUsState;
   }
 
   const wanted = normalizeComparableText(filterState);
-  const haystack = normalizeComparableText(`${job.state ?? ""} ${job.locationText}`);
+  const haystack = normalizeComparableText(
+    `${resolvedLocation.state ?? ""} ${job.state ?? ""} ${job.locationText}`,
+  );
   return Boolean(wanted) && haystack.includes(wanted);
 }
 
@@ -783,13 +798,13 @@ function containsNormalizedTerm(haystack: string, term: string) {
 function inferJobCountryConcept(
   job: Pick<JobListing, "country" | "state" | "city" | "locationText">,
 ) {
-  const countryConcept = resolveCountryConcept(job.country);
+  const resolvedLocation = resolveFilterableLocation(job);
+  const countryConcept = resolveCountryConcept(resolvedLocation.country ?? job.country);
   if (countryConcept) {
     return countryConcept;
   }
 
-  const analyzedLocation = analyzeJobLocation(job);
-  if (analyzedLocation.isUnitedStates) {
+  if (resolvedLocation.isUnitedStates) {
     return "united states";
   }
 
@@ -839,9 +854,9 @@ function inferCountryConceptFromLocationText(locationText?: string) {
 function inferJobUsState(
   job: Pick<JobListing, "state" | "locationText">,
 ) {
-  const analyzedLocation = analyzeUsLocation(job.locationText);
-  if (analyzedLocation.stateName) {
-    return analyzedLocation.stateName;
+  const resolvedLocation = resolveFilterableLocation(job);
+  if (resolvedLocation.state) {
+    return resolvedLocation.state;
   }
 
   const directState = resolveUsState(job.state);
@@ -867,15 +882,25 @@ function inferJobUsState(
 function analyzeJobLocation(
   job: Pick<JobListing, "country" | "state" | "city" | "locationText">,
 ) {
-  const analyzedLocation = analyzeUsLocation(
-    [job.city, job.state, job.country].filter(Boolean).join(", "),
+  return resolveFilterableLocation(job);
+}
+
+function resolveFilterableLocation(
+  job: Pick<JobListing, "country" | "state" | "city" | "locationText"> & {
+    resolvedLocation?: ResolvedLocation;
+    rawSourceMetadata?: Record<string, unknown>;
+  },
+) {
+  return (
+    job.resolvedLocation ??
+    resolveJobLocation({
+      country: job.country,
+      state: job.state,
+      city: job.city,
+      locationText: job.locationText,
+      rawSourceMetadata: job.rawSourceMetadata,
+    })
   );
-
-  if (analyzedLocation.isUnitedStates) {
-    return analyzedLocation;
-  }
-
-  return analyzeUsLocation(job.locationText);
 }
 
 function splitLocationTextParts(locationText?: string) {
