@@ -10,6 +10,7 @@ import {
 import { extractDirectJobFromPublicSearchCandidate } from "@/lib/server/discovery/public-search-detail";
 import {
   buildUsDiscoveryLocationClauses,
+  type UsDiscoveryLocationClause,
   type UsLocationIntent,
 } from "@/lib/server/locations/us";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
@@ -38,14 +39,18 @@ type PublicSearchOptions = {
 
 type SearchablePublicPlatform = Extract<
   ActiveCrawlerPlatform,
-  "greenhouse" | "lever" | "ashby"
+  "greenhouse" | "lever" | "ashby" | "workday"
 >;
 
 type PublicSearchQuery = {
   platform: SearchablePublicPlatform;
   hostQuery: string;
   roleQuery: string;
+  roleKind: TitleQueryVariant["kind"];
+  rolePriority: number;
   locationClause?: string;
+  locationKind: UsDiscoveryLocationClause["kind"];
+  locationPriority: number;
   query: string;
   limit: number;
   priority: number;
@@ -55,6 +60,7 @@ type PublicSearchPlatformPlan = {
   platform: SearchablePublicPlatform;
   locationIntent: UsLocationIntent;
   locationClauses: string[];
+  locationOptions: UsDiscoveryLocationClause[];
   queries: PublicSearchQuery[];
 };
 
@@ -93,6 +99,10 @@ type QueryExecutionResult = {
   duplicateSourceCount: number;
   engineRequestCounts: Record<string, number>;
   engineResultCounts: Record<string, number>;
+  sampleCandidateUrls: string[];
+  sampleDetailUrls: string[];
+  sampleSourceUrls: string[];
+  sampleRecoveredSourceUrls: string[];
 };
 
 const duckDuckGoHtmlBaseUrl = "https://html.duckduckgo.com/html/";
@@ -100,22 +110,23 @@ const bingRssBaseUrl = "https://www.bing.com/search";
 const defaultSearchTimeoutMs = 8_000;
 const defaultBingTimeoutMs = 5_000;
 const defaultDuckDuckGoTimeoutMs = 2_500;
-const defaultMaxGreenhouseLocationClauses = 24;
+const defaultMaxGreenhouseLocationClauses = 32;
 const defaultMaxPublicSearchSources = 120;
-const defaultMaxPublicSearchQueries = 72;
-const defaultMaxDirectJobExtractions = 24;
+const defaultMaxPublicSearchQueries = 96;
+const defaultMaxDirectJobExtractions = 32;
 const defaultPublicSearchQueryConcurrency = 4;
-const sufficientPlatformMatchesPerQuery = 8;
-const stagnantQueryThreshold = 24;
+const sufficientPlatformMatchesPerQuery = 12;
+const stagnantQueryThreshold = 32;
 
 const searchablePlatforms: ActiveCrawlerPlatform[] = [
   "greenhouse",
   "lever",
   "ashby",
+  "workday",
 ];
 
 const searchHostQueries: Record<
-  Extract<ActiveCrawlerPlatform, "greenhouse" | "lever" | "ashby">,
+  Extract<ActiveCrawlerPlatform, "greenhouse" | "lever" | "ashby" | "workday">,
   string[]
 > = {
   greenhouse: [
@@ -124,6 +135,7 @@ const searchHostQueries: Record<
   ],
   lever: ["site:jobs.lever.co"],
   ashby: ["site:jobs.ashbyhq.com"],
+  workday: ["site:myworkdayjobs.com", "myworkdayjobs"],
 };
 
 const publicSearchEngines = [
@@ -214,6 +226,18 @@ export async function discoverSourcesFromPublicSearchDetailed(
       diagnostics.recoveredSourcesFromDetailUrls += result.recoveredSourceCount;
       mergeDiagnosticCounts(diagnostics.engineRequestCounts, result.engineRequestCounts);
       mergeDiagnosticCounts(diagnostics.engineResultCounts, result.engineResultCounts);
+      result.sampleCandidateUrls.forEach((url) =>
+        pushDiagnosticSample(diagnostics.sampleHarvestedCandidateUrls, url),
+      );
+      result.sampleDetailUrls.forEach((url) =>
+        pushDiagnosticSample(diagnostics.sampleHarvestedDetailUrls, url),
+      );
+      result.sampleSourceUrls.forEach((url) =>
+        pushDiagnosticSample(diagnostics.sampleHarvestedSourceUrls, url),
+      );
+      result.sampleRecoveredSourceUrls.forEach((url) =>
+        pushDiagnosticSample(diagnostics.sampleRecoveredSourceUrls, url),
+      );
       incrementDiagnosticCount(
         diagnostics.dropReasonCounts,
         "platform_mismatch",
@@ -352,6 +376,10 @@ export async function discoverSourcesFromPublicSearchDetailed(
       skippedByQueryBudget,
     );
   }
+  diagnostics.coverageNotes = buildCoverageNotes(diagnostics, {
+    sourceCount: discovered.size,
+    directJobCount: harvestedJobs.size,
+  });
 
   return {
     sources: Array.from(discovered.values()),
@@ -374,7 +402,10 @@ export function buildPublicSearchQueryPlan(
     (
       platform,
     ): platform is SearchablePublicPlatform =>
-      platform === "greenhouse" || platform === "lever" || platform === "ashby",
+      platform === "greenhouse" ||
+      platform === "lever" ||
+      platform === "ashby" ||
+      platform === "workday",
   );
   const roleQueryVariants = buildRoleQueries(filters.title);
   if (roleQueryVariants.length === 0) {
@@ -392,23 +423,27 @@ export function buildPublicSearchQueryPlan(
   const roleQueries = roleQueryVariants.map((variant) => variant.query);
 
   const platformPlans = selectedPlatforms.map((platform) => {
-    const { locationIntent, locationClauses } = buildPlatformLocationPlan(
+    const { locationIntent, locationClauses, locationOptions } = buildPlatformLocationPlan(
       platform,
       filters,
       options.maxGreenhouseLocationClauses ?? defaultMaxGreenhouseLocationClauses,
     );
     const hostCount = searchHostQueries[platform].length;
     const queries = roleQueryVariants.flatMap((roleVariant, roleIndex) =>
-      locationClauses.flatMap((locationClause, clauseIndex) =>
+      locationOptions.flatMap((locationOption, clauseIndex) =>
         searchHostQueries[platform].map((hostQuery, hostIndex) => ({
           platform,
           hostQuery,
           roleQuery: roleVariant.query,
-          locationClause: locationClause || undefined,
-          query: [hostQuery, roleVariant.query, locationClause].filter(Boolean).join(" "),
+          roleKind: roleVariant.kind,
+          rolePriority: roleIndex,
+          locationClause: locationOption.clause || undefined,
+          locationKind: locationOption.kind,
+          locationPriority: clauseIndex,
+          query: [hostQuery, roleVariant.query, locationOption.clause].filter(Boolean).join(" "),
           limit: options.maxResultsPerQuery,
           priority:
-            roleIndex * locationClauses.length * hostCount +
+            roleIndex * locationOptions.length * hostCount +
             clauseIndex * hostCount +
             hostIndex,
         })),
@@ -419,6 +454,7 @@ export function buildPublicSearchQueryPlan(
       platform,
       locationIntent,
       locationClauses,
+      locationOptions,
       queries,
     } satisfies PublicSearchPlatformPlan;
   });
@@ -438,7 +474,7 @@ export function buildPublicSearchQueryPlan(
 
 function buildRoleQueries(title: string) {
   return buildTitleQueryVariants(title, {
-    maxQueries: 12,
+    maxQueries: 18,
   });
 }
 
@@ -446,7 +482,11 @@ function buildPlatformLocationPlan(
   _platform: SearchablePublicPlatform,
   filters: SearchFilters,
   maxLocationClauses: number,
-) {
+): {
+  locationIntent: UsLocationIntent;
+  locationClauses: string[];
+  locationOptions: UsDiscoveryLocationClause[];
+} {
   const locationPlan = buildUsDiscoveryLocationClauses(filters, {
     maxClauses: maxLocationClauses,
   });
@@ -455,12 +495,21 @@ function buildPlatformLocationPlan(
     return {
       locationIntent: locationPlan.intent,
       locationClauses: [""],
+      locationOptions: [
+        { clause: "", kind: "blank", priority: 0 } satisfies UsDiscoveryLocationClause,
+      ],
     };
   }
 
   return {
     locationIntent: locationPlan.intent,
     locationClauses: locationPlan.clauses.length > 0 ? locationPlan.clauses : [""],
+    locationOptions:
+      locationPlan.detailedClauses.length > 0
+        ? locationPlan.detailedClauses
+        : [
+            { clause: "", kind: "blank", priority: 0 } satisfies UsDiscoveryLocationClause,
+          ],
   };
 }
 
@@ -506,6 +555,10 @@ async function executePublicSearchQuery(
   let platformMatchedUrlCount = 0;
   let platformMismatchCount = 0;
   let duplicateSourceCount = 0;
+  const sampleCandidateUrls: string[] = [];
+  const sampleDetailUrls: string[] = [];
+  const sampleSourceUrls: string[] = [];
+  const sampleRecoveredSourceUrls: string[] = [];
 
   for (const engine of publicSearchEngines) {
     const remaining = options.limit - matchedSources.size;
@@ -547,18 +600,25 @@ async function executePublicSearchQuery(
 
       candidateUrlCount += 1;
       platformMatchedUrlCount += 1;
+      pushDiagnosticSample(sampleCandidateUrls, candidate.url);
 
       if (candidate.kind === "detail") {
         detailUrlCount += 1;
+        pushDiagnosticSample(sampleDetailUrls, candidate.url);
         if (!matchedDetailCandidates.has(candidate.url)) {
           matchedDetailCandidates.set(candidate.url, candidate);
         }
       } else if (candidate.kind === "source") {
         sourceUrlCount += 1;
+        pushDiagnosticSample(sampleSourceUrls, candidate.url);
       }
 
       if (candidate.kind === "detail" && candidate.recoveredSource) {
         recoveredSourceCount += 1;
+        pushDiagnosticSample(
+          sampleRecoveredSourceUrls,
+          candidate.recoveredSource.url,
+        );
       }
 
       if (candidate.recoveredSource) {
@@ -596,6 +656,10 @@ async function executePublicSearchQuery(
     duplicateSourceCount,
     engineRequestCounts,
     engineResultCounts,
+    sampleCandidateUrls,
+    sampleDetailUrls,
+    sampleSourceUrls,
+    sampleRecoveredSourceUrls,
   };
 }
 
@@ -790,6 +854,11 @@ function createEmptyPublicSearchDiagnostics(
     sampleGeneratedQueries: plan.queries.slice(0, 12).map((query) => query.query),
     sampleExecutedRoleQueries: [],
     sampleExecutedQueries: [],
+    sampleHarvestedCandidateUrls: [],
+    sampleHarvestedDetailUrls: [],
+    sampleHarvestedSourceUrls: [],
+    sampleRecoveredSourceUrls: [],
+    coverageNotes: [],
   };
 }
 
@@ -814,6 +883,65 @@ function mergeDiagnosticCounts(
   });
 }
 
+function pushDiagnosticSample(target: string[], value?: string) {
+  const trimmed = value?.trim();
+  if (!trimmed || target.length >= 12 || target.includes(trimmed)) {
+    return;
+  }
+
+  target.push(trimmed);
+}
+
+function buildCoverageNotes(
+  diagnostics: PublicSearchDiscoveryDiagnostics,
+  input: {
+    sourceCount: number;
+    directJobCount: number;
+  },
+) {
+  const notes: string[] = [];
+
+  if (diagnostics.executedQueries === 0) {
+    notes.push("No public search queries were executed.");
+  }
+
+  if (diagnostics.rawResultsHarvested === 0) {
+    notes.push("Search engines returned zero raw results.");
+  }
+
+  if (diagnostics.platformMatchedUrls === 0 && diagnostics.rawResultsHarvested > 0) {
+    notes.push("Search results did not classify into the requested ATS platforms.");
+  }
+
+  if (
+    diagnostics.detailUrlsHarvested > 0 &&
+    diagnostics.recoveredSourcesFromDetailUrls === 0
+  ) {
+    notes.push("Detail URLs were harvested but did not recover runnable sources.");
+  }
+
+  if (
+    diagnostics.detailUrlsHarvested > 0 &&
+    diagnostics.directJobsExtracted === 0
+  ) {
+    notes.push("Detail URLs were harvested but direct job extraction produced zero jobs.");
+  }
+
+  if (input.sourceCount === 0 && input.directJobCount === 0) {
+    notes.push("Public search ended with zero recovered sources and zero direct jobs.");
+  }
+
+  if ((diagnostics.dropReasonCounts.query_budget ?? 0) > 0) {
+    notes.push("Query budgeting skipped part of the generated search plan.");
+  }
+
+  if ((diagnostics.dropReasonCounts.stagnant_query_plateau ?? 0) > 0) {
+    notes.push("Public search plateaued before exhausting the full query plan.");
+  }
+
+  return notes.slice(0, 12);
+}
+
 function emptySearchEngineResult(): SearchEngineResult {
   return {
     urls: [],
@@ -829,7 +957,12 @@ function limitSearchEngineResult(result: SearchEngineResult, limit: number): Sea
 }
 
 function supportsDirectDetailExtraction(candidate: PublicSearchCandidate) {
-  return candidate.platform === "greenhouse" || candidate.platform === "lever";
+  return (
+    candidate.platform === "greenhouse" ||
+    candidate.platform === "lever" ||
+    candidate.platform === "ashby" ||
+    candidate.platform === "workday"
+  );
 }
 
 function buildHarvestedJobKey(job: NormalizedJobSeed) {
@@ -849,13 +982,13 @@ export function selectQueriesForExecution(plan: PublicSearchQueryPlan) {
 
   const selected: PublicSearchQuery[] = [];
   const seen = new Set<string>();
-  const primaryRoleQuery = plan.roleQueries[0];
-  const preferredExpansionClauses = new Set([
-    "",
-    "remote us",
-    "remote usa",
-    "remote united states",
-  ]);
+  const blankRoleWindow = Math.min(
+    plan.roleQueries.length,
+    Math.max(
+      4,
+      Math.floor((plan.maxQueries - 4) / Math.max(1, plan.platformPlans.length)),
+    ),
+  );
 
   const pushQuery = (query: PublicSearchQuery | undefined) => {
     if (!query || selected.length >= plan.maxQueries || seen.has(query.query)) {
@@ -866,34 +999,91 @@ export function selectQueriesForExecution(plan: PublicSearchQueryPlan) {
     selected.push(query);
   };
 
-  const primaryRoleQueries = plan.queries.filter(
-    (query) =>
-      query.roleQuery === primaryRoleQuery &&
-      preferredExpansionClauses.has(query.locationClause ?? ""),
+  pushRoundRobinQueries(
+    plan.queries.filter(
+      (query) => query.rolePriority < blankRoleWindow && query.locationKind === "blank",
+    ),
+    (query) => `${query.platform}:${query.rolePriority}`,
+    pushQuery,
   );
-  primaryRoleQueries.forEach(pushQuery);
 
   if (selected.length >= plan.maxQueries) {
     return selected;
   }
 
-  const queryGroups = plan.roleQueries.map((roleQuery) => ({
-    preferred: plan.queries.filter(
+  pushRoundRobinQueries(
+    plan.queries.filter(
       (query) =>
-        query.roleQuery === roleQuery &&
-        preferredExpansionClauses.has(query.locationClause ?? ""),
+        query.rolePriority === 0 &&
+        (query.locationKind === "country" || query.locationKind === "remote"),
     ),
-    remaining: plan.queries.filter(
-      (query) =>
-        query.roleQuery === roleQuery &&
-        !preferredExpansionClauses.has(query.locationClause ?? ""),
-    ),
-  }));
+    (query) => `${query.platform}:${query.locationKind}:${query.locationPriority}`,
+    pushQuery,
+  );
 
-  roundRobinQueryGroups(queryGroups.map((group) => group.preferred), pushQuery);
-  roundRobinQueryGroups(queryGroups.map((group) => group.remaining), pushQuery);
+  pushRoundRobinQueries(
+    plan.queries.filter(
+      (query) =>
+        query.rolePriority === 0 &&
+        (query.locationKind === "remote_state" ||
+          query.locationKind === "metro" ||
+          query.locationKind === "state"),
+    ),
+    (query) => `${query.platform}:${query.locationKind}:${query.locationPriority}`,
+    pushQuery,
+  );
+
+  pushRoundRobinQueries(
+    plan.queries.filter(
+      (query) => query.rolePriority >= blankRoleWindow && query.locationKind === "blank",
+    ),
+    (query) => `${query.platform}:${query.rolePriority}`,
+    pushQuery,
+  );
+
+  pushRoundRobinQueries(
+    plan.queries.filter(
+      (query) =>
+        query.rolePriority > 0 &&
+        (query.locationKind === "country" || query.locationKind === "remote"),
+    ),
+    (query) => `${query.platform}:${query.rolePriority}:${query.locationKind}`,
+    pushQuery,
+  );
+
+  roundRobinQueryGroups(
+    groupQueriesBy(
+      plan.queries,
+      (query) => `${query.platform}:${query.rolePriority}:${query.locationKind}`,
+    ),
+    pushQuery,
+  );
 
   return selected;
+}
+
+function pushRoundRobinQueries(
+  queries: PublicSearchQuery[],
+  keyFn: (query: PublicSearchQuery) => string,
+  pushQuery: (query: PublicSearchQuery | undefined) => void,
+) {
+  roundRobinQueryGroups(groupQueriesBy(queries, keyFn), pushQuery);
+}
+
+function groupQueriesBy(
+  queries: PublicSearchQuery[],
+  keyFn: (query: PublicSearchQuery) => string,
+) {
+  const groups = new Map<string, PublicSearchQuery[]>();
+
+  queries.forEach((query) => {
+    const key = keyFn(query);
+    const current = groups.get(key) ?? [];
+    current.push(query);
+    groups.set(key, current);
+  });
+
+  return Array.from(groups.values());
 }
 
 function roundRobinQueryGroups(

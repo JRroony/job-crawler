@@ -280,6 +280,12 @@ describe("crawl diagnostics", () => {
             publicJobs: 2,
             discoveredBeforeFiltering: 25,
             discoveredAfterFiltering: 1,
+            platformCounts: {
+              greenhouse: 1,
+            },
+            publicJobPlatformCounts: {
+              greenhouse: 2,
+            },
             publicSearch: {
               generatedQueries: 96,
               executedQueries: 24,
@@ -314,6 +320,11 @@ describe("crawl diagnostics", () => {
               sampleGeneratedQueries: ["site:boards.greenhouse.io software engineer"],
               sampleExecutedRoleQueries: ["software engineer"],
               sampleExecutedQueries: ["site:boards.greenhouse.io software engineer"],
+              sampleHarvestedCandidateUrls: ["https://boards.greenhouse.io/openai/jobs/role-1"],
+              sampleHarvestedDetailUrls: ["https://boards.greenhouse.io/openai/jobs/role-1"],
+              sampleHarvestedSourceUrls: ["https://boards.greenhouse.io/openai"],
+              sampleRecoveredSourceUrls: ["https://boards.greenhouse.io/openai"],
+              coverageNotes: ["Query budgeting skipped part of the generated search plan."],
             },
           },
         };

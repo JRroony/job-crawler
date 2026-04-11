@@ -112,7 +112,7 @@ export type TitleAnalysis = {
   headWord?: string;
   tokens: string[];
   meaningfulTokens: string[];
-  inferenceSource: "catalog" | "family" | "fallback" | "none";
+  inferenceSource: "catalog" | "concept_signals" | "family" | "fallback" | "none";
   confidence: "high" | "medium" | "low" | "none";
 };
 

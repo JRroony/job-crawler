@@ -125,6 +125,15 @@ export async function discoverSourcesDetailed(
       publicJobs: publicJobs.length,
       discoveredBeforeFiltering: discoveredBeforeFiltering.length,
       discoveredAfterFiltering: discoveredSources.length,
+      platformCounts: summarizePlatformCounts(discoveredSources),
+      publicJobPlatformCounts: summarizePublicJobPlatformCounts(publicJobs),
+      zeroCoverageReason:
+        discoveredSources.length === 0
+          ? resolveZeroCoverageReason({
+              discoveredBeforeFiltering,
+              publicSearchEnabled: input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED,
+            })
+          : undefined,
       ...(publicSearchResult.diagnostics
         ? {
             publicSearch: publicSearchResult.diagnostics,
@@ -154,17 +163,17 @@ function resolvePublicSearchExecutionOptions(
   if (crawlMode === "balanced") {
     return {
       ...base,
-      maxQueries: Math.min(base.maxQueries, 48),
-      maxLocationClauses: Math.min(base.maxLocationClauses, 16),
-      maxDirectJobs: Math.min(base.maxDirectJobs, 16),
+      maxQueries: Math.min(base.maxQueries, 72),
+      maxLocationClauses: Math.min(base.maxLocationClauses, 24),
+      maxDirectJobs: Math.min(base.maxDirectJobs, 24),
     };
   }
 
   return {
     ...base,
-    maxQueries: Math.min(base.maxQueries, 24),
-    maxLocationClauses: Math.min(base.maxLocationClauses, 8),
-    maxDirectJobs: Math.min(base.maxDirectJobs, 8),
+    maxQueries: Math.min(base.maxQueries, 48),
+    maxLocationClauses: Math.min(base.maxLocationClauses, 16),
+    maxDirectJobs: Math.min(base.maxDirectJobs, 16),
   };
 }
 
@@ -286,11 +295,10 @@ function logDiscoveryTrace(
   }
 
   const reason =
-    trace.discoveredBeforeFiltering.length > 0
-      ? "Selected platforms filtered every discovered source before provider routing."
-      : trace.publicSearchEnabled
-        ? "Registry-backed seeds, supplemental catalog sources, and public ATS search all returned zero runnable sources."
-        : "Registry-backed seeds and supplemental catalog sources returned zero runnable sources while public ATS search was disabled.";
+    resolveZeroCoverageReason({
+      discoveredBeforeFiltering: trace.discoveredBeforeFiltering,
+      publicSearchEnabled: trace.publicSearchEnabled,
+    });
 
   console.warn("[discovery:zero-sources]", {
     filters,
@@ -310,4 +318,22 @@ function summarizeDiscoveryMethodCounts(sources: DiscoveredSource[]) {
     counts[source.discoveryMethod] = (counts[source.discoveryMethod] ?? 0) + 1;
     return counts;
   }, {});
+}
+
+function summarizePublicJobPlatformCounts(jobs: { sourcePlatform: string }[]) {
+  return jobs.reduce<Record<string, number>>((counts, job) => {
+    counts[job.sourcePlatform] = (counts[job.sourcePlatform] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function resolveZeroCoverageReason(input: {
+  discoveredBeforeFiltering: DiscoveredSource[];
+  publicSearchEnabled: boolean;
+}) {
+  return input.discoveredBeforeFiltering.length > 0
+    ? "Selected platforms filtered every discovered source before provider routing."
+    : input.publicSearchEnabled
+      ? "Registry-backed seeds, supplemental catalog sources, and public ATS search all returned zero runnable sources."
+      : "Registry-backed seeds and supplemental catalog sources returned zero runnable sources while public ATS search was disabled.";
 }

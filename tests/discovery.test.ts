@@ -20,9 +20,9 @@ const discoveryEnvDefaults = {
   PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
   PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 8,
   PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 120,
-  PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 72,
+  PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 96,
   PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: 4,
-  GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 24,
+  GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 32,
 };
 
 describe("source discovery", () => {
@@ -165,8 +165,9 @@ describe("source discovery", () => {
     });
     expect(workdayDetail).toMatchObject({
       platform: "workday",
-      token: "acme:en-us/careers",
+      token: "acme:careers",
       jobId: "Seattle-WA/Data-Engineer_R12345",
+      careerSitePath: "Careers",
       sitePath: "en-US/Careers",
       url: "https://acme.wd1.myworkdayjobs.com/en-US/Careers",
     });
@@ -501,6 +502,205 @@ describe("source discovery", () => {
       detailUrlsHarvested: 1,
       recoveredSourcesFromDetailUrls: 1,
       directJobsExtracted: 1,
+      sampleHarvestedDetailUrls: [
+        "https://jobs.lever.co/figma/4d6f3f0b-1cdd-4d2e-a0a7-123456789abc",
+      ],
+    });
+  });
+
+  it("harvests direct Ashby detail jobs from SERP hits while recovering the board token", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      if (url.startsWith("https://www.bing.com/search")) {
+        return new Response(
+          `
+            <rss>
+              <channel>
+                <item>
+                  <link>https://jobs.ashbyhq.com/notion/497fcc20-d3fd-42f0-9b24-123456789abc</link>
+                </item>
+              </channel>
+            </rss>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/rss+xml",
+            },
+          },
+        );
+      }
+
+      if (url.startsWith("https://html.duckduckgo.com/html/")) {
+        return new Response("<html><body></body></html>", {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        });
+      }
+
+      if (url === "https://jobs.ashbyhq.com/notion/497fcc20-d3fd-42f0-9b24-123456789abc") {
+        return new Response(
+          `
+            <html>
+              <body>
+                <script>
+                  window.__appData = {
+                    "jobBoard": {
+                      "jobPostings": [
+                        {
+                          "id": "497fcc20-d3fd-42f0-9b24-123456789abc",
+                          "title": "QA Engineer",
+                          "locationName": "Remote, United States",
+                          "jobUrl": "https://jobs.ashbyhq.com/notion/497fcc20-d3fd-42f0-9b24-123456789abc"
+                        }
+                      ]
+                    }
+                  };
+                </script>
+              </body>
+            </html>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "text/html",
+            },
+          },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const result = await discoverSourcesFromPublicSearchDetailed(
+      {
+        title: "QA Engineer",
+        country: "United States",
+        platforms: ["ashby"],
+      },
+      {
+        fetchImpl,
+        maxResultsPerQuery: 4,
+        maxQueries: 1,
+      },
+    );
+
+    expect(result.sources).toEqual([
+      expect.objectContaining({
+        platform: "ashby",
+        token: "notion",
+        jobId: "497fcc20-d3fd-42f0-9b24-123456789abc",
+      }),
+    ]);
+    expect(result.jobs).toEqual([
+      expect.objectContaining({
+        title: "QA Engineer",
+        sourcePlatform: "ashby",
+        locationText: "Remote, United States",
+      }),
+    ]);
+    expect(result.diagnostics).toMatchObject({
+      detailUrlsHarvested: 1,
+      recoveredSourcesFromDetailUrls: 1,
+      directJobsExtracted: 1,
+      sampleRecoveredSourceUrls: ["https://jobs.ashbyhq.com/notion"],
+    });
+  });
+
+  it("harvests direct Workday detail jobs from SERP hits while recovering the tenant and career site", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      if (url.startsWith("https://www.bing.com/search")) {
+        return new Response(
+          `
+            <rss>
+              <channel>
+                <item>
+                  <link>https://acme.wd1.myworkdayjobs.com/en-US/Careers/job/Seattle-WA/Data-Engineer_R12345</link>
+                </item>
+              </channel>
+            </rss>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/rss+xml",
+            },
+          },
+        );
+      }
+
+      if (url.startsWith("https://html.duckduckgo.com/html/")) {
+        return new Response("<html><body></body></html>", {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        });
+      }
+
+      if (
+        url ===
+        "https://acme.wd1.myworkdayjobs.com/wday/cxs/acme/Careers/jobs/Seattle-WA/Data-Engineer_R12345"
+      ) {
+        return new Response(
+          JSON.stringify({
+            jobPostingInfo: {
+              title: "Principal Data Engineer",
+              locationText: "Bellevue, WA",
+              externalPath: "job/Seattle-WA/Data-Engineer_R12345",
+              postedOn: "2026-03-10T00:00:00.000Z",
+            },
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const result = await discoverSourcesFromPublicSearchDetailed(
+      {
+        title: "Data Engineer",
+        country: "United States",
+        platforms: ["workday"],
+      },
+      {
+        fetchImpl,
+        maxResultsPerQuery: 4,
+        maxQueries: 1,
+      },
+    );
+
+    expect(result.sources).toEqual([
+      expect.objectContaining({
+        platform: "workday",
+        token: "acme:careers",
+        careerSitePath: "Careers",
+        jobId: "Seattle-WA/Data-Engineer_R12345",
+      }),
+    ]);
+    expect(result.jobs).toEqual([
+      expect.objectContaining({
+        title: "Principal Data Engineer",
+        sourcePlatform: "workday",
+        locationText: "Bellevue, WA",
+      }),
+    ]);
+    expect(result.diagnostics).toMatchObject({
+      detailUrlsHarvested: 1,
+      recoveredSourcesFromDetailUrls: 1,
+      directJobsExtracted: 1,
+      sampleRecoveredSourceUrls: ["https://acme.wd1.myworkdayjobs.com/en-US/Careers"],
     });
   });
 
@@ -576,7 +776,7 @@ describe("source discovery", () => {
     );
 
     expect(plan.maxSources).toBe(120);
-    expect(plan.maxQueries).toBe(72);
+    expect(plan.maxQueries).toBe(96);
     expect(plan.roleQueries.slice(0, 10)).toEqual([
       "software engineer",
       "software developer",
@@ -632,7 +832,7 @@ describe("source discovery", () => {
     ]);
     expect(new Set(plan.queries.map((query) => query.query)).size).toBe(plan.queries.length);
     expect(plan.queries.some((query) => query.query.includes("\""))).toBe(false);
-    expect(plan.platformPlans[0]?.locationClauses).toHaveLength(24);
+    expect(plan.platformPlans[0]?.locationClauses).toHaveLength(32);
   });
 
   it("lets broad US public-search execution reach long-tail title variants instead of exhausting the budget on the first role only", () => {
@@ -653,9 +853,9 @@ describe("source discovery", () => {
     expect(selected).toHaveLength(24);
     expect(selected.slice(0, 4).map((query) => query.roleQuery)).toEqual([
       "software engineer",
-      "software engineer",
-      "software engineer",
-      "software engineer",
+      "software developer",
+      "software development engineer",
+      "backend engineer",
     ]);
     expect(selected.some((query) => query.roleQuery === "software developer")).toBe(true);
     expect(selected.some((query) => query.roleQuery === "backend engineer")).toBe(true);
@@ -956,13 +1156,13 @@ describe("source discovery", () => {
     expect(result.diagnostics.dropReasonCounts.query_budget).toBe(plan.queries.length - 8);
     expect(requestedQueries).toEqual([
       "site:boards.greenhouse.io software engineer",
+      "site:boards.greenhouse.io software developer",
+      "site:boards.greenhouse.io software development engineer",
+      "site:boards.greenhouse.io backend engineer",
       "site:job-boards.greenhouse.io software engineer",
-      "site:boards.greenhouse.io software engineer remote united states",
-      "site:job-boards.greenhouse.io software engineer remote united states",
-      "site:boards.greenhouse.io software engineer remote usa",
-      "site:job-boards.greenhouse.io software engineer remote usa",
-      "site:boards.greenhouse.io software engineer remote us",
-      "site:job-boards.greenhouse.io software engineer remote us",
+      "site:job-boards.greenhouse.io software developer",
+      "site:job-boards.greenhouse.io software development engineer",
+      "site:job-boards.greenhouse.io backend engineer",
     ]);
   });
 
@@ -993,7 +1193,7 @@ describe("source discovery", () => {
     );
   });
 
-  it("applies broad US discovery clauses to Lever and Ashby too so board discovery is not Greenhouse-only", () => {
+  it("applies broad US discovery clauses to Lever, Ashby, and Workday too so board discovery is not Greenhouse-only", () => {
     const plan = buildPublicSearchQueryPlan(
       {
         title: "Software Engineer",
@@ -1035,6 +1235,23 @@ describe("source discovery", () => {
           "remote us",
           "remote texas",
           "texas",
+        ]),
+      }),
+    );
+    expect(
+      plan.platformPlans.find((platformPlan) => platformPlan.platform === "workday"),
+    ).toEqual(
+      expect.objectContaining({
+        locationIntent: expect.objectContaining({
+          kind: "broad_us",
+        }),
+        locationClauses: expect.arrayContaining([
+          "",
+          "united states",
+          "usa",
+          "remote us",
+          "remote california",
+          "california",
         ]),
       }),
     );

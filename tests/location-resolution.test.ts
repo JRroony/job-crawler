@@ -18,6 +18,10 @@ describe("location resolution", () => {
       expected: { city: "Seattle", state: "Washington" },
     },
     {
+      locationText: "New York, NY",
+      expected: { city: "New York", state: "New York" },
+    },
+    {
       locationText: "Remote, United States",
       expected: { isRemote: true },
     },

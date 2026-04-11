@@ -36,6 +36,12 @@ export type UsDiscoveryLocationToken = {
   priority: number;
 };
 
+export type UsDiscoveryLocationClause = {
+  clause: string;
+  kind: UsDiscoveryLocationToken["kind"] | "blank";
+  priority: number;
+};
+
 const unitedStatesAliasList = [
   "united states",
   "united states of america",
@@ -513,6 +519,7 @@ export function buildUsDiscoveryLocationClauses(
     return {
       intent: tokenPlan.intent,
       clauses: [] as string[],
+      detailedClauses: [] as UsDiscoveryLocationClause[],
     };
   }
 
@@ -546,30 +553,82 @@ export function buildUsDiscoveryLocationClauses(
       remainingBudget - prioritizedRemoteStateCount - prioritizedMetroCount,
     );
 
+    const orderedClauses = finalizeDiscoveryLocationClauses(
+      [
+        { clause: "", kind: "blank", priority: 0 },
+        ...tokenPlan.tokens
+          .filter((token) => token.kind === "country")
+          .map((token) => ({ clause: token.value, kind: token.kind, priority: token.priority })),
+        ...tokenPlan.tokens
+          .filter((token) => token.kind === "remote")
+          .map((token) => ({ clause: token.value, kind: token.kind, priority: token.priority })),
+        ...tokenPlan.tokens
+          .filter((token) => token.kind === "remote_state")
+          .slice(0, prioritizedRemoteStateCount)
+          .map((token) => ({ clause: token.value, kind: token.kind, priority: token.priority })),
+        ...tokenPlan.tokens
+          .filter((token) => token.kind === "metro")
+          .slice(0, prioritizedMetroCount)
+          .map((token) => ({ clause: token.value, kind: token.kind, priority: token.priority })),
+        ...tokenPlan.tokens
+          .filter((token) => token.kind === "state")
+          .slice(0, prioritizedStateCount)
+          .map((token) => ({ clause: token.value, kind: token.kind, priority: token.priority })),
+        ...tokenPlan.tokens
+          .filter((token) => token.kind === "remote_state")
+          .slice(prioritizedRemoteStateCount)
+          .map((token) => ({ clause: token.value, kind: token.kind, priority: token.priority })),
+        ...tokenPlan.tokens
+          .filter((token) => token.kind === "metro")
+          .slice(prioritizedMetroCount)
+          .map((token) => ({ clause: token.value, kind: token.kind, priority: token.priority })),
+        ...tokenPlan.tokens
+          .filter((token) => token.kind === "state")
+          .slice(prioritizedStateCount)
+          .map((token) => ({ clause: token.value, kind: token.kind, priority: token.priority })),
+      ],
+      maxClauses,
+    );
+
     return {
       intent: tokenPlan.intent,
-      clauses: dedupeLocationClauses([
-        "",
-        ...countryClauses,
-        ...remoteClauses,
-        ...remoteStateClauses.slice(0, prioritizedRemoteStateCount),
-        ...metroClauses.slice(0, prioritizedMetroCount),
-        ...stateClauses.slice(0, prioritizedStateCount),
-        ...remoteStateClauses.slice(prioritizedRemoteStateCount),
-        ...metroClauses.slice(prioritizedMetroCount),
-        ...stateClauses.slice(prioritizedStateCount),
-      ]).slice(0, maxClauses),
+      clauses: orderedClauses.map((entry) => entry.clause),
+      detailedClauses: orderedClauses,
     };
   }
 
-  return {
-    intent: tokenPlan.intent,
-    clauses: dedupeLocationClauses([
-      "",
+  if (tokenPlan.intent.kind === "us_state") {
+    const orderedClauses = finalizeDiscoveryLocationClauses(
+      [
+        { clause: "", kind: "blank", priority: 0 },
+        ...tokenPlan.tokens
+          .sort((left, right) => left.priority - right.priority || left.value.localeCompare(right.value))
+          .map((token) => ({ clause: token.value, kind: token.kind, priority: token.priority })),
+      ],
+      Math.min(maxClauses, 23),
+    );
+
+    return {
+      intent: tokenPlan.intent,
+      clauses: orderedClauses.map((entry) => entry.clause),
+      detailedClauses: orderedClauses,
+    };
+  }
+
+  const orderedClauses = finalizeDiscoveryLocationClauses(
+    [
+      { clause: "", kind: "blank", priority: 0 },
       ...tokenPlan.tokens
         .sort((left, right) => left.priority - right.priority || left.value.localeCompare(right.value))
-        .map((token) => token.value),
-    ]).slice(0, maxClauses),
+        .map((token) => ({ clause: token.value, kind: token.kind, priority: token.priority })),
+    ],
+    maxClauses,
+  );
+
+  return {
+    intent: tokenPlan.intent,
+    clauses: orderedClauses.map((entry) => entry.clause),
+    detailedClauses: orderedClauses,
   };
 }
 
@@ -738,6 +797,29 @@ function dedupeLocationClauses(clauses: string[]) {
   }
 
   return deduped;
+}
+
+function finalizeDiscoveryLocationClauses(
+  clauses: UsDiscoveryLocationClause[],
+  maxClauses: number,
+) {
+  const seen = new Set<string>();
+  const deduped: UsDiscoveryLocationClause[] = [];
+
+  for (const clause of clauses) {
+    const normalized = clause.clause === "" ? "" : normalizeLocationText(clause.clause);
+    if (seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    deduped.push({
+      ...clause,
+      clause: normalized,
+    });
+  }
+
+  return deduped.slice(0, maxClauses);
 }
 
 function dedupeDiscoveryLocationTokens(tokens: Array<UsDiscoveryLocationToken | undefined>) {

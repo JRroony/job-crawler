@@ -240,6 +240,18 @@ describe("title retrieval scoring", () => {
     });
   });
 
+  it("allows strong data-platform evidence to outrank generic software phrasing", () => {
+    expect(
+      getTitleMatchResult("Software Engineer, Data Platform", "Data Engineer"),
+    ).toMatchObject({
+      matches: true,
+    });
+    expect(getTitleMatchResult("Software Engineer", "Data Engineer")).toMatchObject({
+      matches: false,
+      tier: "none",
+    });
+  });
+
   it("keeps qa matching inside the QA and test family", () => {
     expect(getTitleMatchResult("Test Engineer", "QA Engineer")).toMatchObject({
       matches: true,

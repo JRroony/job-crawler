@@ -5,6 +5,7 @@ import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import { createAshbyProvider } from "@/lib/server/providers/ashby";
 import { createCompanyPageProvider } from "@/lib/server/providers/company-page";
 import { createGreenhouseProvider } from "@/lib/server/providers/greenhouse";
+import { createWorkdayProvider } from "@/lib/server/providers/workday";
 import type { CrawlProvider, ProviderExecutionContext } from "@/lib/server/providers/types";
 import type { CompanyPageSourceConfig } from "@/lib/types";
 
@@ -23,6 +24,14 @@ function ashbySource(token: string) {
     token,
     confidence: "high",
     discoveryMethod: "configured_env",
+  });
+}
+
+function workdaySource(url: string) {
+  return classifySourceCandidate({
+    url,
+    confidence: "high",
+    discoveryMethod: "future_search",
   });
 }
 
@@ -297,6 +306,59 @@ describe("provider crawl status and live parsing", () => {
       experienceLevel: "new_grad",
       sourcePlatform: "ashby",
       sourceUrl: "https://jobs.ashbyhq.com/notion/role-1",
+    });
+  });
+
+  it("crawls a Workday source through its JSON endpoint into normalized jobs", async () => {
+    const provider = createWorkdayProvider();
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url === "https://acme.wd1.myworkdayjobs.com/wday/cxs/acme/Careers/jobs") {
+        return new Response(
+          JSON.stringify({
+            jobPostings: [
+              {
+                title: "Senior Data Engineer",
+                externalPath: "job/Seattle-WA/Senior-Data-Engineer_R12345",
+                locationsText: "Bellevue, WA",
+                postedOn: "2026-03-10T00:00:00.000Z",
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+
+      return new Response("", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Data Engineer",
+        country: "United States",
+      },
+      sources: [workdaySource("https://acme.wd1.myworkdayjobs.com/en-US/Careers")],
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.fetchedCount).toBe(1);
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0]).toMatchObject({
+      title: "Senior Data Engineer",
+      country: "United States",
+      state: "Washington",
+      city: "Bellevue",
+      sourcePlatform: "workday",
+      sourceUrl:
+        "https://acme.wd1.myworkdayjobs.com/en-US/Careers/job/Seattle-WA/Senior-Data-Engineer_R12345",
     });
   });
 

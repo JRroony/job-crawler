@@ -103,6 +103,56 @@ export function normalizeAshbyCandidate(input: {
   });
 }
 
+export async function extractAshbyJobFromDetailUrl(input: {
+  detailUrl: string;
+  companyToken: string;
+  companyHint?: string;
+  discoveredAt: string;
+  fetchImpl: typeof fetch;
+}) {
+  const result = await safeFetchText(input.detailUrl, {
+    fetchImpl: input.fetchImpl,
+    method: "GET",
+    headers: {
+      Accept: "text/html,application/xhtml+xml",
+    },
+    cache: "no-store",
+    retries: 1,
+  });
+
+  if (!result.ok || !result.data) {
+    return undefined;
+  }
+
+  const candidates = extractAshbyCandidates(result.data, input.companyToken);
+  const normalizedDetailUrl = normalizeComparableText(input.detailUrl);
+  const matchedCandidate =
+    candidates.find((candidate) => {
+      const candidateUrl = candidate.jobUrl ?? candidate.absoluteUrl ?? candidate.url;
+      return candidateUrl
+        ? normalizeComparableText(candidateUrl) === normalizedDetailUrl
+        : false;
+    }) ??
+    candidates.find((candidate) =>
+      candidate.id
+        ? normalizedDetailUrl.includes(normalizeComparableText(candidate.id))
+        : false,
+    ) ??
+    candidates[0];
+
+  if (!matchedCandidate) {
+    return undefined;
+  }
+
+  return normalizeAshbyCandidate({
+    companyToken: input.companyToken,
+    boardUrl: `https://jobs.ashbyhq.com/${input.companyToken}`,
+    companyName: input.companyHint,
+    discoveredAt: input.discoveredAt,
+    candidate: matchedCandidate,
+  });
+}
+
 export function createAshbyProvider() {
   return defineProvider({
     provider: "ashby",
@@ -206,7 +256,7 @@ export function createAshbyProvider() {
   });
 }
 
-function extractAshbyCandidates(html: string, companyToken: string) {
+function extractAshbyCandidates(html: string, companyToken: string): AshbyCandidate[] {
   const appDataCandidates = extractAshbyCandidatesFromAppData(html, companyToken);
   if (appDataCandidates) {
     return appDataCandidates;
@@ -269,7 +319,10 @@ function extractAshbyCandidates(html: string, companyToken: string) {
   );
 }
 
-function extractAshbyCandidatesFromAppData(html: string, companyToken: string) {
+function extractAshbyCandidatesFromAppData(
+  html: string,
+  companyToken: string,
+): AshbyCandidate[] | undefined {
   const appData = extractWindowAppData(html) as
     | {
         jobBoard?: {

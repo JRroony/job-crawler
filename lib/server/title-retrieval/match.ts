@@ -309,6 +309,10 @@ function collectMatchPenalties(query: TitleAnalysis, job: TitleAnalysis) {
       areTitleConceptsAdjacent(queryConceptId, jobConceptId),
     ),
   );
+  const sharedPrimaryFamily =
+    Boolean(queryConcept?.family) &&
+    Boolean(jobConcept?.family) &&
+    queryConcept?.family === jobConcept?.family;
 
   if (query.family && job.family && query.family !== job.family && !conceptsAreAdjacent) {
     penalties.push({
@@ -318,25 +322,35 @@ function collectMatchPenalties(query: TitleAnalysis, job: TitleAnalysis) {
     });
   }
 
-  if (
-    queryConcept?.negativeConceptIds?.some((conceptId) =>
-      conceptId === job.primaryConceptId || job.matchedConceptIds.includes(conceptId),
-    )
-  ) {
+  const queryPrimaryConflict = queryConcept?.negativeConceptIds?.some(
+    (conceptId) => conceptId === job.primaryConceptId,
+  );
+  const querySecondaryConflict =
+    !queryPrimaryConflict &&
+    !conceptsAreAdjacent &&
+    !sharedPrimaryFamily &&
+    queryConcept?.negativeConceptIds?.some((conceptId) => job.matchedConceptIds.includes(conceptId));
+
+  if (queryPrimaryConflict || querySecondaryConflict) {
     penalties.push({
-      reason: `query concept ${queryConcept.canonicalTitle} explicitly excludes ${job.canonicalTitle}`,
+      reason: `query concept ${queryConcept?.canonicalTitle ?? query.canonicalTitle} explicitly excludes ${job.canonicalTitle}`,
       value: 420,
       hard: true,
     });
   }
 
-  if (
-    jobConcept?.negativeConceptIds?.some((conceptId) =>
-      conceptId === query.primaryConceptId || query.matchedConceptIds.includes(conceptId),
-    )
-  ) {
+  const jobPrimaryConflict = jobConcept?.negativeConceptIds?.some(
+    (conceptId) => conceptId === query.primaryConceptId,
+  );
+  const jobSecondaryConflict =
+    !jobPrimaryConflict &&
+    !conceptsAreAdjacent &&
+    !sharedPrimaryFamily &&
+    jobConcept?.negativeConceptIds?.some((conceptId) => query.matchedConceptIds.includes(conceptId));
+
+  if (jobPrimaryConflict || jobSecondaryConflict) {
     penalties.push({
-      reason: `job concept ${jobConcept.canonicalTitle} explicitly excludes ${query.canonicalTitle}`,
+      reason: `job concept ${jobConcept?.canonicalTitle ?? job.canonicalTitle} explicitly excludes ${query.canonicalTitle}`,
       value: 420,
       hard: true,
     });

@@ -121,8 +121,9 @@ export function buildTitleQueryVariants(
     );
   }
 
-  const maxQueries = options.maxQueries ?? 12;
-  return variants.slice(0, maxQueries).map((variant, index) => ({
+  const maxQueries = options.maxQueries ?? 16;
+  const effectiveMaxQueries = Math.max(12, maxQueries);
+  return variants.slice(0, effectiveMaxQueries).map((variant, index) => ({
     ...variant,
     priority: index,
   }));

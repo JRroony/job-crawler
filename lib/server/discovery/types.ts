@@ -72,6 +72,8 @@ export type WorkdayDiscoveredSource = BaseDiscoveredSource & {
   token?: string;
   jobId?: string;
   sitePath?: string;
+  careerSitePath?: string;
+  apiUrl?: string;
 };
 
 export type UnknownDiscoveredSource = BaseDiscoveredSource & {
@@ -128,4 +130,8 @@ export function isCompanyPageSource(
   source: DiscoveredSource,
 ): source is CompanyPageDiscoveredSource {
   return source.platform === "company_page";
+}
+
+export function isWorkdaySource(source: DiscoveredSource): source is WorkdayDiscoveredSource {
+  return source.platform === "workday";
 }

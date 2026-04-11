@@ -9,7 +9,7 @@ import {
 } from "@/lib/server/discovery/types";
 
 const atsHostPattern =
-  /(?:boards\.greenhouse\.io|job-boards\.greenhouse\.io|jobs\.lever\.co|jobs\.ashbyhq\.com)/i;
+  /(?:boards\.greenhouse\.io|job-boards\.greenhouse\.io|jobs\.lever\.co|jobs\.ashbyhq\.com|myworkdayjobs\.com)/i;
 
 export async function expandCompanyPageSources(
   sources: DiscoveredSource[],
@@ -68,7 +68,7 @@ function extractPublicAtsUrls(html: string, sourcePageUrl: string) {
 
   Array.from(
     html.matchAll(
-      /https?:\\\/\\\/(?:www\\\/\.)?(?:boards\.greenhouse\.io|job-boards\.greenhouse\.io|jobs\.lever\.co|jobs\.ashbyhq\.com)[^"'\\<\s)]+/gi,
+      /https?:\\\/\\\/(?:www\\\/\.)?(?:boards\.greenhouse\.io|job-boards\.greenhouse\.io|jobs\.lever\.co|jobs\.ashbyhq\.com|[^"'\\<\s)]*myworkdayjobs\.com)[^"'\\<\s)]*/gi,
     ),
   ).forEach((match) => {
     const resolved = match[0].replace(/\\\//g, "/");

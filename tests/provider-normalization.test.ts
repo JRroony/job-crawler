@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { normalizeAshbyCandidate } from "@/lib/server/providers/ashby";
 import { normalizeGreenhouseJob } from "@/lib/server/providers/greenhouse";
 import { normalizeLeverJob } from "@/lib/server/providers/lever";
+import { normalizeWorkdayJob } from "@/lib/server/providers/workday";
 
 describe("provider normalization", () => {
   it("normalizes greenhouse jobs into the common model", () => {
@@ -103,6 +104,38 @@ describe("provider normalization", () => {
       explicitLevel: "staff",
       source: "title",
     });
+  });
+
+  it("normalizes workday jobs into the common model", () => {
+    const job = normalizeWorkdayJob({
+      source: {
+        url: "https://acme.wd1.myworkdayjobs.com/en-US/Careers",
+        token: "acme:careers",
+        sitePath: "en-US/Careers",
+        careerSitePath: "Careers",
+        companyHint: "Acme",
+      },
+      discoveredAt: "2026-03-29T00:00:00.000Z",
+      candidate: {
+        jobPostingInfo: {
+          ignored: true,
+        },
+        title: "Principal Data Engineer",
+        externalPath: "job/Seattle-WA/Principal-Data-Engineer_R12345",
+        locationText: "Seattle, Washington",
+        postedOn: "2026-03-20T00:00:00.000Z",
+      },
+    });
+
+    expect(job.sourcePlatform).toBe("workday");
+    expect(job.company).toBe("Acme");
+    expect(job.city).toBe("Seattle");
+    expect(job.state).toBe("Washington");
+    expect(job.country).toBe("United States");
+    expect(job.experienceLevel).toBe("staff");
+    expect(job.canonicalUrl).toBe(
+      "https://acme.wd1.myworkdayjobs.com/en-US/Careers/job/Seattle-WA/Principal-Data-Engineer_R12345",
+    );
   });
 
   it("uses Ashby description content to classify generic titles", () => {

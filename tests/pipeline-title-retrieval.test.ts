@@ -379,6 +379,12 @@ describe("pipeline title retrieval", () => {
             publicJobs: 1,
             discoveredBeforeFiltering: 1,
             discoveredAfterFiltering: 1,
+            platformCounts: {
+              greenhouse: 1,
+            },
+            publicJobPlatformCounts: {
+              greenhouse: 1,
+            },
             publicSearch: {
               generatedQueries: 24,
               executedQueries: 8,
@@ -408,6 +414,15 @@ describe("pipeline title retrieval", () => {
               sampleGeneratedQueries: ["site:boards.greenhouse.io data engineer"],
               sampleExecutedRoleQueries: ["data engineer"],
               sampleExecutedQueries: ["site:boards.greenhouse.io data engineer"],
+              sampleHarvestedCandidateUrls: [
+                "https://job-boards.greenhouse.io/gitlab/jobs/8455464002",
+              ],
+              sampleHarvestedDetailUrls: [
+                "https://job-boards.greenhouse.io/gitlab/jobs/8455464002",
+              ],
+              sampleHarvestedSourceUrls: ["https://boards.greenhouse.io/gitlab"],
+              sampleRecoveredSourceUrls: ["https://boards.greenhouse.io/gitlab"],
+              coverageNotes: [],
             },
           },
         };

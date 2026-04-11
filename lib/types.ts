@@ -189,6 +189,7 @@ export const providerPlatforms = [
   "greenhouse",
   "lever",
   "ashby",
+  "workday",
   "company_page",
   "linkedin_limited",
   "indeed_limited",
@@ -203,6 +204,7 @@ export const activeCrawlerPlatforms = [
   "greenhouse",
   "lever",
   "ashby",
+  "workday",
   "company_page",
 ] as const;
 
@@ -251,6 +253,11 @@ export const publicSearchDiscoveryDiagnosticsSchema = z.object({
   sampleGeneratedQueries: z.array(z.string().min(1)).max(12).default([]),
   sampleExecutedRoleQueries: z.array(z.string().min(1)).max(12).default([]),
   sampleExecutedQueries: z.array(z.string().min(1)).max(12).default([]),
+  sampleHarvestedCandidateUrls: z.array(z.string().url()).max(12).default([]),
+  sampleHarvestedDetailUrls: z.array(z.string().url()).max(12).default([]),
+  sampleHarvestedSourceUrls: z.array(z.string().url()).max(12).default([]),
+  sampleRecoveredSourceUrls: z.array(z.string().url()).max(12).default([]),
+  coverageNotes: z.array(z.string().min(1)).max(12).default([]),
 });
 
 export const discoveryStageDiagnosticsSchema = z.object({
@@ -260,6 +267,9 @@ export const discoveryStageDiagnosticsSchema = z.object({
   publicJobs: z.number().int().nonnegative().default(0),
   discoveredBeforeFiltering: z.number().int().nonnegative().default(0),
   discoveredAfterFiltering: z.number().int().nonnegative().default(0),
+  platformCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
+  publicJobPlatformCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
+  zeroCoverageReason: z.string().optional(),
   publicSearch: publicSearchDiscoveryDiagnosticsSchema.optional(),
 });
 

@@ -109,13 +109,25 @@ export function classifySourceCandidate(
   const workdayUrl = parseWorkdayUrl(parsedUrl);
   if (workdayUrl) {
     return {
-      id: buildSourceId("workday", workdayUrl.token ?? workdayUrl.canonicalSourceUrl ?? parsedUrl.toString()),
+      id: buildSourceId(
+        "workday",
+        workdayUrl.token ?? workdayUrl.canonicalApiUrl ?? workdayUrl.canonicalSourceUrl ?? parsedUrl.toString(),
+      ),
       platform: "workday",
-      url: workdayUrl.canonicalSourceUrl ?? parsedUrl.toString(),
+      url:
+        workdayUrl.canonicalSourceUrl ??
+        workdayUrl.canonicalApiUrl ??
+        parsedUrl.toString(),
       token: workdayUrl.token ?? input.token,
       jobId: workdayUrl.jobPath,
       sitePath: workdayUrl.sitePath,
-      companyHint: resolveCompanyHint(input.companyHint, workdayUrl.token ?? input.token, parsedUrl),
+      careerSitePath: workdayUrl.careerSitePath,
+      apiUrl: workdayUrl.canonicalApiUrl,
+      companyHint: resolveCompanyHint(
+        input.companyHint,
+        workdayUrl.token ?? workdayUrl.tenant ?? input.token,
+        parsedUrl,
+      ),
       confidence: resolvePlatformConfidence(input.confidence, "medium"),
       discoveryMethod: input.discoveryMethod,
     };
