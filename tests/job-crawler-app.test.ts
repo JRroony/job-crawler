@@ -15,7 +15,11 @@ function createResult(
   const diagnostics = {
     discoveredSources: 1,
     crawledSources: 1,
+    providersEnqueued: 1,
     providerFailures: status === "completed" ? 0 : 1,
+    directJobsHarvested: 0,
+    jobsBeforeDedupe: 0,
+    jobsAfterDedupe: 0,
     excludedByTitle: 0,
     excludedByLocation: 0,
     excludedByExperience: 0,

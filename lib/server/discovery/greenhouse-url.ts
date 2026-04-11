@@ -104,6 +104,10 @@ export function buildCanonicalGreenhouseJobUrl(boardSlug: string, jobId: string)
   return `https://job-boards.greenhouse.io/${boardSlug}/jobs/${jobId}`;
 }
 
+export function buildCanonicalGreenhouseJobApiUrl(boardSlug: string, jobId: string) {
+  return `https://boards-api.greenhouse.io/v1/boards/${boardSlug}/jobs/${jobId}?content=true`;
+}
+
 export function normalizeGreenhouseHostname(value: string) {
   return value.replace(/^www\./i, "").toLowerCase();
 }

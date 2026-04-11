@@ -7,6 +7,7 @@ import {
   buildPublicSearchQueryPlan,
   discoverSourcesFromPublicSearch,
   discoverSourcesFromPublicSearchDetailed,
+  selectQueriesForExecution,
 } from "@/lib/server/discovery/public-search";
 import { discoverConfiguredSources, discoverSources } from "@/lib/server/discovery/service";
 import { buildUsDiscoveryLocationTokens } from "@/lib/server/locations/us";
@@ -130,6 +131,44 @@ describe("source discovery", () => {
       url: "https://boards.greenhouse.io/gitlab",
       boardUrl: "https://boards.greenhouse.io/gitlab",
       apiUrl: "https://boards-api.greenhouse.io/v1/boards/gitlab/jobs?content=true",
+    });
+  });
+
+  it("recovers Lever, Ashby, and Workday sources from detail URLs instead of treating them as opaque pages", () => {
+    const leverDetail = classifySourceCandidate({
+      url: "https://jobs.lever.co/figma/4d6f3f0b-1cdd-4d2e-a0a7-123456789abc?lever-source=LinkedIn",
+      discoveryMethod: "future_search",
+    });
+    const ashbyDetail = classifySourceCandidate({
+      url: "https://jobs.ashbyhq.com/notion/497fcc20-d3fd-42f0-9b24-123456789abc",
+      discoveryMethod: "future_search",
+    });
+    const workdayDetail = classifySourceCandidate({
+      url: "https://acme.wd1.myworkdayjobs.com/en-US/Careers/job/Seattle-WA/Data-Engineer_R12345",
+      discoveryMethod: "future_search",
+    });
+
+    expect(leverDetail).toMatchObject({
+      platform: "lever",
+      token: "figma",
+      jobId: "4d6f3f0b-1cdd-4d2e-a0a7-123456789abc",
+      url: "https://jobs.lever.co/figma",
+      hostedUrl: "https://jobs.lever.co/figma",
+      apiUrl: "https://api.lever.co/v0/postings/figma?mode=json",
+    });
+    expect(ashbyDetail).toMatchObject({
+      platform: "ashby",
+      token: "notion",
+      jobId: "497fcc20-d3fd-42f0-9b24-123456789abc",
+      url: "https://jobs.ashbyhq.com/notion",
+      boardUrl: "https://jobs.ashbyhq.com/notion",
+    });
+    expect(workdayDetail).toMatchObject({
+      platform: "workday",
+      token: "acme:en-us/careers",
+      jobId: "Seattle-WA/Data-Engineer_R12345",
+      sitePath: "en-US/Careers",
+      url: "https://acme.wd1.myworkdayjobs.com/en-US/Careers",
     });
   });
 
@@ -283,6 +322,188 @@ describe("source discovery", () => {
     expect(sources.every((source) => source.platform === "greenhouse")).toBe(true);
   });
 
+  it("harvests direct Greenhouse detail jobs from SERP hits while still recovering the parent board", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      if (url.startsWith("https://www.bing.com/search")) {
+        return new Response(
+          `
+            <rss>
+              <channel>
+                <item>
+                  <link>https://job-boards.greenhouse.io/gitlab/jobs/8455464002?gh_jid=8455464002</link>
+                </item>
+              </channel>
+            </rss>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/rss+xml",
+            },
+          },
+        );
+      }
+
+      if (url.startsWith("https://html.duckduckgo.com/html/")) {
+        return new Response("<html><body></body></html>", {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        });
+      }
+
+      if (url === "https://boards-api.greenhouse.io/v1/boards/gitlab/jobs/8455464002?content=true") {
+        return new Response(
+          JSON.stringify({
+            id: "8455464002",
+            title: "Senior Data Engineer",
+            absolute_url: "https://job-boards.greenhouse.io/gitlab/jobs/8455464002",
+            company_name: "GitLab",
+            location: { name: "Austin, TX" },
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const result = await discoverSourcesFromPublicSearchDetailed(
+      {
+        title: "Data Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        fetchImpl,
+        maxResultsPerQuery: 4,
+        maxQueries: 1,
+      },
+    );
+
+    expect(result.sources).toEqual([
+      expect.objectContaining({
+        platform: "greenhouse",
+        token: "gitlab",
+        jobId: "8455464002",
+      }),
+    ]);
+    expect(result.jobs).toEqual([
+      expect.objectContaining({
+        title: "Senior Data Engineer",
+        company: "GitLab",
+        sourcePlatform: "greenhouse",
+        locationText: "Austin, TX",
+      }),
+    ]);
+    expect(result.diagnostics).toMatchObject({
+      candidateUrlsHarvested: 1,
+      detailUrlsHarvested: 1,
+      sourceUrlsHarvested: 0,
+      recoveredSourcesFromDetailUrls: 1,
+      directJobsExtracted: 1,
+      sourcesAdded: 1,
+    });
+  });
+
+  it("harvests direct Lever detail jobs from SERP hits while recovering the site token", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      if (url.startsWith("https://www.bing.com/search")) {
+        return new Response(
+          `
+            <rss>
+              <channel>
+                <item>
+                  <link>https://jobs.lever.co/figma/4d6f3f0b-1cdd-4d2e-a0a7-123456789abc</link>
+                </item>
+              </channel>
+            </rss>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/rss+xml",
+            },
+          },
+        );
+      }
+
+      if (url.startsWith("https://html.duckduckgo.com/html/")) {
+        return new Response("<html><body></body></html>", {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        });
+      }
+
+      if (url === "https://api.lever.co/v0/postings/figma/4d6f3f0b-1cdd-4d2e-a0a7-123456789abc?mode=json") {
+        return new Response(
+          JSON.stringify({
+            id: "4d6f3f0b-1cdd-4d2e-a0a7-123456789abc",
+            text: "Senior Product Manager",
+            hostedUrl: "https://jobs.lever.co/figma/4d6f3f0b-1cdd-4d2e-a0a7-123456789abc",
+            applyUrl: "https://jobs.lever.co/figma/4d6f3f0b-1cdd-4d2e-a0a7-123456789abc/apply",
+            categories: {
+              location: "Remote - California",
+            },
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const result = await discoverSourcesFromPublicSearchDetailed(
+      {
+        title: "Product Manager",
+        country: "United States",
+        platforms: ["lever"],
+      },
+      {
+        fetchImpl,
+        maxResultsPerQuery: 4,
+        maxQueries: 1,
+      },
+    );
+
+    expect(result.sources).toEqual([
+      expect.objectContaining({
+        platform: "lever",
+        token: "figma",
+        jobId: "4d6f3f0b-1cdd-4d2e-a0a7-123456789abc",
+      }),
+    ]);
+    expect(result.jobs).toEqual([
+      expect.objectContaining({
+        title: "Senior Product Manager",
+        sourcePlatform: "lever",
+        locationText: "Remote - California",
+      }),
+    ]);
+    expect(result.diagnostics).toMatchObject({
+      detailUrlsHarvested: 1,
+      recoveredSourcesFromDetailUrls: 1,
+      directJobsExtracted: 1,
+    });
+  });
+
   it("expands configured company career pages into Greenhouse board sources even when Greenhouse is the selected crawl platform", async () => {
     const fetchImpl = vi.fn(async () => {
       return new Response(
@@ -412,6 +633,34 @@ describe("source discovery", () => {
     expect(new Set(plan.queries.map((query) => query.query)).size).toBe(plan.queries.length);
     expect(plan.queries.some((query) => query.query.includes("\""))).toBe(false);
     expect(plan.platformPlans[0]?.locationClauses).toHaveLength(24);
+  });
+
+  it("lets broad US public-search execution reach long-tail title variants instead of exhausting the budget on the first role only", () => {
+    const plan = buildPublicSearchQueryPlan(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        maxResultsPerQuery: 4,
+        maxQueries: 24,
+      },
+    );
+
+    const selected = selectQueriesForExecution(plan);
+
+    expect(selected).toHaveLength(24);
+    expect(selected.slice(0, 4).map((query) => query.roleQuery)).toEqual([
+      "software engineer",
+      "software engineer",
+      "software engineer",
+      "software engineer",
+    ]);
+    expect(selected.some((query) => query.roleQuery === "software developer")).toBe(true);
+    expect(selected.some((query) => query.roleQuery === "backend engineer")).toBe(true);
+    expect(selected.some((query) => query.roleQuery === "java developer")).toBe(true);
+    expect(selected.some((query) => query.roleQuery === "swe")).toBe(true);
   });
 
   it("broadens data analyst discovery into close title variants instead of a single narrow query", () => {
@@ -708,12 +957,12 @@ describe("source discovery", () => {
     expect(requestedQueries).toEqual([
       "site:boards.greenhouse.io software engineer",
       "site:job-boards.greenhouse.io software engineer",
-      "site:boards.greenhouse.io software engineer united states",
-      "site:job-boards.greenhouse.io software engineer united states",
-      "site:boards.greenhouse.io software engineer usa",
-      "site:job-boards.greenhouse.io software engineer usa",
-      "site:boards.greenhouse.io software engineer us",
-      "site:job-boards.greenhouse.io software engineer us",
+      "site:boards.greenhouse.io software engineer remote united states",
+      "site:job-boards.greenhouse.io software engineer remote united states",
+      "site:boards.greenhouse.io software engineer remote usa",
+      "site:job-boards.greenhouse.io software engineer remote usa",
+      "site:boards.greenhouse.io software engineer remote us",
+      "site:job-boards.greenhouse.io software engineer remote us",
     ]);
   });
 

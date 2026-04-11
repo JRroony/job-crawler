@@ -5,7 +5,10 @@ import {
   normalizeComparableText,
   runWithConcurrency,
 } from "@/lib/server/crawler/helpers";
-import { parseGreenhouseUrl } from "@/lib/server/discovery/greenhouse-url";
+import {
+  buildCanonicalGreenhouseJobApiUrl,
+  parseGreenhouseUrl,
+} from "@/lib/server/discovery/greenhouse-url";
 import {
   type GreenhouseDiscoveredSource,
   isGreenhouseSource,
@@ -22,7 +25,10 @@ import {
   finalizeProviderResult,
   unsupportedProviderResult,
 } from "@/lib/server/providers/shared";
-import { defineProvider } from "@/lib/server/providers/types";
+import {
+  defineProvider,
+  type NormalizedJobSeed,
+} from "@/lib/server/providers/types";
 
 type GreenhouseApiResponse = {
   jobs?: Array<{
@@ -87,6 +93,44 @@ export function normalizeGreenhouseJob(input: {
     discoveredAt: input.discoveredAt,
     structuredExperienceHints,
     descriptionExperienceHints: [descriptionExperienceHint],
+  });
+}
+
+export async function extractGreenhouseJobFromDetailUrl(input: {
+  detailUrl: string;
+  boardSlug: string;
+  jobId: string;
+  companyHint?: string;
+  discoveredAt: string;
+  fetchImpl: typeof fetch;
+}): Promise<NormalizedJobSeed | undefined> {
+  const result = await safeFetchJson<GreenhouseJob | { job?: GreenhouseJob }>(
+    buildCanonicalGreenhouseJobApiUrl(input.boardSlug, input.jobId),
+    {
+      fetchImpl: input.fetchImpl,
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    },
+  );
+
+  if (!result.ok) {
+    return undefined;
+  }
+
+  const job = normalizeGreenhouseDetailPayload(result.data);
+  if (!job) {
+    return undefined;
+  }
+
+  return normalizeGreenhouseJob({
+    companyToken: input.boardSlug,
+    boardUrl: `https://boards.greenhouse.io/${input.boardSlug}`,
+    companyName: input.companyHint,
+    discoveredAt: input.discoveredAt,
+    job,
   });
 }
 
@@ -235,6 +279,20 @@ function buildGreenhouseLocationText(job: GreenhouseJob) {
   ]);
 
   return buildLocationText(candidates) || "Location unavailable";
+}
+
+function normalizeGreenhouseDetailPayload(
+  payload: GreenhouseJob | { job?: GreenhouseJob } | undefined,
+) {
+  if (!payload || typeof payload !== "object") {
+    return undefined;
+  }
+
+  if ("id" in payload) {
+    return payload as GreenhouseJob;
+  }
+
+  return payload.job;
 }
 
 function buildGreenhouseStructuredExperienceHints(job: GreenhouseJob) {

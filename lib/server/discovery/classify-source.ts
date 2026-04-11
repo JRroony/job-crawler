@@ -1,28 +1,27 @@
 import "server-only";
 
 import {
+  parseAshbyUrl,
+} from "@/lib/server/discovery/ashby-url";
+import {
   normalizeComparableText,
   slugToLabel,
 } from "@/lib/server/crawler/helpers";
 import {
   parseGreenhouseUrl,
 } from "@/lib/server/discovery/greenhouse-url";
+import {
+  buildCanonicalLeverApiUrl,
+  parseLeverUrl,
+} from "@/lib/server/discovery/lever-url";
 import type {
   DiscoveredSource,
   DiscoveryConfidence,
   SourceClassificationCandidate,
 } from "@/lib/server/discovery/types";
-
-const leverHosts = new Set([
-  "jobs.lever.co",
-  "api.lever.co",
-]);
-
-const ashbyHosts = new Set([
-  "jobs.ashbyhq.com",
-]);
-
-const workdayHostPattern = /(^|\.)myworkdayjobs\.com$/i;
+import {
+  parseWorkdayUrl,
+} from "@/lib/server/discovery/workday-url";
 
 const publicCareerSubdomains = new Set([
   "apply",
@@ -72,46 +71,51 @@ export function classifySourceCandidate(
     };
   }
 
-  const leverToken = extractLeverToken(parsedUrl);
-  if (leverToken) {
-    const hostedUrl = `https://jobs.lever.co/${leverToken}`;
+  const leverUrl = parseLeverUrl(parsedUrl);
+  if (leverUrl?.siteToken) {
+    const hostedUrl = leverUrl.canonicalHostedUrl ?? `https://jobs.lever.co/${leverUrl.siteToken}`;
 
     return {
-      id: buildSourceId("lever", leverToken),
+      id: buildSourceId("lever", leverUrl.siteToken),
       platform: "lever",
       url: hostedUrl,
       hostedUrl,
-      apiUrl: `https://api.lever.co/v0/postings/${leverToken}?mode=json`,
-      token: leverToken,
-      companyHint: resolveCompanyHint(input.companyHint, leverToken, parsedUrl),
+      apiUrl: buildCanonicalLeverApiUrl(leverUrl.siteToken),
+      token: leverUrl.siteToken,
+      jobId: leverUrl.jobId,
+      companyHint: resolveCompanyHint(input.companyHint, leverUrl.siteToken, parsedUrl),
       confidence: resolvePlatformConfidence(input.confidence, "high"),
       discoveryMethod: input.discoveryMethod,
     };
   }
 
-  const ashbyToken = extractAshbyToken(parsedUrl);
-  if (ashbyToken) {
-    const boardUrl = `https://jobs.ashbyhq.com/${ashbyToken}`;
+  const ashbyUrl = parseAshbyUrl(parsedUrl);
+  if (ashbyUrl?.companyToken) {
+    const boardUrl = ashbyUrl.canonicalBoardUrl ?? `https://jobs.ashbyhq.com/${ashbyUrl.companyToken}`;
 
     return {
-      id: buildSourceId("ashby", ashbyToken),
+      id: buildSourceId("ashby", ashbyUrl.companyToken),
       platform: "ashby",
       url: boardUrl,
       boardUrl,
-      token: ashbyToken,
-      companyHint: resolveCompanyHint(input.companyHint, ashbyToken, parsedUrl),
+      token: ashbyUrl.companyToken,
+      jobId: ashbyUrl.jobPath,
+      companyHint: resolveCompanyHint(input.companyHint, ashbyUrl.companyToken, parsedUrl),
       confidence: resolvePlatformConfidence(input.confidence, "high"),
       discoveryMethod: input.discoveryMethod,
     };
   }
 
-  if (isWorkdayUrl(parsedUrl)) {
+  const workdayUrl = parseWorkdayUrl(parsedUrl);
+  if (workdayUrl) {
     return {
-      id: buildSourceId("workday", parsedUrl.toString()),
+      id: buildSourceId("workday", workdayUrl.token ?? workdayUrl.canonicalSourceUrl ?? parsedUrl.toString()),
       platform: "workday",
-      url: parsedUrl.toString(),
-      token: input.token,
-      companyHint: resolveCompanyHint(input.companyHint, input.token, parsedUrl),
+      url: workdayUrl.canonicalSourceUrl ?? parsedUrl.toString(),
+      token: workdayUrl.token ?? input.token,
+      jobId: workdayUrl.jobPath,
+      sitePath: workdayUrl.sitePath,
+      companyHint: resolveCompanyHint(input.companyHint, workdayUrl.token ?? input.token, parsedUrl),
       confidence: resolvePlatformConfidence(input.confidence, "medium"),
       discoveryMethod: input.discoveryMethod,
     };
@@ -139,49 +143,6 @@ function safeParseUrl(value: string) {
   } catch {
     return null;
   }
-}
-
-function extractLeverToken(url: URL) {
-  if (!isLeverUrl(url)) {
-    return undefined;
-  }
-
-  const segments = url.pathname.split("/").filter(Boolean);
-
-  if (url.hostname === "jobs.lever.co") {
-    return cleanString(segments[0]);
-  }
-
-  if (segments[0] === "v0" && segments[1] === "postings") {
-    return cleanString(segments[2]);
-  }
-
-  return undefined;
-}
-
-function extractAshbyToken(url: URL) {
-  if (!isAshbyUrl(url)) {
-    return undefined;
-  }
-
-  const segments = url.pathname.split("/").filter(Boolean);
-  return cleanString(segments[0]);
-}
-
-function isWorkdayUrl(url: URL) {
-  return workdayHostPattern.test(url.hostname);
-}
-
-function isGreenhouseUrl(url: URL) {
-  return Boolean(parseGreenhouseUrl(url));
-}
-
-function isLeverUrl(url: URL) {
-  return leverHosts.has(url.hostname);
-}
-
-function isAshbyUrl(url: URL) {
-  return ashbyHosts.has(url.hostname);
 }
 
 function resolveCompanyHint(

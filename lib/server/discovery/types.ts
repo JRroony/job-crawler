@@ -3,6 +3,7 @@ import type {
   DiscoveryStageDiagnostics,
   SearchFilters,
 } from "@/lib/types";
+import type { NormalizedJobSeed } from "@/lib/server/providers/types";
 
 export const discoveredPlatforms = [
   "greenhouse",
@@ -48,6 +49,7 @@ export type GreenhouseDiscoveredSource = BaseDiscoveredSource & {
 export type LeverDiscoveredSource = BaseDiscoveredSource & {
   platform: "lever";
   token?: string;
+  jobId?: string;
   hostedUrl?: string;
   apiUrl?: string;
 };
@@ -55,6 +57,7 @@ export type LeverDiscoveredSource = BaseDiscoveredSource & {
 export type AshbyDiscoveredSource = BaseDiscoveredSource & {
   platform: "ashby";
   token?: string;
+  jobId?: string;
   boardUrl?: string;
 };
 
@@ -66,6 +69,9 @@ export type CompanyPageDiscoveredSource = BaseDiscoveredSource & {
 
 export type WorkdayDiscoveredSource = BaseDiscoveredSource & {
   platform: "workday";
+  token?: string;
+  jobId?: string;
+  sitePath?: string;
 };
 
 export type UnknownDiscoveredSource = BaseDiscoveredSource & {
@@ -97,6 +103,7 @@ export type DiscoveryInput = {
 
 export type DiscoveryExecution = {
   sources: DiscoveredSource[];
+  jobs?: NormalizedJobSeed[];
   diagnostics: DiscoveryStageDiagnostics;
 };
 

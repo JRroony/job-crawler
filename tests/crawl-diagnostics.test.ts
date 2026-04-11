@@ -277,6 +277,7 @@ describe("crawl diagnostics", () => {
             configuredSources: 20,
             curatedSources: 0,
             publicSources: 5,
+            publicJobs: 2,
             discoveredBeforeFiltering: 25,
             discoveredAfterFiltering: 1,
             publicSearch: {
@@ -291,6 +292,11 @@ describe("crawl diagnostics", () => {
               rawResultsHarvested: 80,
               normalizedUrlsHarvested: 64,
               platformMatchedUrls: 18,
+              candidateUrlsHarvested: 18,
+              detailUrlsHarvested: 12,
+              sourceUrlsHarvested: 6,
+              recoveredSourcesFromDetailUrls: 12,
+              directJobsExtracted: 2,
               sourcesAdded: 5,
               engineRequestCounts: {
                 bing_rss: 24,
@@ -332,12 +338,14 @@ describe("crawl diagnostics", () => {
     expect(result.diagnostics.discovery).toMatchObject({
       configuredSources: 20,
       publicSources: 5,
+      publicJobs: 2,
       discoveredBeforeFiltering: 25,
       discoveredAfterFiltering: 1,
       publicSearch: {
         generatedQueries: 96,
         executedQueries: 24,
         sourcesAdded: 5,
+        directJobsExtracted: 2,
       },
     });
   });

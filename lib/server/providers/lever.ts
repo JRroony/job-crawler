@@ -6,6 +6,10 @@ import {
   runWithConcurrency,
 } from "@/lib/server/crawler/helpers";
 import {
+  buildCanonicalLeverApiUrl,
+  buildCanonicalLeverJobUrl,
+} from "@/lib/server/discovery/lever-url";
+import {
   type LeverDiscoveredSource,
   isLeverSource,
 } from "@/lib/server/discovery/types";
@@ -21,7 +25,10 @@ import {
   finalizeProviderResult,
   unsupportedProviderResult,
 } from "@/lib/server/providers/shared";
-import { defineProvider } from "@/lib/server/providers/types";
+import {
+  defineProvider,
+  type NormalizedJobSeed,
+} from "@/lib/server/providers/types";
 
 type LeverPosting = {
   id?: string;
@@ -100,6 +107,39 @@ export function normalizeLeverJob(input: {
       : undefined,
     structuredExperienceHints,
     descriptionExperienceHints,
+  });
+}
+
+export async function extractLeverJobFromDetailUrl(input: {
+  detailUrl: string;
+  siteToken: string;
+  jobId: string;
+  companyHint?: string;
+  discoveredAt: string;
+  fetchImpl: typeof fetch;
+}): Promise<NormalizedJobSeed | undefined> {
+  const result = await safeFetchJson<LeverPosting>(
+    buildCanonicalLeverApiUrl(input.siteToken, input.jobId),
+    {
+      fetchImpl: input.fetchImpl,
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    },
+  );
+
+  if (!result.ok || !result.data) {
+    return undefined;
+  }
+
+  return normalizeLeverJob({
+    siteToken: input.siteToken,
+    hostedUrl: buildCanonicalLeverJobUrl(input.siteToken, input.jobId),
+    companyName: input.companyHint,
+    discoveredAt: input.discoveredAt,
+    job: result.data,
   });
 }
 

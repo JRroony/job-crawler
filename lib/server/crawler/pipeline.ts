@@ -97,9 +97,11 @@ export async function executeCrawlPipeline(
             now: input.now,
             fetchImpl: input.fetchImpl,
           }),
+          jobs: [],
           diagnostics: undefined,
         };
     const discoveredSources = discoveryExecution.sources;
+    const harvestedDiscoveryJobs = discoveryExecution.jobs ?? [];
     const providerSources = selectedProviders.map((provider) =>
       discoveredSources.filter((source) => provider.supportsSource(source)),
     );
@@ -112,6 +114,7 @@ export async function executeCrawlPipeline(
       searchId: search._id,
       normalizedFilters,
       discoveredSourceCount: discoveredSources.length,
+      harvestedDiscoveryJobCount: harvestedDiscoveryJobs.length,
       discoveredPlatformCounts: discoveredSources.reduce<Record<string, number>>((counts, source) => {
         counts[source.platform] = (counts[source.platform] ?? 0) + 1;
         return counts;
@@ -135,6 +138,8 @@ export async function executeCrawlPipeline(
     const diagnostics = createEmptyDiagnostics({
       discoveredSources: discoveredSources.length,
       crawledSources: providerSources.reduce((total, sources) => total + sources.length, 0),
+      providersEnqueued: providerRouting.filter((entry) => entry.sourceCount > 0).length,
+      directJobsHarvested: harvestedDiscoveryJobs.length,
       discovery: discoveryExecution.diagnostics,
     });
 
@@ -156,6 +161,19 @@ export async function executeCrawlPipeline(
     const matchedSeeds: Array<{ provider: CrawlSourceResult["provider"]; seed: NormalizedJobSeed }> = [];
     let totalFetchedJobs = 0;
     let totalMatchedJobs = 0;
+
+    if (harvestedDiscoveryJobs.length > 0) {
+      const filteredDiscoveryJobs = filterSeedsForSearch(harvestedDiscoveryJobs, normalizedFilters, {
+        deepExperienceInference: input.deepExperienceInference ?? false,
+      });
+      diagnostics.excludedByTitle += filteredDiscoveryJobs.excludedByTitle;
+      diagnostics.excludedByLocation += filteredDiscoveryJobs.excludedByLocation;
+      diagnostics.excludedByExperience += filteredDiscoveryJobs.excludedByExperience;
+      totalMatchedJobs += filteredDiscoveryJobs.jobs.length;
+      filteredDiscoveryJobs.jobs.forEach((seed) => {
+        matchedSeeds.push({ provider: seed.sourcePlatform, seed });
+      });
+    }
 
     for (let index = 0; index < providerResults.length; index += 1) {
       const provider = selectedProviders[index];
@@ -239,7 +257,9 @@ export async function executeCrawlPipeline(
       matchedSeeds.map((entry) => entry.seed),
       input.now,
     );
+    diagnostics.jobsBeforeDedupe = hydratedJobs.length;
     const dedupedJobs = sortJobs(dedupeJobs(hydratedJobs), normalizedFilters.title);
+    diagnostics.jobsAfterDedupe = dedupedJobs.length;
     // Dedupe happens after all provider/filter stages so this counter reflects true
     // overlap between otherwise matchable seeds, not filter drop-offs.
     diagnostics.dedupedOut = Math.max(0, hydratedJobs.length - dedupedJobs.length);
@@ -262,7 +282,10 @@ export async function executeCrawlPipeline(
     console.info("[crawl:summary]", {
       searchId: search._id,
       fetchedCount: totalFetchedJobs,
+      directJobsHarvested: harvestedDiscoveryJobs.length,
       matchedCount: totalMatchedJobs,
+      jobsBeforeDedupe: hydratedJobs.length,
+      jobsAfterDedupe: dedupedJobs.length,
       savedCount: savedJobs.length,
     });
 
@@ -778,7 +801,11 @@ function createEmptyDiagnostics(
   return {
     discoveredSources: 0,
     crawledSources: 0,
+    providersEnqueued: 0,
     providerFailures: 0,
+    directJobsHarvested: 0,
+    jobsBeforeDedupe: 0,
+    jobsAfterDedupe: 0,
     excludedByTitle: 0,
     excludedByLocation: 0,
     excludedByExperience: 0,

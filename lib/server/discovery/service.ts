@@ -6,7 +6,7 @@ import { classifySourceCandidate } from "@/lib/server/discovery/classify-source"
 import { expandCompanyPageSources } from "@/lib/server/discovery/company-page-expansion";
 import { lookupGreenhouseCompanyHint } from "@/lib/server/discovery/greenhouse-registry";
 import { discoverSourcesFromPublicSearchDetailed } from "@/lib/server/discovery/public-search";
-import { resolveOperationalCrawlerPlatforms } from "@/lib/types";
+import { resolveOperationalCrawlerPlatforms, type CrawlMode } from "@/lib/types";
 import type {
   DiscoveryExecution,
   DiscoveredSource,
@@ -71,20 +71,27 @@ export async function discoverSourcesDetailed(
       input.fetchImpl,
     ),
   );
+  const publicSearchOptions = resolvePublicSearchExecutionOptions(
+    input.filters.crawlMode,
+    input.env,
+  );
   const publicSearchResult = input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED
     ? await discoverSourcesFromPublicSearchDetailed(input.filters, {
         fetchImpl: input.fetchImpl,
-        maxResultsPerQuery: input.env.PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS,
-        maxSources: input.env.PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES,
-        maxQueries: input.env.PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES,
-        queryConcurrency: input.env.PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY,
-        maxGreenhouseLocationClauses: input.env.GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES,
+        maxResultsPerQuery: publicSearchOptions.maxResultsPerQuery,
+        maxSources: publicSearchOptions.maxSources,
+        maxQueries: publicSearchOptions.maxQueries,
+        queryConcurrency: publicSearchOptions.queryConcurrency,
+        maxGreenhouseLocationClauses: publicSearchOptions.maxLocationClauses,
+        maxDirectJobs: publicSearchOptions.maxDirectJobs,
       })
     : {
         sources: [] as DiscoveredSource[],
+        jobs: [],
         diagnostics: undefined,
       };
   const publicSources = publicSearchResult.sources;
+  const publicJobs = publicSearchResult.jobs;
   const discoveredBeforeFiltering = dedupeDiscoveredSources([
     ...configuredSources,
     ...curatedSources,
@@ -101,6 +108,7 @@ export async function discoverSourcesDetailed(
     curatedSources,
     companyPageExpandedSources,
     publicSources,
+    publicJobs,
     discoveredBeforeFiltering,
     discoveredSources,
     publicSearchEnabled: input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED,
@@ -109,10 +117,12 @@ export async function discoverSourcesDetailed(
 
   return {
     sources: discoveredSources,
+    jobs: publicJobs,
     diagnostics: {
       configuredSources: configuredSources.length,
       curatedSources: curatedSources.length,
       publicSources: publicSources.length,
+      publicJobs: publicJobs.length,
       discoveredBeforeFiltering: discoveredBeforeFiltering.length,
       discoveredAfterFiltering: discoveredSources.length,
       ...(publicSearchResult.diagnostics
@@ -121,6 +131,40 @@ export async function discoverSourcesDetailed(
           }
         : {}),
     },
+  };
+}
+
+function resolvePublicSearchExecutionOptions(
+  crawlMode: CrawlMode | undefined,
+  env: DiscoveryEnvSnapshot,
+) {
+  const base = {
+    maxResultsPerQuery: env.PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS,
+    maxSources: env.PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES,
+    maxQueries: env.PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES,
+    queryConcurrency: env.PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY,
+    maxLocationClauses: env.GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES,
+    maxDirectJobs: Math.min(env.PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES, 24),
+  };
+
+  if (crawlMode === "deep") {
+    return base;
+  }
+
+  if (crawlMode === "balanced") {
+    return {
+      ...base,
+      maxQueries: Math.min(base.maxQueries, 48),
+      maxLocationClauses: Math.min(base.maxLocationClauses, 16),
+      maxDirectJobs: Math.min(base.maxDirectJobs, 16),
+    };
+  }
+
+  return {
+    ...base,
+    maxQueries: Math.min(base.maxQueries, 24),
+    maxLocationClauses: Math.min(base.maxLocationClauses, 8),
+    maxDirectJobs: Math.min(base.maxDirectJobs, 8),
   };
 }
 
@@ -213,6 +257,7 @@ function logDiscoveryTrace(
     curatedSources: DiscoveredSource[];
     companyPageExpandedSources: DiscoveredSource[];
     publicSources: DiscoveredSource[];
+    publicJobs: { sourcePlatform: string }[];
     discoveredBeforeFiltering: DiscoveredSource[];
     discoveredSources: DiscoveredSource[];
     publicSearchEnabled: boolean;
@@ -227,6 +272,7 @@ function logDiscoveryTrace(
     curatedCount: trace.curatedSources.length,
     companyPageExpandedCount: trace.companyPageExpandedSources.length,
     publicCount: trace.publicSources.length,
+    publicJobCount: trace.publicJobs.length,
     discoveredBeforeFilteringCount: trace.discoveredBeforeFiltering.length,
     discoveredAfterFilteringCount: trace.discoveredSources.length,
     platformCounts: summarizePlatformCounts(trace.discoveredSources),

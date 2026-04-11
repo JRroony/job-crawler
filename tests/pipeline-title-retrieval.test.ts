@@ -324,4 +324,130 @@ describe("pipeline title retrieval", () => {
     expect(result.diagnostics.excludedByTitle).toBe(2);
     expect(result.diagnostics.excludedByLocation).toBe(1);
   });
+
+  it("persists direct jobs harvested during discovery even when provider board crawling returns no matches", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T13:30:00.000Z");
+
+    const provider = createStubProvider("greenhouse", async () => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: 1,
+      fetchedCount: 0,
+      matchedCount: 0,
+      warningCount: 0,
+      jobs: [],
+    }));
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [];
+      },
+      async discoverWithDiagnostics() {
+        return {
+          sources: [
+            classifySourceCandidate({
+              url: "https://boards.greenhouse.io/gitlab",
+              token: "gitlab",
+              confidence: "high",
+              discoveryMethod: "future_search",
+            }),
+          ],
+          jobs: [
+            {
+              title: "Data Engineer",
+              company: "GitLab",
+              country: "United States",
+              state: "Texas",
+              city: "Austin",
+              locationText: "Austin, TX",
+              sourcePlatform: "greenhouse",
+              sourceJobId: "8455464002",
+              sourceUrl: "https://job-boards.greenhouse.io/gitlab/jobs/8455464002",
+              applyUrl: "https://job-boards.greenhouse.io/gitlab/jobs/8455464002",
+              canonicalUrl: "https://job-boards.greenhouse.io/gitlab/jobs/8455464002",
+              discoveredAt: now.toISOString(),
+              rawSourceMetadata: {
+                harvestedFrom: "public_search_detail",
+              },
+            },
+          ],
+          diagnostics: {
+            configuredSources: 0,
+            curatedSources: 0,
+            publicSources: 1,
+            publicJobs: 1,
+            discoveredBeforeFiltering: 1,
+            discoveredAfterFiltering: 1,
+            publicSearch: {
+              generatedQueries: 24,
+              executedQueries: 8,
+              skippedQueries: 16,
+              maxQueries: 24,
+              maxSources: 120,
+              maxResultsPerQuery: 4,
+              roleQueryCount: 6,
+              locationClauseCount: 12,
+              rawResultsHarvested: 8,
+              normalizedUrlsHarvested: 6,
+              platformMatchedUrls: 3,
+              candidateUrlsHarvested: 3,
+              detailUrlsHarvested: 1,
+              sourceUrlsHarvested: 2,
+              recoveredSourcesFromDetailUrls: 1,
+              directJobsExtracted: 1,
+              sourcesAdded: 1,
+              engineRequestCounts: {
+                bing_rss: 8,
+              },
+              engineResultCounts: {
+                bing_rss: 6,
+              },
+              dropReasonCounts: {},
+              sampleGeneratedRoleQueries: ["data engineer"],
+              sampleGeneratedQueries: ["site:boards.greenhouse.io data engineer"],
+              sampleExecutedRoleQueries: ["data engineer"],
+              sampleExecutedQueries: ["site:boards.greenhouse.io data engineer"],
+            },
+          },
+        };
+      },
+    };
+
+    const result = await runSearchFromFilters(
+      {
+        title: "Data Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0]).toMatchObject({
+      title: "Data Engineer",
+      company: "GitLab",
+      city: "Austin",
+      state: "Texas",
+    });
+    expect(result.diagnostics).toMatchObject({
+      directJobsHarvested: 1,
+      providersEnqueued: 1,
+      jobsBeforeDedupe: 1,
+      jobsAfterDedupe: 1,
+      discovery: {
+        publicJobs: 1,
+        publicSearch: {
+          directJobsExtracted: 1,
+          recoveredSourcesFromDetailUrls: 1,
+        },
+      },
+    });
+  });
 });
