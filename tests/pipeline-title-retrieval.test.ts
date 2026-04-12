@@ -115,7 +115,7 @@ describe("pipeline title retrieval", () => {
     });
     expect(result.jobs[1]?.rawSourceMetadata).toMatchObject({
       crawlTitleMatch: {
-        tier: "generic_token_overlap",
+        tier: "same_family_related",
       },
     });
     expect(result.diagnostics.excludedByTitle).toBe(1);
@@ -322,6 +322,109 @@ describe("pipeline title retrieval", () => {
       "Remote - California",
     ]);
     expect(result.diagnostics.excludedByTitle).toBe(2);
+    expect(result.diagnostics.excludedByLocation).toBe(1);
+  });
+
+  it("keeps arbitrary multi-token engineering searches specific while still preserving nearby concept recall", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T13:15:00.000Z");
+
+    const provider = createStubProvider("greenhouse", async () => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: 1,
+      fetchedCount: 4,
+      matchedCount: 4,
+      warningCount: 0,
+      jobs: [
+        {
+          title: "Cloud Platform Engineer",
+          company: "Acme",
+          locationText: "Seattle, WA",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "cloud-platform-engineer",
+          sourceUrl: "https://example.com/jobs/cloud-platform-engineer",
+          applyUrl: "https://example.com/jobs/cloud-platform-engineer/apply",
+          canonicalUrl: "https://example.com/jobs/cloud-platform-engineer",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Platform Engineer",
+          company: "Acme",
+          locationText: "Remote - California",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "platform-engineer",
+          sourceUrl: "https://example.com/jobs/platform-engineer",
+          applyUrl: "https://example.com/jobs/platform-engineer/apply",
+          canonicalUrl: "https://example.com/jobs/platform-engineer",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Software Engineer",
+          company: "Acme",
+          locationText: "Austin, TX",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "software-engineer",
+          sourceUrl: "https://example.com/jobs/software-engineer",
+          applyUrl: "https://example.com/jobs/software-engineer/apply",
+          canonicalUrl: "https://example.com/jobs/software-engineer",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Cloud Platform Engineer",
+          company: "Acme",
+          locationText: "Toronto, Ontario",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "cloud-platform-engineer-canada",
+          sourceUrl: "https://example.com/jobs/cloud-platform-engineer-canada",
+          applyUrl: "https://example.com/jobs/cloud-platform-engineer-canada/apply",
+          canonicalUrl: "https://example.com/jobs/cloud-platform-engineer-canada",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+      ],
+    }));
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+
+    const result = await runSearchFromFilters(
+      {
+        title: "Cloud Platform Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    expect(result.jobs.map((job) => job.title)).toEqual([
+      "Cloud Platform Engineer",
+      "Platform Engineer",
+    ]);
+    expect(result.jobs.map((job) => job.locationText)).toEqual([
+      "Seattle, WA",
+      "Remote - California",
+    ]);
+    expect(result.diagnostics.excludedByTitle).toBe(1);
     expect(result.diagnostics.excludedByLocation).toBe(1);
   });
 

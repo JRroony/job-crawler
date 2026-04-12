@@ -13,6 +13,14 @@ export function normalizeOptionalSearchString(value: unknown) {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+export function normalizeOptionalSchemaInput(value: unknown) {
+  return value == null ? undefined : value;
+}
+
+function nullableOptional<TSchema extends z.ZodTypeAny>(schema: TSchema) {
+  return z.preprocess(normalizeOptionalSchemaInput, schema.optional());
+}
+
 const canonicalSearchFilterKeys = [
   "title",
   "country",
@@ -269,8 +277,8 @@ export const discoveryStageDiagnosticsSchema = z.object({
   discoveredAfterFiltering: z.number().int().nonnegative().default(0),
   platformCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
   publicJobPlatformCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
-  zeroCoverageReason: z.string().optional(),
-  publicSearch: publicSearchDiscoveryDiagnosticsSchema.optional(),
+  zeroCoverageReason: nullableOptional(z.string()),
+  publicSearch: nullableOptional(publicSearchDiscoveryDiagnosticsSchema),
 });
 
 export const crawlDiagnosticsSchema = z.object({
@@ -297,7 +305,7 @@ export const crawlProviderSummarySchema = z.object({
   matchedCount: z.number().int().nonnegative().default(0),
   savedCount: z.number().int().nonnegative().default(0),
   warningCount: z.number().int().nonnegative().default(0),
-  errorMessage: z.string().optional(),
+  errorMessage: nullableOptional(z.string()),
 });
 
 export const searchFiltersSchema = z
@@ -455,17 +463,17 @@ export const persistableJobSchema = jobListingSchema.omit({
 export const searchDocumentSchema = z.object({
   _id: z.string().min(1),
   filters: searchFiltersSchema,
-  latestCrawlRunId: z.string().optional(),
+  latestCrawlRunId: nullableOptional(z.string()),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
-  lastStatus: crawlRunStatusSchema.optional(),
+  lastStatus: nullableOptional(crawlRunStatusSchema),
 });
 
 export const crawlRunDocumentSchema = z.object({
   _id: z.string().min(1),
   searchId: z.string().min(1),
   startedAt: z.string().datetime(),
-  finishedAt: z.string().datetime().optional(),
+  finishedAt: nullableOptional(z.string().datetime()),
   status: crawlRunStatusSchema,
   discoveredSourcesCount: z.number().int().nonnegative().default(0),
   crawledSourcesCount: z.number().int().nonnegative().default(0),
@@ -474,7 +482,7 @@ export const crawlRunDocumentSchema = z.object({
   dedupedJobs: z.number().int().nonnegative(),
   validationMode: crawlValidationModeSchema.default("deferred"),
   providerSummary: z.array(crawlProviderSummarySchema).default([]),
-  errorMessage: z.string().optional(),
+  errorMessage: nullableOptional(z.string()),
   diagnostics: crawlDiagnosticsSchema.default({}),
 });
 
@@ -489,7 +497,7 @@ export const crawlSourceResultSchema = z.object({
   matchedCount: z.number().int().nonnegative(),
   savedCount: z.number().int().nonnegative(),
   warningCount: z.number().int().nonnegative().default(0),
-  errorMessage: z.string().optional(),
+  errorMessage: nullableOptional(z.string()),
   startedAt: z.string().datetime(),
   finishedAt: z.string().datetime(),
 });
@@ -498,14 +506,14 @@ export const linkValidationResultSchema = z.object({
   _id: z.string().min(1),
   jobId: z.string().min(1),
   applyUrl: z.string().url(),
-  resolvedUrl: z.string().url().optional(),
-  canonicalUrl: z.string().url().optional(),
+  resolvedUrl: nullableOptional(z.string().url()),
+  canonicalUrl: nullableOptional(z.string().url()),
   status: linkStatusSchema,
   method: z.enum(["HEAD", "GET", "CACHE"]),
-  httpStatus: z.number().int().min(100).max(599).optional(),
+  httpStatus: nullableOptional(z.number().int().min(100).max(599)),
   checkedAt: z.string().datetime(),
-  errorMessage: z.string().optional(),
-  staleMarkers: z.array(z.string()).optional(),
+  errorMessage: nullableOptional(z.string()),
+  staleMarkers: nullableOptional(z.array(z.string())),
 });
 
 export const companyPageSourceConfigSchema = z.discriminatedUnion("type", [

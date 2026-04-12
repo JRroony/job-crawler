@@ -57,6 +57,7 @@ const roleHeadWords = new Set([
   "engineer",
   "manager",
   "recruiter",
+  "scientist",
   "specialist",
   "sourcer",
   "tester",
@@ -83,6 +84,30 @@ export function normalizeTitleText(value?: string) {
 export function tokenizeTitle(value?: string) {
   const normalized = normalizeTitleText(value);
   return normalized ? normalized.split(" ") : [];
+}
+
+export function extractTitleSeniorityTokens(value?: string) {
+  const normalized = normalizeTitleText(value);
+  if (!normalized) {
+    return [];
+  }
+
+  const detected = new Set<string>();
+  let stripped = normalized;
+
+  for (const phrase of seniorityPhrases) {
+    if (containsNormalizedPhrase(stripped, phrase)) {
+      detected.add(phrase);
+      stripped = removeNormalizedPhrase(stripped, phrase);
+    }
+  }
+
+  stripped
+    .split(" ")
+    .filter((token) => token && seniorityTokens.has(token))
+    .forEach((token) => detected.add(token));
+
+  return Array.from(detected);
 }
 
 export function stripTitleSeniority(value?: string) {
@@ -140,6 +165,38 @@ export function extractMeaningfulTokens(value: string) {
   return tokenizeTitle(value).filter(
     (token) => token && token !== headWord && !stopWords.has(token),
   );
+}
+
+export function extractMeaningfulPhrases(
+  value: string,
+  options: {
+    minLength?: number;
+    maxLength?: number;
+  } = {},
+) {
+  const tokens = extractMeaningfulTokens(value);
+  if (tokens.length === 0) {
+    return [];
+  }
+
+  const minLength = Math.max(1, options.minLength ?? 1);
+  const maxLength = Math.max(minLength, options.maxLength ?? Math.min(3, tokens.length));
+  const phrases: string[] = [];
+  const seen = new Set<string>();
+
+  for (let length = Math.min(maxLength, tokens.length); length >= minLength; length -= 1) {
+    for (let start = 0; start <= tokens.length - length; start += 1) {
+      const phrase = tokens.slice(start, start + length).join(" ");
+      if (!phrase || seen.has(phrase)) {
+        continue;
+      }
+
+      seen.add(phrase);
+      phrases.push(phrase);
+    }
+  }
+
+  return phrases;
 }
 
 export function replaceHeadWord(

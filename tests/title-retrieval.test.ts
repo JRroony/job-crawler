@@ -42,6 +42,15 @@ describe("title retrieval analysis", () => {
       "operations",
     ]);
   });
+
+  it("keeps extra user modifiers when inferring a family from an arbitrary title", () => {
+    expect(analyzeTitle("Cloud Platform Engineer")).toMatchObject({
+      family: "software_engineering",
+      primaryConceptId: undefined,
+      candidateConceptIds: expect.arrayContaining(["platform_engineer"]),
+      modifierTokens: ["cloud", "platform"],
+    });
+  });
 });
 
 describe("title retrieval query expansion", () => {
@@ -164,7 +173,30 @@ describe("title retrieval query expansion", () => {
     expect(queriesFor("Integration Engineer")).toEqual([
       "integration engineer",
       "integration developer",
+      "integration software engineer",
     ]);
+    expect(queriesFor("Integration Engineer")).not.toContain("software engineer");
+  });
+
+  it("keeps richer arbitrary input specific while borrowing nearby concept queries", () => {
+    expect(queriesFor("Cloud Platform Engineer")).toEqual(
+      expect.arrayContaining([
+        "cloud platform engineer",
+        "platform engineer",
+        "platform developer",
+      ]),
+    );
+    expect(queriesFor("Cloud Platform Engineer")).not.toContain("software engineer");
+  });
+
+  it("supports less-common operations titles with safe user-input-driven fallback", () => {
+    expect(queriesFor("Revenue Operations Analyst")).toEqual(
+      expect.arrayContaining([
+        "revenue operations analyst",
+        "operations analyst",
+      ]),
+    );
+    expect(queriesFor("Revenue Operations Analyst")).not.toContain("data analyst");
   });
 });
 
@@ -204,7 +236,7 @@ describe("title retrieval scoring", () => {
       }),
     ).toMatchObject({
       matches: false,
-      tier: "generic_token_overlap",
+      tier: "same_family_related",
     });
 
     expect(
@@ -213,7 +245,7 @@ describe("title retrieval scoring", () => {
       }),
     ).toMatchObject({
       matches: true,
-      tier: "generic_token_overlap",
+      tier: "same_family_related",
     });
   });
 
@@ -247,6 +279,22 @@ describe("title retrieval scoring", () => {
       matches: true,
     });
     expect(getTitleMatchResult("Software Engineer", "Data Engineer")).toMatchObject({
+      matches: false,
+      tier: "none",
+    });
+  });
+
+  it("keeps richer arbitrary titles specific instead of broadening them into generic adjacent engineering roles", () => {
+    expect(getTitleMatchResult("Platform Engineer", "Cloud Platform Engineer")).toMatchObject({
+      matches: true,
+    });
+    expect(getTitleMatchResult("Software Engineer", "Cloud Platform Engineer")).toMatchObject({
+      matches: false,
+      tier: "none",
+    });
+    expect(
+      getTitleMatchResult("Data Analyst", "Revenue Operations Analyst"),
+    ).toMatchObject({
       matches: false,
       tier: "none",
     });

@@ -98,6 +98,13 @@ export type TitleAliasDefinition = {
   phrase: string;
 };
 
+export type TitleFamilyScore = {
+  family: TitleRoleFamily;
+  score: number;
+  positiveSignals: string[];
+  negativeSignals: string[];
+};
+
 export type TitleAnalysis = {
   input: string;
   normalized: string;
@@ -110,8 +117,12 @@ export type TitleAnalysis = {
   aliasKind?: TitleAliasKind;
   matchedPhrase?: string;
   headWord?: string;
+  seniorityTokens: string[];
   tokens: string[];
   meaningfulTokens: string[];
+  modifierTokens: string[];
+  candidateConceptIds: TitleConceptId[];
+  familyScores: TitleFamilyScore[];
   inferenceSource: "catalog" | "concept_signals" | "family" | "fallback" | "none";
   confidence: "high" | "medium" | "low" | "none";
 };

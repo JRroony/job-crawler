@@ -170,7 +170,7 @@ export class JobCrawlerRepository {
       .find({ crawlRunId }, { sort: { provider: 1 } })
       .toArray();
 
-    return documents.map((document) => crawlSourceResultSchema.parse(document));
+    return documents.map((document) => parseStoredCrawlSourceResult(document));
   }
 
   async getJobsByCrawlRun(crawlRunId: string) {
@@ -401,26 +401,42 @@ function parseStoredSearch(document: Record<string, unknown>) {
   return searchDocumentSchema.parse({
     ...document,
     filters: sanitizeSearchFiltersInput(document.filters),
+    latestCrawlRunId: normalizeOptionalDocumentString(document.latestCrawlRunId),
+    lastStatus: document.lastStatus == null ? undefined : document.lastStatus,
   });
 }
 
 function parseStoredCrawlRun(document: Record<string, unknown>) {
-  const diagnostics = normalizeCrawlDiagnostics(document.diagnostics);
+  const normalizedDocument = normalizeLegacyStoredRecord(document);
+  const diagnostics = normalizeCrawlDiagnostics(normalizedDocument.diagnostics);
 
   return crawlRunDocumentSchema.parse({
-    ...document,
+    ...normalizedDocument,
+    finishedAt: normalizeOptionalDocumentString(normalizedDocument.finishedAt),
+    errorMessage: normalizeOptionalDocumentString(normalizedDocument.errorMessage),
     diagnostics,
     discoveredSourcesCount:
-      typeof document.discoveredSourcesCount === "number"
-        ? document.discoveredSourcesCount
+      typeof normalizedDocument.discoveredSourcesCount === "number"
+        ? normalizedDocument.discoveredSourcesCount
         : diagnostics.discoveredSources,
     crawledSourcesCount:
-      typeof document.crawledSourcesCount === "number"
-        ? document.crawledSourcesCount
+      typeof normalizedDocument.crawledSourcesCount === "number"
+        ? normalizedDocument.crawledSourcesCount
         : diagnostics.crawledSources,
     validationMode:
-      typeof document.validationMode === "string" ? document.validationMode : "deferred",
-    providerSummary: normalizeProviderSummary(document.providerSummary),
+      typeof normalizedDocument.validationMode === "string"
+        ? normalizedDocument.validationMode
+        : "deferred",
+    providerSummary: normalizeProviderSummary(normalizedDocument.providerSummary),
+  });
+}
+
+function parseStoredCrawlSourceResult(document: Record<string, unknown>) {
+  const normalizedDocument = normalizeLegacyStoredRecord(document);
+
+  return crawlSourceResultSchema.parse({
+    ...normalizedDocument,
+    errorMessage: normalizeOptionalDocumentString(normalizedDocument.errorMessage),
   });
 }
 
@@ -429,7 +445,21 @@ function parseStoredJob(document: Record<string, unknown>) {
 }
 
 function parseStoredLinkValidation(document: Record<string, unknown>) {
-  return linkValidationResultSchema.parse(document);
+  const normalizedDocument = normalizeLegacyStoredRecord(document);
+
+  return linkValidationResultSchema.parse({
+    ...normalizedDocument,
+    resolvedUrl: normalizeOptionalDocumentString(normalizedDocument.resolvedUrl),
+    canonicalUrl: normalizeOptionalDocumentString(normalizedDocument.canonicalUrl),
+    httpStatus:
+      typeof normalizedDocument.httpStatus === "number"
+        ? normalizedDocument.httpStatus
+        : undefined,
+    errorMessage: normalizeOptionalDocumentString(normalizedDocument.errorMessage),
+    staleMarkers: Array.isArray(normalizedDocument.staleMarkers)
+      ? normalizedDocument.staleMarkers.filter(isNonEmptyString)
+      : undefined,
+  });
 }
 
 function createStoredCrawlRunDocument(
@@ -456,35 +486,48 @@ function createStoredCrawlRunDocument(
 }
 
 function normalizeCrawlDiagnostics(diagnostics?: unknown) {
-  return crawlDiagnosticsSchema.parse(diagnostics ?? {});
+  return crawlDiagnosticsSchema.parse(normalizeLegacyStoredValue(diagnostics) ?? {});
 }
 
 function normalizeProviderSummary(summary?: unknown) {
-  if (!Array.isArray(summary)) {
+  const normalizedSummary = normalizeLegacyStoredValue(summary);
+  if (!Array.isArray(normalizedSummary)) {
     return [];
   }
 
-  return summary.map((entry) =>
+  return normalizedSummary.map((entry) =>
     crawlSourceResultToProviderSummary(entry as Record<string, unknown>),
   );
 }
 
 function crawlSourceResultToProviderSummary(sourceResult: Record<string, unknown>) {
+  const normalizedSourceResult = normalizeLegacyStoredRecord(sourceResult);
+
   return crawlProviderSummarySchema.parse({
-    provider: sourceResult.provider,
-    status: sourceResult.status,
+    provider: normalizedSourceResult.provider,
+    status: normalizedSourceResult.status,
     sourceCount:
-      typeof sourceResult.sourceCount === "number" ? sourceResult.sourceCount : 0,
+      typeof normalizedSourceResult.sourceCount === "number"
+        ? normalizedSourceResult.sourceCount
+        : 0,
     fetchedCount:
-      typeof sourceResult.fetchedCount === "number" ? sourceResult.fetchedCount : 0,
+      typeof normalizedSourceResult.fetchedCount === "number"
+        ? normalizedSourceResult.fetchedCount
+        : 0,
     matchedCount:
-      typeof sourceResult.matchedCount === "number" ? sourceResult.matchedCount : 0,
+      typeof normalizedSourceResult.matchedCount === "number"
+        ? normalizedSourceResult.matchedCount
+        : 0,
     savedCount:
-      typeof sourceResult.savedCount === "number" ? sourceResult.savedCount : 0,
+      typeof normalizedSourceResult.savedCount === "number"
+        ? normalizedSourceResult.savedCount
+        : 0,
     warningCount:
-      typeof sourceResult.warningCount === "number" ? sourceResult.warningCount : 0,
+      typeof normalizedSourceResult.warningCount === "number"
+        ? normalizedSourceResult.warningCount
+        : 0,
     errorMessage:
-      typeof sourceResult.errorMessage === "string" ? sourceResult.errorMessage : undefined,
+      normalizeOptionalDocumentString(normalizedSourceResult.errorMessage),
   });
 }
 
@@ -612,7 +655,9 @@ function normalizeExperienceClassification(value: unknown) {
     return undefined;
   }
 
-  const parsed = experienceClassificationSchema.safeParse(value);
+  const parsed = experienceClassificationSchema.safeParse(
+    normalizeLegacyStoredValue(value),
+  );
   return parsed.success ? parsed.data : undefined;
 }
 
@@ -645,6 +690,36 @@ function normalizeResolvedLocation(value: unknown) {
 
   const parsed = resolvedLocationSchema.safeParse(record);
   return parsed.success ? parsed.data : undefined;
+}
+
+function normalizeLegacyStoredValue(value: unknown): unknown {
+  if (value == null) {
+    return undefined;
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => normalizeLegacyStoredValue(entry))
+      .filter((entry) => typeof entry !== "undefined");
+  }
+
+  if (!isRecord(value)) {
+    return value;
+  }
+
+  return Object.entries(value).reduce<Record<string, unknown>>((record, [key, entry]) => {
+    const normalizedEntry = normalizeLegacyStoredValue(entry);
+    if (typeof normalizedEntry !== "undefined") {
+      record[key] = normalizedEntry;
+    }
+
+    return record;
+  }, {});
+}
+
+function normalizeLegacyStoredRecord(value: Record<string, unknown>) {
+  const normalized = normalizeLegacyStoredValue(value);
+  return isRecord(normalized) ? normalized : value;
 }
 
 function normalizeOptionalDocumentString(value: unknown) {

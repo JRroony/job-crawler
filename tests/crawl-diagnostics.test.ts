@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { runSearchFromFilters } from "@/lib/server/crawler/service";
+import { getSearchDetails, runSearchFromFilters } from "@/lib/server/crawler/service";
+import { collectionNames } from "@/lib/server/db/indexes";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
@@ -22,6 +23,89 @@ function createStubProvider(
 }
 
 describe("crawl diagnostics", () => {
+  it("loads search details from legacy crawl runs whose diagnostics and source results contain null optional fields", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+
+    await db.collection(collectionNames.searches).insertOne({
+      _id: "search-legacy-details",
+      filters: {
+        title: "Integration Engineer",
+        country: "United States",
+      },
+      latestCrawlRunId: "run-legacy-details",
+      createdAt: "2026-03-29T12:00:00.000Z",
+      updatedAt: "2026-03-29T12:10:00.000Z",
+      lastStatus: "completed",
+    });
+    await db.collection(collectionNames.crawlRuns).insertOne({
+      _id: "run-legacy-details",
+      searchId: "search-legacy-details",
+      startedAt: "2026-03-29T12:00:00.000Z",
+      finishedAt: "2026-03-29T12:10:00.000Z",
+      status: "completed",
+      totalFetchedJobs: 0,
+      totalMatchedJobs: 0,
+      dedupedJobs: 0,
+      diagnostics: {
+        discoveredSources: 0,
+        crawledSources: 0,
+        discovery: {
+          configuredSources: 0,
+          curatedSources: 0,
+          publicSources: 0,
+          publicJobs: 0,
+          discoveredBeforeFiltering: 0,
+          discoveredAfterFiltering: 0,
+          platformCounts: {},
+          publicJobPlatformCounts: {},
+          zeroCoverageReason: null,
+          publicSearch: null,
+        },
+      },
+      providerSummary: [
+        {
+          provider: "greenhouse",
+          status: "failed",
+          sourceCount: 1,
+          fetchedCount: 0,
+          matchedCount: 0,
+          savedCount: 0,
+          warningCount: 1,
+          errorMessage: null,
+        },
+      ],
+      errorMessage: null,
+    });
+    await db.collection(collectionNames.crawlSourceResults).insertOne({
+      _id: "source-result-legacy",
+      crawlRunId: "run-legacy-details",
+      searchId: "search-legacy-details",
+      provider: "greenhouse",
+      status: "failed",
+      sourceCount: 1,
+      fetchedCount: 0,
+      matchedCount: 0,
+      savedCount: 0,
+      warningCount: 1,
+      errorMessage: null,
+      startedAt: "2026-03-29T12:00:00.000Z",
+      finishedAt: "2026-03-29T12:10:00.000Z",
+    });
+
+    const result = await getSearchDetails("search-legacy-details", {
+      repository,
+      now: new Date("2026-03-29T12:11:00.000Z"),
+      fetchImpl: vi.fn() as unknown as typeof fetch,
+    });
+
+    expect(result.search._id).toBe("search-legacy-details");
+    expect(result.crawlRun.diagnostics.discovery?.zeroCoverageReason).toBeUndefined();
+    expect(result.crawlRun.providerSummary[0]?.errorMessage).toBeUndefined();
+    expect(result.sourceResults[0]?.errorMessage).toBeUndefined();
+    expect(result.jobs).toEqual([]);
+  });
+
   it("accepts nullable optional filters and strips legacy experienceClassification on incoming search requests", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const now = new Date("2026-03-29T12:00:00.000Z");

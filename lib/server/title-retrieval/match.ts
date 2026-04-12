@@ -398,12 +398,20 @@ function dedupePenalties(penalties: MatchPenalty[]) {
 }
 
 function findSharedConcept(query: TitleAnalysis, job: TitleAnalysis) {
-  if (query.primaryConceptId && job.primaryConceptId && query.primaryConceptId === job.primaryConceptId) {
+  if (
+    query.primaryConceptId &&
+    (job.primaryConceptId === query.primaryConceptId ||
+      job.matchedConceptIds.includes(query.primaryConceptId))
+  ) {
     return query.primaryConceptId;
   }
 
-  if (query.primaryConceptId || job.primaryConceptId) {
-    return undefined;
+  if (
+    job.primaryConceptId &&
+    (query.primaryConceptId === job.primaryConceptId ||
+      query.matchedConceptIds.includes(job.primaryConceptId))
+  ) {
+    return job.primaryConceptId;
   }
 
   return query.matchedConceptIds.find((conceptId) => job.matchedConceptIds.includes(conceptId));

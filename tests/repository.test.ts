@@ -464,6 +464,127 @@ describe("JobCrawlerRepository", () => {
     });
   });
 
+  it("normalizes legacy crawl diagnostics that store nullable optional fields", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+
+    await db.collection(collectionNames.crawlRuns).insertOne({
+      _id: "run-null-diagnostics",
+      searchId: "search-1",
+      startedAt: "2026-03-29T00:00:00.000Z",
+      finishedAt: null,
+      status: "partial",
+      totalFetchedJobs: 5,
+      totalMatchedJobs: 2,
+      dedupedJobs: 2,
+      errorMessage: null,
+      providerSummary: [
+        {
+          provider: "greenhouse",
+          status: "partial",
+          sourceCount: 1,
+          fetchedCount: 5,
+          matchedCount: 2,
+          savedCount: 2,
+          warningCount: 1,
+          errorMessage: null,
+        },
+      ],
+      diagnostics: {
+        discoveredSources: 1,
+        crawledSources: 1,
+        discovery: {
+          configuredSources: 0,
+          curatedSources: 0,
+          publicSources: 0,
+          publicJobs: 0,
+          discoveredBeforeFiltering: 0,
+          discoveredAfterFiltering: 0,
+          platformCounts: {},
+          publicJobPlatformCounts: {},
+          zeroCoverageReason: null,
+          publicSearch: {
+            generatedQueries: 3,
+            executedQueries: 1,
+            skippedQueries: 2,
+            maxQueries: 8,
+            maxSources: 40,
+            maxResultsPerQuery: 4,
+            roleQueryCount: 2,
+            locationClauseCount: 6,
+            rawResultsHarvested: 1,
+            normalizedUrlsHarvested: 1,
+            platformMatchedUrls: 1,
+            candidateUrlsHarvested: 1,
+            detailUrlsHarvested: 0,
+            sourceUrlsHarvested: 1,
+            recoveredSourcesFromDetailUrls: 0,
+            directJobsExtracted: 0,
+            sourcesAdded: 1,
+            engineRequestCounts: {
+              bing_rss: 1,
+              duckduckgo_html: null,
+            },
+            engineResultCounts: {
+              bing_rss: 1,
+            },
+            dropReasonCounts: {
+              query_budget: 2,
+              stale_query: null,
+            },
+            sampleGeneratedRoleQueries: null,
+            sampleGeneratedQueries: [
+              "site:boards.greenhouse.io integration engineer",
+            ],
+            sampleExecutedRoleQueries: null,
+            sampleExecutedQueries: null,
+            sampleHarvestedCandidateUrls: null,
+            sampleHarvestedDetailUrls: null,
+            sampleHarvestedSourceUrls: ["https://boards.greenhouse.io/acme"],
+            sampleRecoveredSourceUrls: null,
+            coverageNotes: null,
+          },
+        },
+      },
+    });
+
+    const crawlRun = await repository.getCrawlRun("run-null-diagnostics");
+
+    expect(crawlRun?._id).toBe("run-null-diagnostics");
+    expect(crawlRun?.finishedAt).toBeUndefined();
+    expect(crawlRun?.errorMessage).toBeUndefined();
+    expect(crawlRun?.providerSummary).toEqual([
+      {
+        provider: "greenhouse",
+        status: "partial",
+        sourceCount: 1,
+        fetchedCount: 5,
+        matchedCount: 2,
+        savedCount: 2,
+        warningCount: 1,
+        errorMessage: undefined,
+      },
+    ]);
+    expect(crawlRun?.diagnostics.discovery?.zeroCoverageReason).toBeUndefined();
+    expect(crawlRun?.diagnostics.discovery?.publicSearch).toMatchObject({
+      generatedQueries: 3,
+      executedQueries: 1,
+      dropReasonCounts: {
+        query_budget: 2,
+      },
+      engineRequestCounts: {
+        bing_rss: 1,
+      },
+      sampleGeneratedRoleQueries: [],
+      sampleExecutedRoleQueries: [],
+      sampleExecutedQueries: [],
+      sampleHarvestedCandidateUrls: [],
+      sampleHarvestedDetailUrls: [],
+      sampleRecoveredSourceUrls: [],
+      coverageNotes: [],
+    });
+  });
+
   it("normalizes legacy jobs into the richer stored shape on read", async () => {
     const db = new FakeDb();
     const repository = new JobCrawlerRepository(db);

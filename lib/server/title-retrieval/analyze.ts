@@ -3,37 +3,28 @@ import "server-only";
 import {
   findMatchingTitleAliases,
   getTitleConcept,
-  getTitleFamily,
   getTitleFamilyRoleGroup,
   listTitleConcepts,
   listTitleFamilies,
 } from "@/lib/server/title-retrieval/catalog";
 import {
   extractHeadWord,
+  extractMeaningfulPhrases,
   extractMeaningfulTokens,
+  extractTitleSeniorityTokens,
   normalizeTitleText,
   stripTitleSeniority,
   tokenizeTitle,
 } from "@/lib/server/title-retrieval/normalize";
 import type {
   TitleAnalysis,
+  TitleFamilyScore,
   TitleRoleFamily,
   TitleRoleGroup,
 } from "@/lib/server/title-retrieval/types";
 
-const familyInferenceOrder: TitleRoleFamily[] = [
-  "recruiting",
-  "product",
-  "program_management",
-  "quality_assurance",
-  "writing_documentation",
-  "support",
-  "sales",
-  "operations",
-  "data_engineering",
-  "data_analytics",
-  "software_engineering",
-];
+const primaryConceptThreshold = 260;
+const relatedConceptThreshold = 180;
 
 const roleGroupByHeadWord = new Map<string, TitleRoleGroup>([
   ["architect", "engineering"],
@@ -51,30 +42,105 @@ const roleGroupByHeadWord = new Map<string, TitleRoleGroup>([
   ["tester", "quality"],
 ]);
 
+const fallbackFamilyScoresByHeadWord: Partial<
+  Record<string, Partial<Record<TitleRoleFamily, number>>>
+> = {
+  architect: {
+    software_engineering: 130,
+    data_engineering: 110,
+  },
+  consultant: {
+    sales: 90,
+  },
+  coordinator: {
+    operations: 85,
+  },
+  designer: {
+    writing_documentation: 60,
+  },
+  developer: {
+    software_engineering: 125,
+    data_engineering: 95,
+    quality_assurance: 70,
+  },
+  engineer: {
+    software_engineering: 120,
+    data_engineering: 100,
+    quality_assurance: 90,
+    support: 80,
+    sales: 75,
+  },
+  analyst: {
+    data_analytics: 95,
+    operations: 90,
+    quality_assurance: 70,
+  },
+  manager: {
+    product: 90,
+    program_management: 90,
+    operations: 80,
+  },
+  recruiter: {
+    recruiting: 170,
+  },
+  sourcer: {
+    recruiting: 170,
+  },
+  specialist: {
+    operations: 75,
+    support: 65,
+    writing_documentation: 60,
+    recruiting: 55,
+  },
+  tester: {
+    quality_assurance: 165,
+  },
+  writer: {
+    writing_documentation: 160,
+  },
+};
+
 export function analyzeTitle(value?: string): TitleAnalysis {
   const input = (value ?? "").trim();
   const normalized = normalizeTitleText(input);
   const strippedNormalized = stripTitleSeniority(normalized);
+  const canonicalSignalInput = strippedNormalized || normalized;
+  const seniorityTokens = extractTitleSeniorityTokens(input);
+  const canonicalMeaningfulTokens = extractMeaningfulTokens(canonicalSignalInput);
+  const canonicalHeadWord = extractHeadWord(canonicalSignalInput);
+  const familyScores = scoreRoleFamilies(canonicalSignalInput);
+  const inferredFamily = selectInferredFamily(familyScores);
   const normalizedMatches = findMatchingTitleAliases(normalized);
   const strippedMatches =
     strippedNormalized && strippedNormalized !== normalized
       ? findMatchingTitleAliases(strippedNormalized)
       : [];
-  const primaryAlias = normalizedMatches[0] ?? strippedMatches[0];
-  const canonicalSignalInput = strippedNormalized || normalized;
-  const canonicalMeaningfulTokens = extractMeaningfulTokens(canonicalSignalInput);
-  const canonicalHeadWord = extractHeadWord(canonicalSignalInput);
+  const allAliasMatches = [...normalizedMatches, ...strippedMatches];
+  const promotableAliasMatches = allAliasMatches.filter((alias) =>
+    canPromoteAliasMatch(alias, canonicalSignalInput, canonicalMeaningfulTokens),
+  );
+  const primaryAlias = promotableAliasMatches[0];
   const primaryAliasConcept = getTitleConcept(primaryAlias?.conceptId);
-  const inferredFamilyFromKeywords = inferRoleFamily(canonicalSignalInput);
-  const signalConcept = inferTitleConceptFromSignals(canonicalSignalInput, inferredFamilyFromKeywords);
-  const aliasConceptIds = [...normalizedMatches, ...strippedMatches].map((alias) => alias.conceptId);
+  const conceptCandidates = inferTitleConceptCandidates(
+    canonicalSignalInput,
+    inferredFamily,
+  );
+  const signalConcept = conceptCandidates.find(
+    (candidate) =>
+      candidate.score >= primaryConceptThreshold &&
+      canPromoteConceptCandidate(candidate.concept, canonicalMeaningfulTokens),
+  )?.concept;
+  const aliasConceptIds = promotableAliasMatches.map((alias) => alias.conceptId);
+  const relatedAliasConceptIds = allAliasMatches
+    .filter((alias) => !promotableAliasMatches.includes(alias))
+    .map((alias) => alias.conceptId);
   const primaryConcept = resolvePrimaryConcept(
     primaryAliasConcept,
     signalConcept,
     canonicalSignalInput,
     canonicalMeaningfulTokens,
     canonicalHeadWord,
-    inferredFamilyFromKeywords,
+    inferredFamily,
   );
   const matchedConceptIds = Array.from(
     new Set([
@@ -82,18 +148,21 @@ export function analyzeTitle(value?: string): TitleAnalysis {
       ...(signalConcept ? [signalConcept.id] : []),
     ]),
   );
-  const inferredFamily =
-    primaryConcept?.family ??
-    inferredFamilyFromKeywords;
+  const candidateConceptIds = conceptCandidates
+    .map((candidate) => candidate.concept.id)
+    .concat(relatedAliasConceptIds)
+    .filter(
+      (conceptId) =>
+        conceptId !== primaryConcept?.id && !matchedConceptIds.includes(conceptId),
+    );
   const roleGroup =
     primaryAlias?.roleGroup ??
+    primaryConcept?.roleGroup ??
     getTitleFamilyRoleGroup(primaryConcept?.family) ??
     getTitleFamilyRoleGroup(inferredFamily) ??
-    inferRoleGroupFromHeadWord(strippedNormalized || normalized);
+    inferRoleGroupFromHeadWord(canonicalSignalInput);
   const canonicalTitle =
-    primaryConcept?.canonicalTitle ??
-    strippedNormalized ??
-    normalized;
+    primaryConcept?.canonicalTitle ?? strippedNormalized ?? normalized;
 
   return {
     input,
@@ -106,27 +175,33 @@ export function analyzeTitle(value?: string): TitleAnalysis {
     matchedConceptIds,
     aliasKind: primaryAlias?.kind,
     matchedPhrase: primaryAlias?.phrase,
-    headWord: extractHeadWord(strippedNormalized || normalized),
-    tokens: tokenizeTitle(strippedNormalized || normalized),
-    meaningfulTokens: extractMeaningfulTokens(strippedNormalized || normalized),
-    inferenceSource: primaryAliasConcept && primaryConcept?.id === primaryAliasConcept.id
-      ? "catalog"
-      : primaryConcept
-        ? "concept_signals"
-        : inferredFamily
-          ? "family"
-          : canonicalTitle
-            ? "fallback"
-            : "none",
-    confidence: primaryAliasConcept && primaryConcept?.id === primaryAliasConcept.id
-      ? "high"
-      : primaryConcept
-        ? "medium"
-        : inferredFamily
+    headWord: canonicalHeadWord,
+    seniorityTokens,
+    tokens: tokenizeTitle(canonicalSignalInput),
+    meaningfulTokens: canonicalMeaningfulTokens,
+    modifierTokens: canonicalMeaningfulTokens,
+    candidateConceptIds,
+    familyScores,
+    inferenceSource:
+      primaryAliasConcept && primaryConcept?.id === primaryAliasConcept.id
+        ? "catalog"
+        : primaryConcept
+          ? "concept_signals"
+          : inferredFamily
+            ? "family"
+            : canonicalTitle
+              ? "fallback"
+              : "none",
+    confidence:
+      primaryAliasConcept && primaryConcept?.id === primaryAliasConcept.id
+        ? "high"
+        : primaryConcept
           ? "medium"
-          : canonicalTitle
-            ? "low"
-            : "none",
+          : inferredFamily
+            ? "medium"
+            : canonicalTitle
+              ? "low"
+              : "none",
   };
 }
 
@@ -153,7 +228,6 @@ function resolvePrimaryConcept(
     headWord,
     inferredFamily,
   );
-
   const signalScore = scoreConceptSignals(
     signalConcept,
     normalizedTitle,
@@ -173,23 +247,55 @@ function resolvePrimaryConcept(
   return primaryAliasConcept;
 }
 
-function inferTitleConceptFromSignals(value: string, inferredFamily?: TitleRoleFamily) {
+function inferTitleConceptFromSignals(
+  value: string,
+  inferredFamily?: TitleRoleFamily,
+) {
+  return inferTitleConceptCandidates(value, inferredFamily).find(
+    (candidate) => candidate.score >= primaryConceptThreshold,
+  )?.concept;
+}
+
+function inferTitleConceptCandidates(
+  value: string,
+  inferredFamily?: TitleRoleFamily,
+) {
   if (!value) {
-    return undefined;
+    return [] as Array<{
+      concept: ReturnType<typeof listTitleConcepts>[number];
+      score: number;
+    }>;
   }
 
   const normalized = normalizeTitleText(value);
   const meaningfulTokens = extractMeaningfulTokens(normalized);
   const headWord = extractHeadWord(normalized);
-  const scoredConcepts = listTitleConcepts()
+  const minimumScore = inferredFamily ? relatedConceptThreshold - 20 : relatedConceptThreshold;
+
+  return listTitleConcepts()
     .map((concept) => ({
       concept,
-      score: scoreConceptSignals(concept, normalized, meaningfulTokens, headWord, inferredFamily),
+      score: scoreConceptSignals(
+        concept,
+        normalized,
+        meaningfulTokens,
+        headWord,
+        inferredFamily,
+      ),
     }))
-    .filter((candidate) => candidate.score >= 260)
-    .sort((left, right) => right.score - left.score || left.concept.canonicalTitle.localeCompare(right.concept.canonicalTitle));
-
-  return scoredConcepts[0]?.concept;
+    .filter(
+      (candidate) =>
+        candidate.score >= minimumScore &&
+        (!inferredFamily ||
+          candidate.concept.family === inferredFamily ||
+          candidate.score >= primaryConceptThreshold),
+    )
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        left.concept.canonicalTitle.localeCompare(right.concept.canonicalTitle),
+    )
+    .slice(0, 4);
 }
 
 function scoreConceptSignals(
@@ -200,20 +306,34 @@ function scoreConceptSignals(
   inferredFamily?: TitleRoleFamily,
 ) {
   const signalTokens = buildConceptSignalTokens(concept);
+  const signalPhrases = buildConceptSignalPhrases(concept);
   const canonicalHeadWord = extractHeadWord(concept.canonicalTitle);
-  const sharedTokenCount = signalTokens.filter((token) => meaningfulTokens.includes(token)).length;
-  const containsCanonical = normalizedTitle.includes(normalizeTitleText(concept.canonicalTitle));
+  const sharedTokenCount = signalTokens.filter((token) =>
+    meaningfulTokens.includes(token),
+  ).length;
+  const sharedPhraseCount = signalPhrases.filter((phrase) =>
+    normalizedTitle.includes(phrase),
+  ).length;
+  const containsCanonical = normalizedTitle.includes(
+    normalizeTitleText(concept.canonicalTitle),
+  );
   const containsAlias = (concept.aliases ?? []).some((alias) =>
     normalizedTitle.includes(normalizeTitleText(alias)),
   );
+  const querySignalsCovered =
+    meaningfulTokens.length > 0 &&
+    meaningfulTokens.every((token) => signalTokens.includes(token));
   const allCoreSignalsPresent =
-    signalTokens.length > 0 && signalTokens.every((token) => meaningfulTokens.includes(token));
+    signalTokens.length > 0 &&
+    signalTokens.every((token) => meaningfulTokens.includes(token));
   const headCompatible =
     !headWord ||
     !canonicalHeadWord ||
     headWord === canonicalHeadWord ||
     (headWord === "developer" && canonicalHeadWord === "engineer") ||
-    (headWord === "engineer" && canonicalHeadWord === "developer");
+    (headWord === "engineer" && canonicalHeadWord === "developer") ||
+    (headWord === "architect" && canonicalHeadWord === "engineer") ||
+    (headWord === "tester" && canonicalHeadWord === "engineer");
   const negativeConflict = (concept.negativeKeywords ?? []).some((keyword) =>
     normalizedTitle.includes(normalizeTitleText(keyword)),
   );
@@ -222,14 +342,19 @@ function scoreConceptSignals(
     (containsCanonical ? 420 : 0) +
     (containsAlias ? 280 : 0) +
     sharedTokenCount * 90 +
+    sharedPhraseCount * 55 +
+    (querySignalsCovered ? 70 : 0) +
     (allCoreSignalsPresent ? 120 : 0) +
-    (headCompatible ? 40 : -120) +
+    (headCompatible ? 45 : -140) +
     (inferredFamily && concept.family === inferredFamily ? 80 : 0) -
+    (inferredFamily && concept.family !== inferredFamily ? 70 : 0) -
     (negativeConflict ? 260 : 0)
   );
 }
 
-function buildConceptSignalTokens(concept: ReturnType<typeof listTitleConcepts>[number]) {
+function buildConceptSignalTokens(
+  concept: ReturnType<typeof listTitleConcepts>[number],
+) {
   const phrases = [
     concept.canonicalTitle,
     ...(concept.aliases ?? []),
@@ -243,111 +368,209 @@ function buildConceptSignalTokens(concept: ReturnType<typeof listTitleConcepts>[
   );
 }
 
-export function normalizeTitleToCanonicalForm(value?: string) {
-  return analyzeTitle(value).canonicalTitle;
+function canPromoteConceptCandidate(
+  concept: ReturnType<typeof listTitleConcepts>[number],
+  meaningfulTokens: string[],
+) {
+  if (meaningfulTokens.length <= 1) {
+    return true;
+  }
+
+  const signalTokens = buildConceptSignalTokens(concept);
+  return meaningfulTokens.every((token) => signalTokens.includes(token));
 }
 
-function inferRoleFamily(value: string) {
+function canPromoteAliasMatch(
+  alias: ReturnType<typeof findMatchingTitleAliases>[number],
+  normalizedTitle: string,
+  meaningfulTokens: string[],
+) {
+  if (alias.phrase === normalizedTitle) {
+    return true;
+  }
+
+  const concept = getTitleConcept(alias.conceptId);
+  return concept ? canPromoteConceptCandidate(concept, meaningfulTokens) : false;
+}
+
+function buildConceptSignalPhrases(
+  concept: ReturnType<typeof listTitleConcepts>[number],
+) {
+  const phrases = [
+    concept.canonicalTitle,
+    ...(concept.aliases ?? []),
+    ...(concept.broadDiscoveryQueries ?? []),
+  ];
+
+  return Array.from(
+    new Set(
+      phrases.flatMap((phrase) =>
+        extractMeaningfulPhrases(phrase, { minLength: 2, maxLength: 3 }),
+      ),
+    ),
+  );
+}
+
+function scoreRoleFamilies(value: string): TitleFamilyScore[] {
   if (!value) {
-    return undefined;
+    return [];
   }
 
   const normalized = normalizeTitleText(value);
   const headWord = extractHeadWord(normalized);
-  const matchedFamily = familyInferenceOrder.find((familyId) => {
-    const family = getTitleFamily(familyId);
-    if (!family) {
-      return false;
-    }
+  const inferredRoleGroup = inferRoleGroupFromHeadWord(normalized);
 
-    if (
-      family.negativeKeywords?.some((keyword) => normalized.includes(normalizeTitleText(keyword)))
-    ) {
-      return false;
-    }
+  return listTitleFamilies()
+    .map((family) => {
+      const positiveSignals = (family.positiveKeywords ?? []).filter((keyword) =>
+        normalized.includes(normalizeTitleText(keyword)),
+      );
+      const negativeSignals = (family.negativeKeywords ?? []).filter((keyword) =>
+        normalized.includes(normalizeTitleText(keyword)),
+      );
+      const positiveScore = positiveSignals.reduce(
+        (total, keyword) => total + scoreKeywordSignal(keyword),
+        0,
+      );
+      const negativeScore = negativeSignals.reduce(
+        (total, keyword) => total + scoreKeywordSignal(keyword) + 20,
+        0,
+      );
+      const headFallbackScore = headWord
+        ? fallbackFamilyScoresByHeadWord[headWord]?.[family.id] ?? 0
+        : 0;
+      const roleGroupBonus =
+        inferredRoleGroup && inferredRoleGroup === family.roleGroup ? 35 : 0;
 
-    return family.positiveKeywords.some((keyword) =>
-      normalized.includes(normalizeTitleText(keyword)),
+      return {
+        family: family.id,
+        score:
+          positiveScore -
+          negativeScore +
+          headFallbackScore +
+          roleGroupBonus +
+          computeFamilyHeadCompatibilityAdjustment(family.id, headWord, normalized),
+        positiveSignals,
+        negativeSignals,
+      } satisfies TitleFamilyScore;
+    })
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        right.positiveSignals.length - left.positiveSignals.length ||
+        left.family.localeCompare(right.family),
     );
-  });
+}
 
-  if (!matchedFamily) {
-    return undefined;
+function scoreKeywordSignal(keyword: string) {
+  const tokenCount = normalizeTitleText(keyword).split(" ").filter(Boolean).length;
+  return 90 + Math.max(0, tokenCount - 1) * 25;
+}
+
+function computeFamilyHeadCompatibilityAdjustment(
+  family: TitleRoleFamily,
+  headWord: string | undefined,
+  normalized: string,
+) {
+  if (!headWord) {
+    return family === "recruiting" && normalized.includes("talent acquisition")
+      ? 70
+      : 0;
   }
 
-  if (matchedFamily === "data_analytics") {
-    return headWord === "analyst" ? matchedFamily : undefined;
+  if (family === "data_analytics") {
+    return headWord === "analyst" ? 0 : -80;
   }
 
-  if (matchedFamily === "data_engineering") {
-    return headWord === "engineer" || headWord === "developer" || headWord === "architect"
-      ? matchedFamily
-      : undefined;
+  if (family === "data_engineering") {
+    return headWord === "engineer" ||
+      headWord === "developer" ||
+      headWord === "architect"
+      ? 0
+      : -90;
   }
 
-  if (matchedFamily === "product") {
-    return headWord === "manager" ? matchedFamily : undefined;
+  if (family === "product") {
+    return headWord === "manager" ? 0 : -85;
   }
 
-  if (matchedFamily === "program_management") {
-    return headWord === "manager" || normalized.includes("tpm")
-      ? matchedFamily
-      : undefined;
+  if (family === "program_management") {
+    return headWord === "manager" || normalized.includes("tpm") ? 0 : -85;
   }
 
-  if (matchedFamily === "operations") {
+  if (family === "operations") {
     return headWord === "analyst" ||
       headWord === "manager" ||
       headWord === "coordinator" ||
       headWord === "specialist"
-      ? matchedFamily
-      : undefined;
+      ? 0
+      : -75;
   }
 
-  if (matchedFamily === "sales") {
-    return headWord === "engineer" || headWord === "consultant"
-      ? matchedFamily
-      : undefined;
+  if (family === "sales") {
+    return headWord === "engineer" || headWord === "consultant" ? 0 : -85;
   }
 
-  if (matchedFamily === "quality_assurance") {
+  if (family === "quality_assurance") {
     return headWord === "engineer" ||
       headWord === "analyst" ||
       headWord === "tester" ||
       normalized.includes("sdet")
-      ? matchedFamily
-      : undefined;
+      ? 0
+      : -80;
   }
 
-  if (matchedFamily === "support") {
-    return headWord === "engineer" || headWord === "specialist"
-      ? matchedFamily
-      : undefined;
+  if (family === "support") {
+    return headWord === "engineer" || headWord === "specialist" ? 0 : -75;
   }
 
-  if (matchedFamily === "recruiting") {
+  if (family === "recruiting") {
     return headWord === "recruiter" ||
       headWord === "sourcer" ||
       normalized.includes("talent acquisition")
-      ? matchedFamily
-      : undefined;
+      ? 0
+      : -80;
   }
 
-  if (matchedFamily === "writing_documentation") {
-    return headWord === "writer" || headWord === "specialist"
-      ? matchedFamily
-      : undefined;
+  if (family === "writing_documentation") {
+    return headWord === "writer" || headWord === "specialist" ? 0 : -80;
   }
 
-  if (matchedFamily === "software_engineering") {
-    if (headWord !== "engineer" && headWord !== "developer" && headWord !== "architect") {
-      return undefined;
-    }
-
-    return matchedFamily;
+  if (family === "software_engineering") {
+    return headWord === "engineer" ||
+      headWord === "developer" ||
+      headWord === "architect"
+      ? 0
+      : -95;
   }
 
-  return matchedFamily;
+  return 0;
+}
+
+function selectInferredFamily(familyScores: TitleFamilyScore[]) {
+  const [best, second] = familyScores;
+  if (!best) {
+    return undefined;
+  }
+
+  const hasPositiveSignals = best.positiveSignals.length > 0;
+  const minimumScore =
+    hasPositiveSignals || best.family === "software_engineering" ? 120 : 150;
+  const minimumLead = hasPositiveSignals ? 20 : 20;
+
+  if (best.score < minimumScore) {
+    return undefined;
+  }
+
+  if (second && best.score < second.score + minimumLead) {
+    return undefined;
+  }
+
+  return best.family;
+}
+
+export function normalizeTitleToCanonicalForm(value?: string) {
+  return analyzeTitle(value).canonicalTitle;
 }
 
 function inferRoleGroupFromHeadWord(value: string) {
