@@ -21,7 +21,6 @@ import {
   buildSeed,
   coercePostedAt,
   defaultCompanyName,
-  filterProviderSeeds,
   finalizeProviderResult,
   unsupportedProviderResult,
 } from "@/lib/server/providers/shared";
@@ -190,13 +189,11 @@ export function createLeverProvider() {
             return {
               fetchedCount: 0,
               jobs: [],
-              excludedByTitle: 0,
-              excludedByLocation: 0,
             };
           }
 
           const payload = result.data ?? [];
-          const normalizedJobs = payload.map((job) =>
+          const jobs = payload.map((job) =>
             normalizeLeverJob({
               siteToken:
                 siteToken ??
@@ -208,13 +205,10 @@ export function createLeverProvider() {
               job,
             }),
           );
-          const filteredJobs = filterProviderSeeds(normalizedJobs, context.filters);
 
           return {
             fetchedCount: payload.length,
-            jobs: filteredJobs.jobs,
-            excludedByTitle: filteredJobs.excludedByTitle,
-            excludedByLocation: filteredJobs.excludedByLocation,
+            jobs,
           };
         },
         3,
@@ -222,14 +216,6 @@ export function createLeverProvider() {
 
       const fetchedCount = sites.reduce((total, site) => total + site.fetchedCount, 0);
       const jobs = sites.flatMap((site) => site.jobs);
-      const excludedByTitle = sites.reduce(
-        (total, site) => total + (site.excludedByTitle ?? 0),
-        0,
-      );
-      const excludedByLocation = sites.reduce(
-        (total, site) => total + (site.excludedByLocation ?? 0),
-        0,
-      );
 
       return finalizeProviderResult({
         provider: "lever",
@@ -237,8 +223,6 @@ export function createLeverProvider() {
         sourceCount: sources.length,
         fetchedCount,
         warnings,
-        excludedByTitle,
-        excludedByLocation,
       });
     },
   });

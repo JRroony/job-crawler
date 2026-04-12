@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import {
   LoadingPanel,
@@ -96,6 +96,13 @@ type ResultNotice = {
   highlights?: string[];
 };
 
+type SearchRoutePayload = CrawlResponse & {
+  queued?: boolean;
+  error?: string;
+  details?: unknown;
+  readableErrors?: unknown;
+};
+
 const initialFilters: SearchFilters = {
   title: "",
   country: "",
@@ -104,6 +111,9 @@ const initialFilters: SearchFilters = {
   experienceMatchMode: "balanced",
   crawlMode: "fast",
 };
+
+const queuedSearchPollIntervalMs = 1_500;
+const queuedSearchPollTimeoutMs = 90_000;
 
 export function JobCrawlerApp({
   initialSearches,
@@ -123,6 +133,7 @@ export function JobCrawlerApp({
     initialError ? "initial_load" : null,
   );
   const [revalidatingIds, setRevalidatingIds] = useState<string[]>([]);
+  const pollSequenceRef = useRef(0);
 
   function buildLiveFilters(baseFilters: SearchFilters = filters) {
     return normalizeSearchFiltersForClient({
@@ -154,7 +165,71 @@ export function JobCrawlerApp({
     setClientResultFilters(defaultClientResultFilters);
   }
 
+  function refreshRecentSearch(search: SearchDocument) {
+    setRecentSearches((current) =>
+      dedupeSearches([normalizeSearchDocumentForClient(search), ...current]),
+    );
+  }
+
+  function applyQueuedResult(payload: CrawlResponse) {
+    const normalizedPayload = normalizeCrawlResponseForClient(payload);
+
+    setActiveResult(normalizedPayload);
+    hydrateSearchForm(normalizedPayload.search.filters);
+    setViewState("loading");
+    setErrorKind(null);
+  }
+
+  async function pollSearchUntilSettled(
+    searchId: string,
+    options: {
+      updatedAfter?: string;
+      pollToken: number;
+    },
+  ) {
+    const deadline = Date.now() + queuedSearchPollTimeoutMs;
+
+    while (options.pollToken === pollSequenceRef.current && Date.now() < deadline) {
+      await delay(queuedSearchPollIntervalMs);
+      if (options.pollToken !== pollSequenceRef.current) {
+        return;
+      }
+
+      const response = await fetch(`/api/searches/${searchId}`);
+      const payload = (await response.json()) as SearchRoutePayload;
+      if (!response.ok) {
+        throw createClassifiedClientError(
+          "runtime",
+          payload.error ?? "The search could not be loaded.",
+        );
+      }
+
+      if (payload.crawlRun.status === "running") {
+        applyQueuedResult(payload);
+        continue;
+      }
+
+      if (options.updatedAfter && payload.search.updatedAt <= options.updatedAfter) {
+        continue;
+      }
+
+      applyLoadedResult(payload);
+      refreshRecentSearch(payload.search);
+      return;
+    }
+
+    if (options.pollToken !== pollSequenceRef.current) {
+      return;
+    }
+
+    setMessage(
+      "The crawl is still running in the background. Leave this page open or reopen the search from Recent searches in a moment.",
+    );
+    setErrorKind(null);
+  }
+
   async function submitSearch(nextFilters: SearchFilters) {
+    const pollToken = ++pollSequenceRef.current;
     const payloadResult = buildSearchRequestPayload(nextFilters);
 
     if (!payloadResult.ok) {
@@ -177,11 +252,7 @@ export function JobCrawlerApp({
         body: JSON.stringify(payloadResult.payload),
       });
 
-      const payload = (await response.json()) as CrawlResponse & {
-        error?: string;
-        details?: unknown;
-        readableErrors?: unknown;
-      };
+      const payload = (await response.json()) as SearchRoutePayload;
       if (!response.ok) {
         if (response.status === 400) {
           throw createClassifiedClientError(
@@ -202,10 +273,18 @@ export function JobCrawlerApp({
         );
       }
 
+      if (payload.queued) {
+        refreshRecentSearch(payload.search);
+        applyQueuedResult(payload);
+        await pollSearchUntilSettled(payload.search._id, {
+          updatedAfter: payload.search.updatedAt,
+          pollToken,
+        });
+        return;
+      }
+
       applyLoadedResult(payload);
-      setRecentSearches((current) =>
-        dedupeSearches([normalizeSearchDocumentForClient(payload.search), ...current]),
-      );
+      refreshRecentSearch(payload.search);
     } catch (error) {
       setViewState("error");
       setErrorKind(resolveErrorKind(error));
@@ -222,6 +301,7 @@ export function JobCrawlerApp({
       return;
     }
 
+    const pollToken = ++pollSequenceRef.current;
     setViewState("loading");
     setMessage("");
     setErrorKind(null);
@@ -230,7 +310,7 @@ export function JobCrawlerApp({
       const response = await fetch(`/api/searches/${id}/rerun`, {
         method: "POST",
       });
-      const payload = (await response.json()) as CrawlResponse & { error?: string };
+      const payload = (await response.json()) as SearchRoutePayload;
       if (!response.ok) {
         throw createClassifiedClientError(
           "runtime",
@@ -238,10 +318,22 @@ export function JobCrawlerApp({
         );
       }
 
+      if (payload.queued) {
+        refreshRecentSearch(payload.search);
+        if (payload.crawlRun.status === "running" || !activeResult) {
+          applyQueuedResult(payload);
+        } else {
+          setViewState("loading");
+        }
+        await pollSearchUntilSettled(payload.search._id, {
+          updatedAfter: payload.search.updatedAt,
+          pollToken,
+        });
+        return;
+      }
+
       applyLoadedResult(payload);
-      setRecentSearches((current) =>
-        dedupeSearches([normalizeSearchDocumentForClient(payload.search), ...current]),
-      );
+      refreshRecentSearch(payload.search);
     } catch (error) {
       setViewState("error");
       setErrorKind(resolveErrorKind(error));
@@ -250,6 +342,7 @@ export function JobCrawlerApp({
   }
 
   async function loadSearch(searchId: string) {
+    pollSequenceRef.current += 1;
     setViewState("loading");
     setMessage("");
     setErrorKind(null);
@@ -533,6 +626,10 @@ export function JobCrawlerApp({
 }
 
 export function resolveViewState(result: CrawlResponse): ViewState {
+  if (result.crawlRun.status === "running") {
+    return "loading";
+  }
+
   if (result.crawlRun.status === "failed") {
     return "error";
   }
@@ -1131,6 +1228,12 @@ function isClassifiedClientError(error: unknown): error is ClassifiedClientError
     "kind" in error &&
     (error.kind === "validation" || error.kind === "runtime")
   );
+}
+
+function delay(durationMs: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, durationMs);
+  });
 }
 
 function describeBlockingErrorState(

@@ -174,4 +174,10 @@ describe("job crawler app result state", () => {
         "The crawler did not find any registry-backed or publicly discovered sources for the selected platform scope.",
     });
   });
+
+  it("treats running crawls as loading so queued searches can poll without flashing empty states", () => {
+    const result = createResult("running");
+
+    expect(resolveViewState(result)).toBe("loading");
+  });
 });

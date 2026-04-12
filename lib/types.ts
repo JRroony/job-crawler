@@ -278,6 +278,7 @@ export const discoveryStageDiagnosticsSchema = z.object({
   platformCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
   publicJobPlatformCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
   zeroCoverageReason: nullableOptional(z.string()),
+  publicSearchSkippedReason: nullableOptional(z.string()),
   publicSearch: nullableOptional(publicSearchDiscoveryDiagnosticsSchema),
 });
 

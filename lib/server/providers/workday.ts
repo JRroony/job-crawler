@@ -27,7 +27,6 @@ import {
   companyFromJsonLd,
   deepCollect,
   extractNextData,
-  filterProviderSeeds,
   finalizeProviderResult,
   firstString,
   locationFromJsonLd,
@@ -263,7 +262,6 @@ export function createWorkdayProvider() {
             ...jobsFromApi,
             ...jobsFromHtml,
           ]);
-          const filteredJobs = filterProviderSeeds(normalizedJobs, context.filters);
 
           if (apiAttempt.warning) {
             warnings.push(apiAttempt.warning);
@@ -275,9 +273,7 @@ export function createWorkdayProvider() {
 
           return {
             fetchedCount: apiAttempt.fetchedCount + fallback.fetchedCount,
-            jobs: filteredJobs.jobs,
-            excludedByTitle: filteredJobs.excludedByTitle,
-            excludedByLocation: filteredJobs.excludedByLocation,
+            jobs: normalizedJobs,
           };
         },
         2,
@@ -285,14 +281,6 @@ export function createWorkdayProvider() {
 
       const fetchedCount = sites.reduce((total, site) => total + site.fetchedCount, 0);
       const jobs = sites.flatMap((site) => site.jobs);
-      const excludedByTitle = sites.reduce(
-        (total, site) => total + (site.excludedByTitle ?? 0),
-        0,
-      );
-      const excludedByLocation = sites.reduce(
-        (total, site) => total + (site.excludedByLocation ?? 0),
-        0,
-      );
 
       return finalizeProviderResult({
         provider: "workday",
@@ -300,8 +288,6 @@ export function createWorkdayProvider() {
         sourceCount: sources.length,
         fetchedCount,
         warnings,
-        excludedByTitle,
-        excludedByLocation,
       });
     },
   });

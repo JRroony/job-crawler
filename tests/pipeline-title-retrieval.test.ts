@@ -4,6 +4,7 @@ import { runSearchFromFilters } from "@/lib/server/crawler/service";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
+import { createGreenhouseProvider } from "@/lib/server/providers/greenhouse";
 import type { CrawlProvider } from "@/lib/server/providers/types";
 
 import { FakeDb } from "@/tests/helpers/fake-db";
@@ -566,6 +567,86 @@ describe("pipeline title retrieval", () => {
           recoveredSourcesFromDetailUrls: 1,
         },
       },
+    });
+  });
+
+  it("counts title and location exclusions once after the provider refactor", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T14:00:00.000Z");
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+
+    const fetchImpl = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          jobs: [
+            {
+              id: "software-engineer-us",
+              title: "Software Engineer",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/software-engineer-us",
+              company_name: "Acme",
+              location: { name: "Remote, United States" },
+            },
+            {
+              id: "software-engineer-canada",
+              title: "Software Engineer",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/software-engineer-canada",
+              company_name: "Acme",
+              location: { name: "Toronto, Ontario" },
+            },
+            {
+              id: "software-engineer-in-test",
+              title: "Software Engineer in Test",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/software-engineer-in-test",
+              company_name: "Acme",
+              location: { name: "Remote, United States" },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await runSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [createGreenhouseProvider()],
+        discovery,
+        fetchImpl,
+        now,
+      },
+    );
+
+    expect(result.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
+    expect(result.diagnostics).toMatchObject({
+      excludedByTitle: 1,
+      excludedByLocation: 1,
+    });
+    expect(result.sourceResults[0]).toMatchObject({
+      provider: "greenhouse",
+      fetchedCount: 3,
+      matchedCount: 1,
     });
   });
 });

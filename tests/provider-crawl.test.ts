@@ -501,7 +501,7 @@ describe("provider crawl status and live parsing", () => {
     expect(result.errorMessage).toContain("BrokenCo returned 503");
   });
 
-  it("prefilters provider jobs using execution filters before returning seeds", async () => {
+  it("returns provider seeds for the pipeline to filter centrally", async () => {
     const provider = createCompanyPageProvider();
     const source = {
       type: "json_ld_page",
@@ -558,11 +558,20 @@ describe("provider crawl status and live parsing", () => {
     });
 
     expect(result.fetchedCount).toBe(2);
-    expect(result.jobs).toHaveLength(1);
-    expect(result.jobs[0]).toMatchObject({
-      title: "Backend Engineer",
-      locationText: "San Francisco, CA",
-      sourceUrl: "https://careers.acme.com/jobs/backend-engineer-sf",
-    });
+    expect(result.jobs).toHaveLength(2);
+    expect(result.jobs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "Backend Engineer",
+          locationText: "San Francisco, CA",
+          sourceUrl: "https://careers.acme.com/jobs/backend-engineer-sf",
+        }),
+        expect.objectContaining({
+          title: "Backend Engineer",
+          locationText: "Toronto",
+          sourceUrl: "https://careers.acme.com/jobs/backend-engineer-toronto",
+        }),
+      ]),
+    );
   });
 });

@@ -31,6 +31,7 @@ type PublicSearchOptions = {
   maxResultsPerQuery: number;
   maxSources?: number;
   maxQueries?: number;
+  maxRoleQueries?: number;
   queryConcurrency?: number;
   maxGreenhouseLocationClauses?: number;
   maxDirectJobs?: number;
@@ -168,6 +169,7 @@ export async function discoverSourcesFromPublicSearchDetailed(
     maxSources: options.maxSources,
     maxQueries: options.maxQueries,
     maxGreenhouseLocationClauses: options.maxGreenhouseLocationClauses,
+    maxRoleQueries: options.maxRoleQueries,
   });
   const diagnostics = createEmptyPublicSearchDiagnostics(plan);
   if (plan.queries.length === 0) {
@@ -395,6 +397,7 @@ export function buildPublicSearchQueryPlan(
     maxSources?: number;
     maxQueries?: number;
     maxGreenhouseLocationClauses?: number;
+    maxRoleQueries?: number;
   },
 ): PublicSearchQueryPlan {
   const requestedPlatforms = filters.platforms ?? searchablePlatforms;
@@ -407,7 +410,7 @@ export function buildPublicSearchQueryPlan(
       platform === "ashby" ||
       platform === "workday",
   );
-  const roleQueryVariants = buildRoleQueries(filters.title);
+  const roleQueryVariants = buildRoleQueries(filters.title, options.maxRoleQueries);
   if (roleQueryVariants.length === 0) {
     return {
       maxResultsPerQuery: options.maxResultsPerQuery,
@@ -472,9 +475,9 @@ export function buildPublicSearchQueryPlan(
   };
 }
 
-function buildRoleQueries(title: string) {
+function buildRoleQueries(title: string, maxRoleQueries?: number) {
   return buildTitleQueryVariants(title, {
-    maxQueries: 18,
+    maxQueries: maxRoleQueries ?? 18,
   });
 }
 

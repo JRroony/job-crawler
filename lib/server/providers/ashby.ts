@@ -19,7 +19,6 @@ import {
   deepCollect,
   extractWindowAppData,
   extractNextData,
-  filterProviderSeeds,
   finalizeProviderResult,
   firstString,
   unsupportedProviderResult,
@@ -199,8 +198,6 @@ export function createAshbyProvider() {
             return {
               fetchedCount: 0,
               jobs: [],
-              excludedByTitle: 0,
-              excludedByLocation: 0,
             };
           }
 
@@ -208,7 +205,7 @@ export function createAshbyProvider() {
             result.data ?? "",
             companyToken ?? buildProviderCompanyToken(source.companyHint) ?? "ashby",
           );
-          const normalizedJobs = extracted.map((candidate) =>
+          const jobs = extracted.map((candidate) =>
             normalizeAshbyCandidate({
               companyToken:
                 companyToken ??
@@ -220,13 +217,10 @@ export function createAshbyProvider() {
               candidate,
             }),
           );
-          const filteredJobs = filterProviderSeeds(normalizedJobs, context.filters);
 
           return {
             fetchedCount: extracted.length,
-            jobs: filteredJobs.jobs,
-            excludedByTitle: filteredJobs.excludedByTitle,
-            excludedByLocation: filteredJobs.excludedByLocation,
+            jobs,
           };
         },
         2,
@@ -234,14 +228,6 @@ export function createAshbyProvider() {
 
       const fetchedCount = boards.reduce((total, board) => total + board.fetchedCount, 0);
       const jobs = boards.flatMap((board) => board.jobs);
-      const excludedByTitle = boards.reduce(
-        (total, board) => total + (board.excludedByTitle ?? 0),
-        0,
-      );
-      const excludedByLocation = boards.reduce(
-        (total, board) => total + (board.excludedByLocation ?? 0),
-        0,
-      );
 
       return finalizeProviderResult({
         provider: "ashby",
@@ -249,8 +235,6 @@ export function createAshbyProvider() {
         sourceCount: sources.length,
         fetchedCount,
         warnings,
-        excludedByTitle,
-        excludedByLocation,
       });
     },
   });

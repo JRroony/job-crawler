@@ -4,7 +4,7 @@ import { sanitizeSearchFiltersInput } from "@/lib/types";
 import {
   isInputValidationError,
   listRecentSearches,
-  runSearchFromFilters,
+  startSearchFromFilters,
 } from "@/lib/server/crawler/service";
 
 const searchRequestLogPrefix = "[searches:request]";
@@ -35,8 +35,14 @@ export async function POST(request: Request) {
     const payload = sanitizeSearchFiltersInput(await request.json());
     console.info(`${searchRequestLogPrefix} payload:`, payload);
 
-    const result = await runSearchFromFilters(payload);
-    return NextResponse.json(result, { status: 201 });
+    const { result, queued } = await startSearchFromFilters(payload);
+    return NextResponse.json(
+      {
+        ...result,
+        queued,
+      },
+      { status: 201 },
+    );
   } catch (error) {
     if (isInputValidationError(error)) {
       const details = error.flatten();

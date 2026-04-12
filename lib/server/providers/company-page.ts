@@ -22,7 +22,6 @@ import {
   companyFromJsonLd,
   coercePostedAt,
   deepCollect,
-  filterProviderSeeds,
   finalizeProviderResult,
   firstString,
   locationFromJsonLd,
@@ -88,7 +87,7 @@ export function createCompanyPageProvider() {
               );
               return {
                 fetchedCount: jobs.length,
-                ...filterProviderSeeds(jobs, context.filters),
+                jobs,
               };
             }
 
@@ -99,7 +98,7 @@ export function createCompanyPageProvider() {
             );
             return {
               fetchedCount: jobs.length,
-              ...filterProviderSeeds(jobs, context.filters),
+              jobs,
             };
           } catch (error) {
             warnings.push(
@@ -110,8 +109,6 @@ export function createCompanyPageProvider() {
             return {
               fetchedCount: 0,
               jobs: [],
-              excludedByTitle: 0,
-              excludedByLocation: 0,
             };
           }
         },
@@ -120,14 +117,6 @@ export function createCompanyPageProvider() {
 
       const fetchedCount = sourceJobs.reduce((total, source) => total + source.fetchedCount, 0);
       const jobs = sourceJobs.flatMap((source) => source.jobs);
-      const excludedByTitle = sourceJobs.reduce(
-        (total, source) => total + source.excludedByTitle,
-        0,
-      );
-      const excludedByLocation = sourceJobs.reduce(
-        (total, source) => total + source.excludedByLocation,
-        0,
-      );
 
       return finalizeProviderResult({
         provider: "company_page",
@@ -135,8 +124,6 @@ export function createCompanyPageProvider() {
         sourceCount: sources.length,
         fetchedCount,
         warnings,
-        excludedByTitle,
-        excludedByLocation,
       });
     },
   });

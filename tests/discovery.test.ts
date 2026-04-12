@@ -9,7 +9,11 @@ import {
   discoverSourcesFromPublicSearchDetailed,
   selectQueriesForExecution,
 } from "@/lib/server/discovery/public-search";
-import { discoverConfiguredSources, discoverSources } from "@/lib/server/discovery/service";
+import {
+  discoverConfiguredSources,
+  discoverSources,
+  discoverSourcesDetailed,
+} from "@/lib/server/discovery/service";
 import { buildUsDiscoveryLocationTokens } from "@/lib/server/locations/us";
 
 const discoveryEnvDefaults = {
@@ -1296,6 +1300,77 @@ describe("source discovery", () => {
         }),
       ]),
     );
+  });
+
+  it("keeps fast mode materially lighter by skipping public ATS search when registry coverage already exists", async () => {
+    const fastFetchImpl = vi.fn(async () => {
+      return new Response("<html></html>", {
+        status: 200,
+        headers: {
+          "content-type": "text/html",
+        },
+      });
+    }) as unknown as typeof fetch;
+    const balancedFetchImpl = vi.fn(async () => {
+      return new Response(
+        `
+          <html>
+            <body>
+              <a href="https://job-boards.greenhouse.io/datadog/jobs/789">Datadog</a>
+            </body>
+          </html>
+        `,
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const fastResult = await discoverSourcesDetailed({
+      filters: {
+        title: "Software Engineer",
+        platforms: ["greenhouse"],
+        crawlMode: "fast",
+      },
+      now: new Date("2026-04-12T00:00:00.000Z"),
+      fetchImpl: fastFetchImpl,
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: ["openai", "benchling"],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+      },
+    });
+
+    const balancedResult = await discoverSourcesDetailed({
+      filters: {
+        title: "Software Engineer",
+        platforms: ["greenhouse"],
+        crawlMode: "balanced",
+      },
+      now: new Date("2026-04-12T00:00:00.000Z"),
+      fetchImpl: balancedFetchImpl,
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: ["openai", "benchling"],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+      },
+    });
+
+    expect(fastFetchImpl).not.toHaveBeenCalled();
+    expect(fastResult.diagnostics.publicSearchSkippedReason).toContain("Fast mode skipped public ATS search");
+    expect(fastResult.diagnostics.publicSearch).toBeUndefined();
+    expect(fastResult.sources.map((source) => source.token)).toEqual(
+      expect.arrayContaining(["openai", "benchling"]),
+    );
+    expect(balancedFetchImpl).toHaveBeenCalled();
+    expect(balancedResult.diagnostics.publicSearch?.executedQueries).toBeGreaterThan(0);
   });
 
   it("merges registry-backed Greenhouse sources with public search additions without duplicates", async () => {

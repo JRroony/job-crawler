@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { rerunSearch, ResourceNotFoundError } from "@/lib/server/crawler/service";
+import { startSearchRerun, ResourceNotFoundError } from "@/lib/server/crawler/service";
 
 export async function POST(
   _request: Request,
@@ -8,8 +8,14 @@ export async function POST(
 ) {
   try {
     const params = await context.params;
-    const result = await rerunSearch(params.id);
-    return NextResponse.json(result, { status: 201 });
+    const { result, queued } = await startSearchRerun(params.id);
+    return NextResponse.json(
+      {
+        ...result,
+        queued,
+      },
+      { status: 201 },
+    );
   } catch (error) {
     if (error instanceof ResourceNotFoundError) {
       return NextResponse.json({ error: error.message }, { status: 404 });

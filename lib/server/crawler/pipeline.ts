@@ -65,6 +65,7 @@ type ExecuteCrawlPipelineInput = {
 export async function executeCrawlPipeline(
   input: ExecuteCrawlPipelineInput,
 ): Promise<CrawlResponse> {
+  const crawlStartedMs = Date.now();
   const normalizedFilters = searchFiltersSchema.parse(input.search.filters);
   const selectedProviders = selectProvidersForSearch(
     input.providers,
@@ -84,7 +85,16 @@ export async function executeCrawlPipeline(
   });
 
   try {
+    const stageTimingsMs = {
+      discovery: 0,
+      providerExecution: 0,
+      filtering: 0,
+      dedupe: 0,
+      persistence: 0,
+      responseAssembly: 0,
+    };
     // Boundary: discovery is the only stage that knows where candidate sources come from.
+    const discoveryStartedMs = Date.now();
     const discoveryExecution = input.discovery.discoverWithDiagnostics
       ? await input.discovery.discoverWithDiagnostics({
           filters: normalizedFilters,
@@ -100,6 +110,7 @@ export async function executeCrawlPipeline(
           jobs: [],
           diagnostics: undefined,
         };
+    stageTimingsMs.discovery = Date.now() - discoveryStartedMs;
     const discoveredSources = discoveryExecution.sources;
     const harvestedDiscoveryJobs = discoveryExecution.jobs ?? [];
     const providerSources = selectedProviders.map((provider) =>
@@ -144,23 +155,47 @@ export async function executeCrawlPipeline(
     });
 
     // Boundary: providers only extract from already classified sources.
-    const providerResults = await Promise.allSettled(
-      selectedProviders.map((provider, index) =>
-        provider.crawlSources(
-          {
-            fetchImpl: input.fetchImpl,
-            now: input.now,
-            filters: normalizedFilters,
-          },
-          providerSources[index],
-        ),
-      ),
+    const providerExecutionStartedMs = Date.now();
+    const providerResults = await Promise.all(
+      selectedProviders.map(async (provider, index) => {
+        const startedAt = new Date().toISOString();
+        const startedMs = Date.now();
+
+        try {
+          const value = await provider.crawlSources(
+            {
+              fetchImpl: input.fetchImpl,
+              now: input.now,
+              filters: normalizedFilters,
+            },
+            providerSources[index],
+          );
+
+          return {
+            status: "fulfilled" as const,
+            value,
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            durationMs: Date.now() - startedMs,
+          };
+        } catch (reason) {
+          return {
+            status: "rejected" as const,
+            reason,
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            durationMs: Date.now() - startedMs,
+          };
+        }
+      }),
     );
+    stageTimingsMs.providerExecution = Date.now() - providerExecutionStartedMs;
 
     const sourceResults: CrawlSourceResult[] = [];
     const matchedSeeds: Array<{ provider: CrawlSourceResult["provider"]; seed: NormalizedJobSeed }> = [];
     let totalFetchedJobs = 0;
     let totalMatchedJobs = 0;
+    const filteringStartedMs = Date.now();
 
     if (harvestedDiscoveryJobs.length > 0) {
       const filteredDiscoveryJobs = filterSeedsForSearch(harvestedDiscoveryJobs, normalizedFilters, {
@@ -178,8 +213,6 @@ export async function executeCrawlPipeline(
     for (let index = 0; index < providerResults.length; index += 1) {
       const provider = selectedProviders[index];
       const sourcesForProvider = providerSources[index];
-      const startedAt = input.now.toISOString();
-      const finishedAt = new Date().toISOString();
       const result = providerResults[index];
 
       if (result.status === "rejected") {
@@ -200,16 +233,14 @@ export async function executeCrawlPipeline(
               result.reason instanceof Error
                 ? result.reason.message
                 : `Provider ${provider.provider} failed unexpectedly.`,
-            startedAt,
-            finishedAt,
+            startedAt: result.startedAt,
+            finishedAt: result.finishedAt,
           }),
         );
         continue;
       }
 
       totalFetchedJobs += result.value.fetchedCount;
-      diagnostics.excludedByTitle += result.value.excludedByTitle ?? 0;
-      diagnostics.excludedByLocation += result.value.excludedByLocation ?? 0;
       if (result.value.status === "failed" || result.value.status === "partial") {
         diagnostics.providerFailures += 1;
       }
@@ -241,11 +272,12 @@ export async function executeCrawlPipeline(
             savedCount: 0,
             warningCount: result.value.warningCount ?? 0,
             errorMessage: result.value.errorMessage,
-            startedAt,
-            finishedAt,
+            startedAt: result.startedAt,
+            finishedAt: result.finishedAt,
         }),
       );
     }
+    stageTimingsMs.filtering = Date.now() - filteringStartedMs;
 
     // Boundary: hydration/dedupe/persistence work on one shared normalized model.
     //
@@ -253,6 +285,7 @@ export async function executeCrawlPipeline(
     // adds a lot of latency and network noise compared with normalizing and saving the
     // matched jobs themselves. We still support explicit inline validation strategies
     // for targeted use cases, but the standard crawl request keeps the hot path light.
+    const dedupeStartedMs = Date.now();
     const hydratedJobs = hydrateJobs(
       matchedSeeds.map((entry) => entry.seed),
       input.now,
@@ -263,6 +296,8 @@ export async function executeCrawlPipeline(
     // Dedupe happens after all provider/filter stages so this counter reflects true
     // overlap between otherwise matchable seeds, not filter drop-offs.
     diagnostics.dedupedOut = Math.max(0, hydratedJobs.length - dedupedJobs.length);
+    stageTimingsMs.dedupe = Date.now() - dedupeStartedMs;
+    const persistenceStartedMs = Date.now();
     const {
       jobs: jobsReadyToPersist,
       validations: inlineValidations,
@@ -278,16 +313,6 @@ export async function executeCrawlPipeline(
     const savedJobs = dedupeStoredJobs(
       await input.repository.persistJobs(crawlRun._id, jobsReadyToPersist),
     );
-
-    console.info("[crawl:summary]", {
-      searchId: search._id,
-      fetchedCount: totalFetchedJobs,
-      directJobsHarvested: harvestedDiscoveryJobs.length,
-      matchedCount: totalMatchedJobs,
-      jobsBeforeDedupe: hydratedJobs.length,
-      jobsAfterDedupe: dedupedJobs.length,
-      savedCount: savedJobs.length,
-    });
 
     for (const sourceResult of sourceResults) {
       const savedCount = savedJobs.filter((job) =>
@@ -326,10 +351,11 @@ export async function executeCrawlPipeline(
       status,
       finishedAt,
     );
+    stageTimingsMs.persistence = Date.now() - persistenceStartedMs;
 
+    const responseAssemblyStartedMs = Date.now();
     const finalizedRun = (await input.repository.getCrawlRun(crawlRun._id)) as CrawlRun;
-
-    return crawlResponseSchema.parse({
+    const response = crawlResponseSchema.parse({
       search: {
         ...search,
         latestCrawlRunId: crawlRun._id,
@@ -341,6 +367,40 @@ export async function executeCrawlPipeline(
       jobs: savedJobs,
       diagnostics: finalizedRun.diagnostics,
     });
+    stageTimingsMs.responseAssembly = Date.now() - responseAssemblyStartedMs;
+
+    const providerDurationsMs = sourceResults.map((sourceResult) => ({
+      provider: sourceResult.provider,
+      duration:
+        Math.max(
+          0,
+          new Date(sourceResult.finishedAt).getTime() -
+            new Date(sourceResult.startedAt).getTime(),
+        ) || 0,
+    }));
+
+    console.info("[crawl:summary]", {
+      searchId: search._id,
+      fetchedCount: totalFetchedJobs,
+      directJobsHarvested: harvestedDiscoveryJobs.length,
+      matchedCount: totalMatchedJobs,
+      jobsBeforeDedupe: hydratedJobs.length,
+      jobsAfterDedupe: dedupedJobs.length,
+      savedCount: savedJobs.length,
+      providerDurationsMs,
+    });
+    console.info("[crawl:timings]", {
+      searchId: search._id,
+      discoveryMs: stageTimingsMs.discovery,
+      providerExecutionMs: stageTimingsMs.providerExecution,
+      filteringMs: stageTimingsMs.filtering,
+      dedupeMs: stageTimingsMs.dedupe,
+      persistenceMs: stageTimingsMs.persistence,
+      responseAssemblyMs: stageTimingsMs.responseAssembly,
+      totalMs: Date.now() - crawlStartedMs,
+    });
+
+    return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Crawl failed unexpectedly.";
     const finishedAt = new Date().toISOString();

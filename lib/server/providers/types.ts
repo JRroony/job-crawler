@@ -62,8 +62,6 @@ export type ProviderResult<P extends ProviderPlatform = ProviderPlatform> = {
   fetchedCount: number;
   matchedCount: number;
   warningCount?: number;
-  excludedByTitle?: number;
-  excludedByLocation?: number;
   errorMessage?: string;
 };
 

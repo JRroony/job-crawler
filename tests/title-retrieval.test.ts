@@ -249,6 +249,57 @@ describe("title retrieval scoring", () => {
     });
   });
 
+  it.each([
+    "Backend Developer",
+    "Frontend Developer",
+    "Full Stack Developer",
+    "Java Engineer",
+  ])("keeps %s as a realistic software-engineering sibling in balanced mode", (title) => {
+    expect(
+      getTitleMatchResult(title, "Software Engineer", {
+        mode: "strict",
+      }),
+    ).toMatchObject({
+      matches: false,
+    });
+
+    expect(
+      getTitleMatchResult(title, "Software Engineer", {
+        mode: "balanced",
+      }),
+    ).toMatchObject({
+      matches: true,
+    });
+  });
+
+  it.each([
+    "Business Analyst",
+    "Reporting Analyst",
+    "BI Analyst",
+  ])("keeps %s as a realistic data-analyst sibling in balanced mode", (title) => {
+    expect(
+      getTitleMatchResult(title, "Data Analyst", {
+        mode: "balanced",
+      }),
+    ).toMatchObject({
+      matches: true,
+    });
+  });
+
+  it.each([
+    "Technical Product Manager",
+    "Associate Product Manager",
+    "APM",
+  ])("keeps %s as a realistic product-manager sibling in balanced mode", (title) => {
+    expect(
+      getTitleMatchResult(title, "Product Manager", {
+        mode: "balanced",
+      }),
+    ).toMatchObject({
+      matches: true,
+    });
+  });
+
   it("does not overmatch unrelated families", () => {
     expect(getTitleMatchResult("Technical Program Manager", "Product Manager")).toMatchObject({
       matches: false,
@@ -310,6 +361,24 @@ describe("title retrieval scoring", () => {
       tier: "adjacent_concept",
     });
     expect(getTitleMatchResult("Software Engineer", "QA Engineer")).toMatchObject({
+      matches: false,
+      tier: "none",
+    });
+  });
+
+  it.each([
+    "Recruiter",
+    "Sales Engineer",
+    "Support Engineer",
+    "Technical Writer",
+    "QA Engineer",
+    "SDET",
+  ])("rejects obvious false positives for a software engineer query: %s", (title) => {
+    expect(
+      getTitleMatchResult(title, "Software Engineer", {
+        mode: "balanced",
+      }),
+    ).toMatchObject({
       matches: false,
       tier: "none",
     });

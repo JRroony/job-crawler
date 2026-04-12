@@ -9,6 +9,10 @@ import {
   refreshStaleJobs,
   type CrawlLinkValidationMode,
 } from "@/lib/server/crawler/pipeline";
+import {
+  isSearchRunPending,
+  queueSearchRun,
+} from "@/lib/server/crawler/background-runs";
 import { dedupeStoredJobs } from "@/lib/server/crawler/dedupe";
 import { normalizeSearchIntentInput } from "@/lib/server/crawler/search-intent";
 import {
@@ -30,6 +34,7 @@ import {
   crawlResponseSchema,
   searchFiltersSchema,
   type JobListing,
+  type SearchDocument,
 } from "@/lib/types";
 
 export class ResourceNotFoundError extends Error {}
@@ -110,6 +115,82 @@ export async function rerunSearch(searchId: string, runtime: Runtime = {}) {
   });
 }
 
+export async function startSearchFromFilters(
+  rawFilters: unknown,
+  runtime: Runtime = {},
+) {
+  const normalizedInput = normalizeSearchIntentInput(rawFilters);
+  const parsedFilters = searchFiltersSchema.safeParse(normalizedInput);
+
+  if (!parsedFilters.success) {
+    throw new InputValidationError(parsedFilters.error);
+  }
+
+  const filters = parsedFilters.data;
+  console.info("[crawl:normalized-filters]", filters);
+  const repository = await resolveRepository(runtime.repository);
+  const now = runtime.now ?? new Date();
+  const search = await repository.createSearch(filters, now.toISOString());
+
+  const queued =
+    queueSearchRun(search._id, async () => {
+      await executeCrawl({
+        search,
+        repository,
+        discovery: runtime.discovery ?? defaultDiscoveryService,
+        providers: runtime.providers ?? createDefaultProviders(),
+        fetchImpl: runtime.fetchImpl ?? fetch,
+        now,
+        deepExperienceInference: runtime.deepExperienceInference ?? false,
+        linkValidationMode: runtime.linkValidationMode,
+        inlineValidationTopN: runtime.inlineValidationTopN,
+      });
+    }) || isSearchRunPending(search._id);
+
+  return {
+    queued,
+    result: await getSearchDetails(search._id, {
+      repository,
+      fetchImpl: runtime.fetchImpl ?? fetch,
+      now,
+    }),
+  };
+}
+
+export async function startSearchRerun(searchId: string, runtime: Runtime = {}) {
+  const repository = await resolveRepository(runtime.repository);
+  const search = await repository.getSearch(searchId);
+
+  if (!search) {
+    throw new ResourceNotFoundError(`Search ${searchId} was not found.`);
+  }
+
+  const now = runtime.now ?? new Date();
+  const queued =
+    queueSearchRun(search._id, async () => {
+      await executeCrawl({
+        search,
+        repository,
+        discovery: runtime.discovery ?? defaultDiscoveryService,
+        providers: runtime.providers ?? createDefaultProviders(),
+        fetchImpl: runtime.fetchImpl ?? fetch,
+        now,
+        deepExperienceInference: runtime.deepExperienceInference ?? false,
+        linkValidationMode: runtime.linkValidationMode,
+        inlineValidationTopN: runtime.inlineValidationTopN,
+      });
+    }) || isSearchRunPending(search._id);
+
+  return {
+    queued,
+    result: await getSearchDetails(searchId, {
+      repository,
+      fetchImpl: runtime.fetchImpl ?? fetch,
+      now,
+    }),
+  };
+}
+
 export async function getSearchDetails(searchId: string, runtime: Runtime = {}) {
   const repository = await resolveRepository(runtime.repository);
   const search = await repository.getSearch(searchId);
@@ -119,45 +200,7 @@ export async function getSearchDetails(searchId: string, runtime: Runtime = {}) 
   }
 
   if (!search.latestCrawlRunId) {
-    return crawlResponseSchema.parse({
-      search,
-      crawlRun: {
-        _id: createId(),
-        searchId: search._id,
-        startedAt: search.createdAt,
-        finishedAt: search.updatedAt,
-        status: search.lastStatus ?? "completed",
-        discoveredSourcesCount: 0,
-        crawledSourcesCount: 0,
-        totalFetchedJobs: 0,
-        totalMatchedJobs: 0,
-        dedupedJobs: 0,
-        validationMode: defaultCrawlLinkValidationMode,
-        providerSummary: [],
-        diagnostics: {
-          discoveredSources: 0,
-          crawledSources: 0,
-          providerFailures: 0,
-          excludedByTitle: 0,
-          excludedByLocation: 0,
-          excludedByExperience: 0,
-          dedupedOut: 0,
-          validationDeferred: 0,
-        },
-      },
-      sourceResults: [],
-      jobs: [],
-      diagnostics: {
-        discoveredSources: 0,
-        crawledSources: 0,
-        providerFailures: 0,
-        excludedByTitle: 0,
-        excludedByLocation: 0,
-        excludedByExperience: 0,
-        dedupedOut: 0,
-        validationDeferred: 0,
-      },
-    });
+    return buildSyntheticCrawlResponse(search, isSearchRunPending(searchId) ? "running" : undefined);
   }
 
   const crawlRun = await repository.getCrawlRun(search.latestCrawlRunId);
@@ -250,4 +293,50 @@ async function executeCrawl(input: ExecuteCrawlInput) {
 
 async function resolveRepository(repository?: JobCrawlerRepository) {
   return repository ?? getRepository();
+}
+
+function buildSyntheticCrawlResponse(
+  search: SearchDocument,
+  status?: "running",
+) {
+  const crawlStatus = status ?? search.lastStatus ?? "completed";
+  const diagnostics = {
+    discoveredSources: 0,
+    crawledSources: 0,
+    providerFailures: 0,
+    excludedByTitle: 0,
+    excludedByLocation: 0,
+    excludedByExperience: 0,
+    dedupedOut: 0,
+    validationDeferred: 0,
+  };
+
+  return crawlResponseSchema.parse({
+    search: {
+      ...search,
+      ...(status
+        ? {
+            lastStatus: status,
+          }
+        : {}),
+    },
+    crawlRun: {
+      _id: createId(),
+      searchId: search._id,
+      startedAt: search.createdAt,
+      finishedAt: status ? undefined : search.updatedAt,
+      status: crawlStatus,
+      discoveredSourcesCount: 0,
+      crawledSourcesCount: 0,
+      totalFetchedJobs: 0,
+      totalMatchedJobs: 0,
+      dedupedJobs: 0,
+      validationMode: defaultCrawlLinkValidationMode,
+      providerSummary: [],
+      diagnostics,
+    },
+    sourceResults: [],
+    jobs: [],
+    diagnostics,
+  });
 }

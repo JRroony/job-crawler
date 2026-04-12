@@ -1,15 +1,13 @@
 import "server-only";
 
-import type { ExperienceClassification, SearchFilters } from "@/lib/types";
+import type { ExperienceClassification } from "@/lib/types";
 import type { NormalizedJobSeed, ProviderResult } from "@/lib/server/providers/types";
-import type { TitleMatchResult } from "@/lib/server/title-retrieval";
 import { resolveJobLocation } from "@/lib/server/location-resolution";
 
 import {
   buildLocationText,
   canonicalizeUrl,
   classifyExperience,
-  evaluateSearchFilters,
   parseLocationText,
   slugToLabel,
 } from "@/lib/server/crawler/helpers";
@@ -127,8 +125,6 @@ export function finalizeProviderResult<P extends ProviderResult["provider"]>(inp
   sourceCount: number;
   fetchedCount: number;
   warnings: string[];
-  excludedByTitle?: number;
-  excludedByLocation?: number;
 }): ProviderResult<P> {
   const hasWarnings = input.warnings.length > 0;
 
@@ -140,8 +136,6 @@ export function finalizeProviderResult<P extends ProviderResult["provider"]>(inp
     fetchedCount: input.fetchedCount,
     matchedCount: input.jobs.length,
     warningCount: input.warnings.length,
-    excludedByTitle: input.excludedByTitle ?? 0,
-    excludedByLocation: input.excludedByLocation ?? 0,
     errorMessage: hasWarnings ? input.warnings.join(" ") : undefined,
   } satisfies ProviderResult<P>;
 }
@@ -159,78 +153,7 @@ export function unsupportedProviderResult<P extends ProviderResult["provider"]>(
     fetchedCount: 0,
     matchedCount: 0,
     warningCount: 0,
-    excludedByTitle: 0,
-    excludedByLocation: 0,
     errorMessage: message,
-  };
-}
-
-export function filterProviderSeeds(
-  seeds: NormalizedJobSeed[],
-  filters: SearchFilters,
-) {
-  const matchedSeeds: NormalizedJobSeed[] = [];
-  let excludedByTitle = 0;
-  let excludedByLocation = 0;
-
-  for (const seed of seeds) {
-    // Providers only prefilter on title and location so the pipeline can own the
-    // final experience-stage accounting and keep each exclusion bucket single-purpose.
-    const evaluation = evaluateSearchFilters(seed, filters, {
-      includeExperience: false,
-    });
-
-    if (evaluation.matches) {
-      matchedSeeds.push(attachTitleMatchMetadata(seed, evaluation.titleMatch));
-      continue;
-    }
-
-    if (evaluation.reason === "title") {
-      excludedByTitle += 1;
-      continue;
-    }
-
-    excludedByLocation += 1;
-  }
-
-  return {
-    jobs: matchedSeeds,
-    excludedByTitle,
-    excludedByLocation,
-  };
-}
-
-function attachTitleMatchMetadata(
-  seed: NormalizedJobSeed,
-  titleMatch: TitleMatchResult,
-) {
-  return {
-    ...seed,
-    rawSourceMetadata: {
-      ...seed.rawSourceMetadata,
-      crawlTitleMatch: {
-        tier: titleMatch.tier,
-        score: titleMatch.score,
-        canonicalQueryTitle: titleMatch.canonicalQueryTitle,
-        canonicalJobTitle: titleMatch.canonicalJobTitle,
-        explanation: titleMatch.explanation,
-        matchedTerms: titleMatch.matchedTerms,
-        penalties: titleMatch.penalties,
-      },
-      ...(seed.resolvedLocation
-        ? {
-            crawlResolvedLocation: {
-              country: seed.resolvedLocation.country,
-              state: seed.resolvedLocation.state,
-              stateCode: seed.resolvedLocation.stateCode,
-              city: seed.resolvedLocation.city,
-              isRemote: seed.resolvedLocation.isRemote,
-              isUnitedStates: seed.resolvedLocation.isUnitedStates,
-              confidence: seed.resolvedLocation.confidence,
-            },
-          }
-        : {}),
-    },
   };
 }
 
