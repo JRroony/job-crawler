@@ -22,6 +22,41 @@ class MemoryCollection<TDocument extends Record<string, unknown>>
     return { insertedId: document._id };
   }
 
+  async bulkWrite(
+    operations: Array<
+      | { insertOne: { document: TDocument } }
+      | {
+          updateOne: {
+            filter: Record<string, unknown>;
+            update: Record<string, unknown>;
+          };
+        }
+    >,
+  ) {
+    let insertedCount = 0;
+    let matchedCount = 0;
+
+    for (const operation of operations) {
+      if ("insertOne" in operation) {
+        await this.insertOne(operation.insertOne.document);
+        insertedCount += 1;
+        continue;
+      }
+
+      const result = await this.updateOne(
+        operation.updateOne.filter,
+        operation.updateOne.update,
+      );
+      matchedCount += Number((result as { matchedCount?: number }).matchedCount ?? 0);
+    }
+
+    return {
+      insertedCount,
+      matchedCount,
+      modifiedCount: matchedCount,
+    };
+  }
+
   async updateOne(
     filter: Record<string, unknown>,
     update: Record<string, unknown>,

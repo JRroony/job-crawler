@@ -649,4 +649,208 @@ describe("pipeline title retrieval", () => {
       matchedCount: 1,
     });
   });
+
+  it("broadens software-engineer recall to application and sibling software roles without letting unrelated families through", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T14:30:00.000Z");
+
+    const provider = createStubProvider("greenhouse", async () => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: 1,
+      fetchedCount: 6,
+      matchedCount: 6,
+      warningCount: 0,
+      jobs: [
+        {
+          title: "Backend Engineer",
+          company: "Acme",
+          locationText: "Remote, United States",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "backend-engineer",
+          sourceUrl: "https://example.com/jobs/backend-engineer",
+          applyUrl: "https://example.com/jobs/backend-engineer/apply",
+          canonicalUrl: "https://example.com/jobs/backend-engineer",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Application Developer",
+          company: "Acme",
+          locationText: "Remote, United States",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "application-developer",
+          sourceUrl: "https://example.com/jobs/application-developer",
+          applyUrl: "https://example.com/jobs/application-developer/apply",
+          canonicalUrl: "https://example.com/jobs/application-developer",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Software Developer",
+          company: "Acme",
+          locationText: "Remote, United States",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "software-developer",
+          sourceUrl: "https://example.com/jobs/software-developer",
+          applyUrl: "https://example.com/jobs/software-developer/apply",
+          canonicalUrl: "https://example.com/jobs/software-developer",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Frontend Engineer",
+          company: "Acme",
+          locationText: "Remote, United States",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "frontend-engineer",
+          sourceUrl: "https://example.com/jobs/frontend-engineer",
+          applyUrl: "https://example.com/jobs/frontend-engineer/apply",
+          canonicalUrl: "https://example.com/jobs/frontend-engineer",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Sales Engineer",
+          company: "Acme",
+          locationText: "Remote, United States",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "sales-engineer",
+          sourceUrl: "https://example.com/jobs/sales-engineer",
+          applyUrl: "https://example.com/jobs/sales-engineer/apply",
+          canonicalUrl: "https://example.com/jobs/sales-engineer",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Data Analyst",
+          company: "Acme",
+          locationText: "Remote, United States",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "data-analyst",
+          sourceUrl: "https://example.com/jobs/data-analyst",
+          applyUrl: "https://example.com/jobs/data-analyst/apply",
+          canonicalUrl: "https://example.com/jobs/data-analyst",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+      ],
+    }));
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+
+    const result = await runSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    expect(result.jobs.map((job) => job.title)).toEqual(
+      expect.arrayContaining([
+        "Software Developer",
+        "Backend Engineer",
+        "Frontend Engineer",
+        "Application Developer",
+      ]),
+    );
+    expect(result.diagnostics.excludedByTitle).toBe(2);
+  });
+
+  it("persists visible baseline results before supplemental discovery finishes", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T15:00:00.000Z");
+
+    const provider = createStubProvider("greenhouse", async (_context, sources) => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: sources.length,
+      fetchedCount: sources.length,
+      matchedCount: sources.length,
+      warningCount: 0,
+      jobs: sources.map((source, index) => ({
+        title: `Software Engineer ${index + 1}`,
+        company: "Acme",
+        locationText: "Remote, United States",
+        sourcePlatform: "greenhouse",
+        sourceJobId: `${source.id}:${index + 1}`,
+        sourceUrl: `https://example.com/jobs/${index + 1}`,
+        applyUrl: `https://example.com/jobs/${index + 1}/apply`,
+        canonicalUrl: `https://example.com/jobs/${index + 1}`,
+        discoveredAt: now.toISOString(),
+        rawSourceMetadata: {},
+      })),
+    }));
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [];
+      },
+      async discoverBaseline() {
+        return {
+          label: "baseline",
+          sources: [
+            classifySourceCandidate({
+              url: "https://boards.greenhouse.io/acme",
+              token: "acme",
+              confidence: "high",
+              discoveryMethod: "configured_env",
+            }),
+          ],
+          jobs: [],
+        };
+      },
+      async discoverSupplemental() {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return {
+          label: "public_search",
+          sources: [],
+          jobs: [],
+        };
+      },
+    };
+
+    const runPromise = runSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const [search] = await repository.listRecentSearches(1);
+    const crawlRun = await repository.getCrawlRun(search.latestCrawlRunId as string);
+    const midJobs = await repository.getJobsByCrawlRun(crawlRun?._id as string);
+
+    expect(midJobs).toHaveLength(1);
+
+    await runPromise;
+  });
 });

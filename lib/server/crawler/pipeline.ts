@@ -20,7 +20,7 @@ import {
 import { sortJobs } from "@/lib/server/crawler/sort";
 import { getEnv } from "@/lib/server/env";
 import type { JobCrawlerRepository, PersistableJob } from "@/lib/server/db/repository";
-import type { DiscoveryService } from "@/lib/server/discovery/types";
+import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
 import type { CrawlProvider, NormalizedJobSeed } from "@/lib/server/providers/types";
 import type { TitleMatchResult } from "@/lib/server/title-retrieval";
 import {
@@ -261,86 +261,20 @@ export async function executeCrawlPipeline(
       await updateRunProgress("crawling", payload.finishedAt);
     };
 
-    await updateRunProgress("discovering", crawlRun.startedAt);
-
-    const discoveryStartedMs = Date.now();
-    const discoveryExecution = input.discovery.discoverWithDiagnostics
-      ? await input.discovery.discoverWithDiagnostics({
-          filters: normalizedFilters,
-          now: input.now,
-          fetchImpl: input.fetchImpl,
-        })
-      : {
-          sources: await input.discovery.discover({
-            filters: normalizedFilters,
-            now: input.now,
-            fetchImpl: input.fetchImpl,
-          }),
-          jobs: [],
-          diagnostics: undefined,
-        };
-    stageTimingsMs.discovery = Date.now() - discoveryStartedMs;
-
-    const discoveredSources = discoveryExecution.sources;
-    const harvestedDiscoveryJobs = discoveryExecution.jobs ?? [];
-    const providerSources = selectedProviders.map((provider) =>
-      discoveredSources.filter((source) => provider.supportsSource(source)),
-    );
-    const providerRouting = selectedProviders.map((provider, index) => ({
-      provider: provider.provider,
-      sourceCount: providerSources[index].length,
-    }));
-
-    console.info("[crawl:provider-routing]", {
-      searchId: search._id,
-      normalizedFilters,
-      discoveredSourceCount: discoveredSources.length,
-      harvestedDiscoveryJobCount: harvestedDiscoveryJobs.length,
-      discoveredPlatformCounts: discoveredSources.reduce<Record<string, number>>((counts, source) => {
-        counts[source.platform] = (counts[source.platform] ?? 0) + 1;
-        return counts;
-      }, {}),
-      selectedProviders: selectedProviders.map((provider) => provider.provider),
-      providerRouting,
-    });
-
-    if (discoveredSources.length === 0) {
-      console.warn("[crawl:provider-routing]", {
-        searchId: search._id,
-        reason: "Discovery returned zero runnable sources before provider routing began.",
-      });
-    } else if (providerRouting.every((entry) => entry.sourceCount === 0)) {
-      console.warn("[crawl:provider-routing]", {
-        searchId: search._id,
-        reason: "Sources were discovered, but no provider accepted them.",
-      });
-    }
-
-    Object.assign(
-      diagnostics,
-      createEmptyDiagnostics({
-        discoveredSources: discoveredSources.length,
-        crawledSources: providerSources.reduce((total, sources) => total + sources.length, 0),
-        providersEnqueued: providerRouting.filter((entry) => entry.sourceCount > 0).length,
-        directJobsHarvested: harvestedDiscoveryJobs.length,
-        discovery: discoveryExecution.diagnostics,
-      }),
-    );
-
-    const initializedSourceResults = selectedProviders.map((provider, index) =>
+    const initializedSourceResults = selectedProviders.map((provider) =>
       crawlSourceResultSchema.parse({
         _id: createId(),
         crawlRunId: crawlRun._id,
         searchId: search._id,
         provider: provider.provider,
         status: "running",
-        sourceCount: providerSources[index].length,
+        sourceCount: 0,
         fetchedCount: 0,
         matchedCount: 0,
         savedCount: 0,
         warningCount: 0,
-        startedAt: new Date().toISOString(),
-        finishedAt: new Date().toISOString(),
+        startedAt: crawlRun.startedAt,
+        finishedAt: crawlRun.startedAt,
       }),
     );
 
@@ -351,156 +285,319 @@ export async function executeCrawlPipeline(
       await input.repository.saveCrawlSourceResults(initializedSourceResults);
     }
 
-    await updateRunProgress("crawling");
+    const discoveredSourceIds = new Set<string>();
+    const enqueuedProviders = new Set<CrawlSourceResult["provider"]>();
+    let totalHarvestedDiscoveryJobs = 0;
 
-    if (harvestedDiscoveryJobs.length > 0) {
-      await queueMutation(() =>
-        persistSeedBatch({
-          batchLabel: "discovery_harvest",
-          seeds: harvestedDiscoveryJobs,
-          fetchedCount: 0,
-          sourceCount: 0,
-          startedAt: crawlRun.startedAt,
-          finishedAt: new Date().toISOString(),
-        }),
-      );
-    }
+    const runProviderStage = async (
+      provider: CrawlProvider,
+      sourcesForProvider: Parameters<CrawlProvider["crawlSources"]>[1],
+    ) => {
+      if (sourcesForProvider.length === 0) {
+        return;
+      }
 
-    const providerExecutionStartedMs = Date.now();
-    await Promise.all(
-      selectedProviders.map(async (provider, index) => {
-        const startedAt = new Date().toISOString();
-        const startedMs = Date.now();
-        const sourcesForProvider = providerSources[index];
-        let emittedLiveBatch = false;
+      const startedAt = new Date().toISOString();
+      const startedMs = Date.now();
+      let emittedLiveBatch = false;
+      const runningSourceResult = sourceResultsByProvider.get(provider.provider);
 
-        const runningSourceResult = sourceResultsByProvider.get(provider.provider);
-        if (runningSourceResult) {
-          const updatedRunningResult = {
-            ...runningSourceResult,
-            startedAt,
-            finishedAt: startedAt,
-            sourceCount: sourcesForProvider.length,
-          };
-          sourceResultsByProvider.set(provider.provider, updatedRunningResult);
-          await input.repository.updateCrawlSourceResult(updatedRunningResult);
+      if (runningSourceResult) {
+        const updatedRunningResult = crawlSourceResultSchema.parse({
+          ...runningSourceResult,
+          startedAt: runningSourceResult.fetchedCount === 0 ? startedAt : runningSourceResult.startedAt,
+          finishedAt: startedAt,
+          sourceCount: runningSourceResult.sourceCount + sourcesForProvider.length,
+          status: "running",
+        });
+        sourceResultsByProvider.set(provider.provider, updatedRunningResult);
+        await input.repository.updateCrawlSourceResult(updatedRunningResult);
+      }
+
+      try {
+        const result = await provider.crawlSources(
+          {
+            fetchImpl: input.fetchImpl,
+            now: input.now,
+            filters: normalizedFilters,
+            onBatch: async (batch) => {
+              emittedLiveBatch = true;
+              totalFetchedJobs += batch.fetchedCount;
+              await queueMutation(() =>
+                persistSeedBatch({
+                  batchLabel: `${batch.provider}:batch`,
+                  provider: batch.provider,
+                  seeds: batch.jobs,
+                  fetchedCount: batch.fetchedCount,
+                  sourceCount: batch.sourceCount ?? sourcesForProvider.length,
+                  status: "running",
+                  startedAt,
+                  finishedAt: new Date().toISOString(),
+                  accumulateProviderTotals: true,
+                }),
+              );
+            },
+          },
+          sourcesForProvider,
+        );
+
+        const finishedAt = new Date().toISOString();
+        const durationMs = Date.now() - startedMs;
+        providerDurationsMs.push({
+          provider: result.provider,
+          duration: durationMs,
+          sourceCount: result.sourceCount ?? sourcesForProvider.length,
+        });
+
+        if (result.status === "failed" || result.status === "partial") {
+          diagnostics.providerFailures += 1;
         }
 
-        try {
-          const result = await provider.crawlSources(
-            {
-              fetchImpl: input.fetchImpl,
-              now: input.now,
-              filters: normalizedFilters,
-              onBatch: async (batch) => {
-                emittedLiveBatch = true;
-                totalFetchedJobs += batch.fetchedCount;
-                await queueMutation(() =>
-                  persistSeedBatch({
-                    batchLabel: `${batch.provider}:batch`,
-                    provider: batch.provider,
-                    seeds: batch.jobs,
-                    fetchedCount: batch.fetchedCount,
-                    sourceCount: batch.sourceCount ?? sourcesForProvider.length,
-                    status: "running",
-                    startedAt,
-                    finishedAt: new Date().toISOString(),
-                    accumulateProviderTotals: true,
-                  }),
-                );
-              },
-            },
-            sourcesForProvider,
-          );
+        if (!emittedLiveBatch) {
+          totalFetchedJobs += result.fetchedCount;
 
-          const finishedAt = new Date().toISOString();
-          const durationMs = Date.now() - startedMs;
-          providerDurationsMs.push({
-            provider: result.provider,
-            duration: durationMs,
-            sourceCount: result.sourceCount ?? sourcesForProvider.length,
-          });
-
-          if (result.status === "failed" || result.status === "partial") {
-            diagnostics.providerFailures += 1;
-          }
-
-          if (!emittedLiveBatch) {
-            totalFetchedJobs += result.fetchedCount;
-
-            await queueMutation(() =>
-              persistSeedBatch({
-                batchLabel: result.provider,
-                provider: result.provider,
-                seeds: result.jobs,
-                fetchedCount: result.fetchedCount,
-                sourceCount: result.sourceCount ?? sourcesForProvider.length,
-                status: result.status,
-                warningCount: result.warningCount,
-                errorMessage: result.errorMessage,
-                startedAt,
-                finishedAt,
-              }),
-            );
-          } else {
-            await queueMutation(async () => {
-              const existing = sourceResultsByProvider.get(result.provider);
-              if (!existing) {
-                return;
-              }
-
-              const updated = crawlSourceResultSchema.parse({
-                ...existing,
-                status: result.status,
-                warningCount: result.warningCount ?? existing.warningCount,
-                errorMessage: result.errorMessage ?? existing.errorMessage,
-                finishedAt,
-              });
-              sourceResultsByProvider.set(result.provider, updated);
-              await input.repository.updateCrawlSourceResult(updated);
-              await updateRunProgress("crawling", finishedAt);
-            });
-          }
-        } catch (reason) {
-          const finishedAt = new Date().toISOString();
-          const durationMs = Date.now() - startedMs;
-          providerDurationsMs.push({
-            provider: provider.provider,
-            duration: durationMs,
-            sourceCount: sourcesForProvider.length,
-          });
-
-          await queueMutation(async () => {
-            diagnostics.providerFailures += 1;
-            const failedResult = crawlSourceResultSchema.parse({
-              _id:
-                sourceResultsByProvider.get(provider.provider)?._id ??
-                createId(),
-              crawlRunId: crawlRun._id,
-              searchId: search._id,
-              provider: provider.provider,
-              status: "failed",
-              sourceCount: sourcesForProvider.length,
-              fetchedCount: 0,
-              matchedCount: 0,
-              savedCount: 0,
-              warningCount: 1,
-              errorMessage:
-                reason instanceof Error
-                  ? reason.message
-                  : `Provider ${provider.provider} failed unexpectedly.`,
+          await queueMutation(() =>
+            persistSeedBatch({
+              batchLabel: result.provider,
+              provider: result.provider,
+              seeds: result.jobs,
+              fetchedCount: result.fetchedCount,
+              sourceCount: result.sourceCount ?? sourcesForProvider.length,
+              status: result.status,
+              warningCount: result.warningCount,
+              errorMessage: result.errorMessage,
               startedAt,
               finishedAt,
-            });
-            sourceResultsByProvider.set(provider.provider, failedResult);
-            await input.repository.updateCrawlSourceResult(failedResult);
-            await updateRunProgress("crawling", finishedAt);
-          });
+              accumulateProviderTotals: true,
+            }),
+          );
+          return;
         }
-      }),
+
+        await queueMutation(async () => {
+          const existing = sourceResultsByProvider.get(result.provider);
+          if (!existing) {
+            return;
+          }
+
+          const updated = crawlSourceResultSchema.parse({
+            ...existing,
+            status: result.status,
+            warningCount: existing.warningCount + (result.warningCount ?? 0),
+            errorMessage: result.errorMessage ?? existing.errorMessage,
+            finishedAt,
+          });
+          sourceResultsByProvider.set(result.provider, updated);
+          await input.repository.updateCrawlSourceResult(updated);
+          await updateRunProgress("crawling", finishedAt);
+        });
+      } catch (reason) {
+        const finishedAt = new Date().toISOString();
+        const durationMs = Date.now() - startedMs;
+        providerDurationsMs.push({
+          provider: provider.provider,
+          duration: durationMs,
+          sourceCount: sourcesForProvider.length,
+        });
+
+        await queueMutation(async () => {
+          diagnostics.providerFailures += 1;
+          const existing = sourceResultsByProvider.get(provider.provider);
+          const failedResult = crawlSourceResultSchema.parse({
+            _id: existing?._id ?? createId(),
+            crawlRunId: crawlRun._id,
+            searchId: search._id,
+            provider: provider.provider,
+            status: "failed",
+            sourceCount: existing?.sourceCount ?? sourcesForProvider.length,
+            fetchedCount: existing?.fetchedCount ?? 0,
+            matchedCount: existing?.matchedCount ?? 0,
+            savedCount: existing?.savedCount ?? 0,
+            warningCount: (existing?.warningCount ?? 0) + 1,
+            errorMessage:
+              reason instanceof Error
+                ? reason.message
+                : `Provider ${provider.provider} failed unexpectedly.`,
+            startedAt: existing?.startedAt ?? startedAt,
+            finishedAt,
+          });
+          sourceResultsByProvider.set(provider.provider, failedResult);
+          await input.repository.updateCrawlSourceResult(failedResult);
+          await updateRunProgress("crawling", finishedAt);
+        });
+      }
+    };
+
+    const processDiscoveryStage = async (payload: {
+      label: string;
+      sources: DiscoveredSource[];
+      jobs: NormalizedJobSeed[];
+      diagnostics?: CrawlDiagnostics["discovery"];
+    }) => {
+      const newSources = payload.sources.filter((source) => {
+        if (discoveredSourceIds.has(source.id)) {
+          return false;
+        }
+
+        discoveredSourceIds.add(source.id);
+        return true;
+      });
+      const providerSources = selectedProviders.map((provider) =>
+        newSources.filter((source) => provider.supportsSource(source)),
+      );
+
+      diagnostics.discoveredSources = discoveredSourceIds.size;
+      diagnostics.crawledSources += providerSources.reduce((total, sources) => total + sources.length, 0);
+      totalHarvestedDiscoveryJobs += payload.jobs.length;
+      diagnostics.directJobsHarvested = totalHarvestedDiscoveryJobs;
+      if (payload.diagnostics) {
+        diagnostics.discovery = payload.diagnostics;
+      }
+
+      const providerRouting = selectedProviders.map((provider, index) => ({
+        provider: provider.provider,
+        sourceCount: providerSources[index].length,
+      }));
+      providerRouting
+        .filter((entry) => entry.sourceCount > 0)
+        .forEach((entry) => enqueuedProviders.add(entry.provider));
+      diagnostics.providersEnqueued = enqueuedProviders.size;
+
+      console.info("[crawl:provider-routing]", {
+        searchId: search._id,
+        stage: payload.label,
+        normalizedFilters,
+        discoveredSourceCount: newSources.length,
+        harvestedDiscoveryJobCount: payload.jobs.length,
+        discoveredPlatformCounts: newSources.reduce<Record<string, number>>((counts, source) => {
+          counts[source.platform] = (counts[source.platform] ?? 0) + 1;
+          return counts;
+        }, {}),
+        selectedProviders: selectedProviders.map((provider) => provider.provider),
+        providerRouting,
+      });
+
+      if (payload.jobs.length > 0) {
+        await queueMutation(() =>
+          persistSeedBatch({
+            batchLabel: `${payload.label}:discovery_harvest`,
+            seeds: payload.jobs,
+            fetchedCount: 0,
+            sourceCount: 0,
+            startedAt: crawlRun.startedAt,
+            finishedAt: new Date().toISOString(),
+          }),
+        );
+      }
+
+      if (providerRouting.every((entry) => entry.sourceCount === 0)) {
+        return;
+      }
+
+      await updateRunProgress("crawling");
+
+      await Promise.all(
+        selectedProviders.map((provider, index) =>
+          runProviderStage(provider, providerSources[index]),
+        ),
+      );
+      await mutationQueue;
+    };
+
+    await updateRunProgress("discovering", crawlRun.startedAt);
+
+    Object.assign(diagnostics, createEmptyDiagnostics());
+
+    if (input.discovery.discoverBaseline && input.discovery.discoverSupplemental) {
+      const baselineDiscoveryStartedMs = Date.now();
+      const baselineStage = await input.discovery.discoverBaseline({
+        filters: normalizedFilters,
+        now: input.now,
+        fetchImpl: input.fetchImpl,
+      });
+      stageTimingsMs.discovery += Date.now() - baselineDiscoveryStartedMs;
+      await processDiscoveryStage({
+        label: baselineStage.label,
+        sources: baselineStage.sources,
+        jobs: baselineStage.jobs ?? [],
+        diagnostics: baselineStage.diagnostics,
+      });
+
+      const supplementalDiscoveryStartedMs = Date.now();
+      const supplementalStage = await input.discovery.discoverSupplemental(
+        {
+          filters: normalizedFilters,
+          now: input.now,
+          fetchImpl: input.fetchImpl,
+        },
+        {
+          baselineSources: baselineStage.sources,
+        },
+      );
+      stageTimingsMs.discovery += Date.now() - supplementalDiscoveryStartedMs;
+      await processDiscoveryStage({
+        label: supplementalStage.label,
+        sources: supplementalStage.sources,
+        jobs: supplementalStage.jobs ?? [],
+        diagnostics: supplementalStage.diagnostics,
+      });
+    } else if (input.discovery.discoverInStages) {
+      const stagedDiscoveryStartedMs = Date.now();
+      const discoveryStages = await input.discovery.discoverInStages({
+        filters: normalizedFilters,
+        now: input.now,
+        fetchImpl: input.fetchImpl,
+      });
+      stageTimingsMs.discovery += Date.now() - stagedDiscoveryStartedMs;
+      for (const discoveryStage of discoveryStages) {
+        await processDiscoveryStage({
+          label: discoveryStage.label,
+          sources: discoveryStage.sources,
+          jobs: discoveryStage.jobs ?? [],
+          diagnostics: discoveryStage.diagnostics,
+        });
+      }
+    } else {
+      const fullDiscoveryStartedMs = Date.now();
+      const discoveryExecution = input.discovery.discoverWithDiagnostics
+        ? await input.discovery.discoverWithDiagnostics({
+            filters: normalizedFilters,
+            now: input.now,
+            fetchImpl: input.fetchImpl,
+          })
+        : {
+            sources: await input.discovery.discover({
+              filters: normalizedFilters,
+              now: input.now,
+              fetchImpl: input.fetchImpl,
+            }),
+            jobs: [],
+            diagnostics: undefined,
+          };
+      stageTimingsMs.discovery += Date.now() - fullDiscoveryStartedMs;
+
+      await processDiscoveryStage({
+        label: "full",
+        sources: discoveryExecution.sources,
+        jobs: discoveryExecution.jobs ?? [],
+        diagnostics: discoveryExecution.diagnostics,
+      });
+    }
+    stageTimingsMs.providerExecution = providerDurationsMs.reduce(
+      (total, entry) => total + entry.duration,
+      0,
     );
-    await mutationQueue;
-    stageTimingsMs.providerExecution = Date.now() - providerExecutionStartedMs;
+    if (discoveredSourceIds.size === 0) {
+      console.warn("[crawl:provider-routing]", {
+        searchId: search._id,
+        reason: "Discovery returned zero runnable sources before provider routing began.",
+      });
+    } else if (enqueuedProviders.size === 0) {
+      console.warn("[crawl:provider-routing]", {
+        searchId: search._id,
+        reason: "Sources were discovered, but no provider accepted them.",
+      });
+    }
 
     let savedJobs = await input.repository.getJobsByCrawlRun(crawlRun._id);
     if (validationStrategy.mode === "deferred") {
@@ -581,7 +678,7 @@ export async function executeCrawlPipeline(
     console.info("[crawl:summary]", {
       searchId: search._id,
       fetchedCount: totalFetchedJobs,
-      directJobsHarvested: harvestedDiscoveryJobs.length,
+      directJobsHarvested: totalHarvestedDiscoveryJobs,
       matchedCount: totalMatchedJobs,
       jobsBeforeDedupe: diagnostics.jobsBeforeDedupe,
       jobsAfterDedupe: diagnostics.jobsAfterDedupe,

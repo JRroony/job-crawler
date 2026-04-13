@@ -133,6 +133,7 @@ export type TitleQueryVariant = {
   kind: TitleQueryVariantKind;
   family?: TitleRoleFamily;
   conceptId?: TitleConceptId;
+  tier: 1 | 2 | 3;
   priority: number;
 };
 

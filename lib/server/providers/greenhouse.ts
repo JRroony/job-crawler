@@ -389,6 +389,7 @@ function buildGreenhouseRawTitlePreselector(
   ).sort((left, right) => right.length - left.length || left.localeCompare(right));
   const modifierTokens = queryAnalysis.modifierTokens.filter(Boolean);
   const headWord = queryAnalysis.headWord;
+  const discoveryMatchMode = queryAnalysis.family === "software_engineering" ? "broad" : "balanced";
 
   return {
     variantCount: normalizedPhrases.length,
@@ -408,7 +409,7 @@ function buildGreenhouseRawTitlePreselector(
       }
 
       const balancedMatch = getTitleMatchResult(rawTitle ?? normalizedTitle, normalizedQueryTitle, {
-        mode: "balanced",
+        mode: discoveryMatchMode,
       });
       if (balancedMatch.matches) {
         return true;

@@ -54,6 +54,7 @@ export function buildTitleQueryVariants(
       query: normalized,
       normalized,
       kind,
+      tier: resolveVariantTier(normalized, kind, details.family ?? analysis.family),
       priority: variants.length,
       ...details,
     });
@@ -136,11 +137,15 @@ export function buildTitleQueryVariants(
   }
 
   const maxQueries = options.maxQueries ?? 16;
-  const effectiveMaxQueries = Math.max(12, maxQueries);
-  return variants.slice(0, effectiveMaxQueries).map((variant, index) => ({
-    ...variant,
-    priority: index,
-  }));
+  const minimumQueries = analysis.family === "software_engineering" ? 20 : 12;
+  const effectiveMaxQueries = Math.max(minimumQueries, maxQueries);
+  return variants
+    .sort(compareTitleQueryVariants)
+    .slice(0, effectiveMaxQueries)
+    .map((variant, index) => ({
+      ...variant,
+      priority: index,
+    }));
 }
 
 function classifyConceptQueryKind(
@@ -266,6 +271,140 @@ function buildModifierPhrases(analysis: TitleAnalysis) {
   }
 
   return dedupeNormalizedValues(phrases);
+}
+
+const softwareTierOneQueries = new Set([
+  "software engineer",
+  "software developer",
+  "software development engineer",
+  "backend engineer",
+  "backend developer",
+  "frontend engineer",
+  "frontend developer",
+  "full stack engineer",
+  "full stack developer",
+  "fullstack engineer",
+  "fullstack developer",
+]);
+
+const softwareTierTwoQueries = new Set([
+  "application developer",
+  "applications developer",
+  "application engineer",
+  "applications engineer",
+  "application software engineer",
+  "web application developer",
+  "platform engineer",
+  "platform developer",
+  "java developer",
+  "java engineer",
+  "mobile engineer",
+  "mobile developer",
+  "api developer",
+  "api engineer",
+  "server engineer",
+  "distributed systems engineer",
+]);
+
+function resolveVariantTier(
+  normalized: string,
+  kind: TitleQueryVariantKind,
+  family?: string,
+): 1 | 2 | 3 {
+  if (family === "software_engineering") {
+    if (softwareTierOneQueries.has(normalized)) {
+      return 1;
+    }
+
+    if (softwareTierTwoQueries.has(normalized)) {
+      return 2;
+    }
+
+    return 3;
+  }
+
+  if (
+    kind === "original" ||
+    kind === "normalized" ||
+    kind === "canonical" ||
+    kind === "synonym" ||
+    kind === "adjacent_concept"
+  ) {
+    return 1;
+  }
+
+  if (kind === "family_broadening" || kind === "abbreviation") {
+    return 2;
+  }
+
+  return 3;
+}
+
+function compareTitleQueryVariants(left: TitleQueryVariant, right: TitleQueryVariant) {
+  const leftSoftwarePriority = resolveSoftwareQueryPriority(left);
+  const rightSoftwarePriority = resolveSoftwareQueryPriority(right);
+
+  return (
+    left.tier - right.tier ||
+    leftSoftwarePriority - rightSoftwarePriority ||
+    kindPriority(left.kind) - kindPriority(right.kind) ||
+    left.priority - right.priority ||
+    left.query.localeCompare(right.query)
+  );
+}
+
+const softwareQueryPriority = new Map(
+  [
+    "software engineer",
+    "software developer",
+    "software development engineer",
+    "backend engineer",
+    "frontend engineer",
+    "full stack engineer",
+    "application developer",
+    "application engineer",
+    "platform engineer",
+    "java developer",
+    "mobile engineer",
+    "application software engineer",
+    "web application developer",
+    "api developer",
+    "server engineer",
+    "distributed systems engineer",
+    "service engineer",
+    "swe",
+  ].map((query, index) => [query, index] as const),
+);
+
+function resolveSoftwareQueryPriority(variant: TitleQueryVariant) {
+  if (variant.family !== "software_engineering") {
+    return Number.MAX_SAFE_INTEGER;
+  }
+
+  return softwareQueryPriority.get(variant.normalized) ?? 100 + kindPriority(variant.kind);
+}
+
+function kindPriority(kind: TitleQueryVariantKind) {
+  switch (kind) {
+    case "original":
+      return 0;
+    case "normalized":
+      return 1;
+    case "canonical":
+      return 2;
+    case "synonym":
+      return 3;
+    case "adjacent_concept":
+      return 4;
+    case "family_broadening":
+      return 5;
+    case "abbreviation":
+      return 6;
+    case "fallback_variant":
+      return 7;
+    default:
+      return 8;
+  }
 }
 
 function getAlternateHeadWords(headWord: string) {

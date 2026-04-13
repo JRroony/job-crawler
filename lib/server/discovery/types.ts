@@ -109,9 +109,22 @@ export type DiscoveryExecution = {
   diagnostics: DiscoveryStageDiagnostics;
 };
 
+export type DiscoveryExecutionStage = {
+  label: "baseline" | "public_search" | "full";
+  sources: DiscoveredSource[];
+  jobs?: NormalizedJobSeed[];
+  diagnostics?: DiscoveryStageDiagnostics;
+};
+
 export type DiscoveryService = {
   discover(input: DiscoveryInput): Promise<DiscoveredSource[]>;
   discoverWithDiagnostics?(input: DiscoveryInput): Promise<DiscoveryExecution>;
+  discoverInStages?(input: DiscoveryInput): Promise<DiscoveryExecutionStage[]>;
+  discoverBaseline?(input: DiscoveryInput): Promise<DiscoveryExecutionStage>;
+  discoverSupplemental?(
+    input: DiscoveryInput,
+    context: { baselineSources: DiscoveredSource[] },
+  ): Promise<DiscoveryExecutionStage>;
 };
 
 export function isGreenhouseSource(source: DiscoveredSource): source is GreenhouseDiscoveredSource {

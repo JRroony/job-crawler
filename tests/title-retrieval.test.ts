@@ -55,7 +55,9 @@ describe("title retrieval analysis", () => {
 
 describe("title retrieval query expansion", () => {
   it("expands software engineering searches beyond exact title matches", () => {
-    expect(queriesFor("Software Engineer")).toEqual(
+    expect(
+      buildTitleQueryVariants("Software Engineer", { maxQueries: 32 }).map((variant) => variant.query),
+    ).toEqual(
       expect.arrayContaining([
         "software engineer",
         "software developer",
@@ -63,9 +65,17 @@ describe("title retrieval query expansion", () => {
         "backend engineer",
         "frontend engineer",
         "full stack engineer",
+        "application developer",
+        "application engineer",
+        "application software engineer",
+        "web application developer",
         "platform engineer",
         "mobile engineer",
         "java developer",
+        "api developer",
+        "server engineer",
+        "service engineer",
+        "distributed systems engineer",
         "swe",
       ]),
     );
@@ -269,6 +279,22 @@ describe("title retrieval scoring", () => {
       }),
     ).toMatchObject({
       matches: true,
+      tier: expect.stringMatching(/^(synonym|adjacent_concept)$/),
+    });
+  });
+
+  it.each([
+    "Application Developer",
+    "Application Engineer",
+    "Web Application Developer",
+  ])("treats %s as a direct software-engineering concept match", (title) => {
+    expect(
+      getTitleMatchResult(title, "Software Engineer", {
+        mode: "balanced",
+      }),
+    ).toMatchObject({
+      matches: true,
+      tier: "synonym",
     });
   });
 

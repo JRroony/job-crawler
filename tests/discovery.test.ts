@@ -788,10 +788,10 @@ describe("source discovery", () => {
       "backend engineer",
       "frontend engineer",
       "full stack engineer",
-      "platform engineer",
-      "mobile engineer",
-      "java developer",
-      "swe",
+      "backend developer",
+      "frontend developer",
+      "full stack developer",
+      "application developer",
     ]);
     expect(plan.platformPlans).toHaveLength(1);
     expect(plan.platformPlans[0]).toMatchObject({
@@ -855,16 +855,19 @@ describe("source discovery", () => {
     const selected = selectQueriesForExecution(plan);
 
     expect(selected).toHaveLength(24);
-    expect(selected.slice(0, 4).map((query) => query.roleQuery)).toEqual([
+    expect(selected.slice(0, 6).map((query) => query.roleQuery)).toEqual([
       "software engineer",
       "software developer",
       "software development engineer",
       "backend engineer",
+      "frontend engineer",
+      "full stack engineer",
     ]);
     expect(selected.some((query) => query.roleQuery === "software developer")).toBe(true);
     expect(selected.some((query) => query.roleQuery === "backend engineer")).toBe(true);
+    expect(selected.some((query) => query.roleQuery === "application developer")).toBe(true);
     expect(selected.some((query) => query.roleQuery === "java developer")).toBe(true);
-    expect(selected.some((query) => query.roleQuery === "swe")).toBe(true);
+    expect(selected.some((query) => query.roleQuery === "mobile engineer")).toBe(true);
   });
 
   it("broadens data analyst discovery into close title variants instead of a single narrow query", () => {
@@ -1068,8 +1071,8 @@ describe("source discovery", () => {
     );
     expect(requestedQueries).toEqual(
       expect.arrayContaining([
-        "site:boards.greenhouse.io senior software engineer",
-        "site:job-boards.greenhouse.io senior software engineer",
+        "site:boards.greenhouse.io software engineer",
+        "site:job-boards.greenhouse.io software engineer",
       ]),
     );
     expect(requests.some((requestUrl) => requestUrl.startsWith("https://html.duckduckgo.com/"))).toBe(false);

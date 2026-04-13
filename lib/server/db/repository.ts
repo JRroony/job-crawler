@@ -46,6 +46,18 @@ export type CollectionAdapter<TDocument extends Record<string, unknown>> = {
     options?: { sort?: SortSpec },
   ): Promise<TDocument | null>;
   insertOne(document: TDocument): Promise<unknown>;
+  bulkWrite?(
+    operations: Array<
+      | { insertOne: { document: TDocument } }
+      | {
+          updateOne: {
+            filter: Record<string, unknown>;
+            update: Record<string, unknown>;
+            options?: Record<string, unknown>;
+          };
+        }
+    >,
+  ): Promise<unknown>;
   updateOne(
     filter: Record<string, unknown>,
     update: Record<string, unknown>,
@@ -290,6 +302,8 @@ export class JobCrawlerRepository {
     const savedJobsById = new Map<string, JobListing>();
     const sanitizedJobs = dedupeJobs(jobs.map((job) => sanitizePersistableJob(job)));
     const existingJobs = await this.findExistingJobsForBatch(sanitizedJobs);
+    const inserts: JobListing[] = [];
+    const updates = new Map<string, JobListing>();
 
     for (const job of sanitizedJobs) {
       const existing = resolveExistingJobForPersistable(existingJobs, job);
@@ -299,18 +313,22 @@ export class JobCrawlerRepository {
           ...job,
           crawlRunIds: [crawlRunId],
         });
-        await this.jobs().insertOne(document);
+        inserts.push(document);
         savedJobsById.set(document._id, document);
         indexJobForBatchLookup(existingJobs, document);
         continue;
       }
 
       const merged = mergeJobRecords(existing, job, crawlRunId);
-      const { _id: _ignoredId, ...updateFields } = merged;
-      await this.jobs().updateOne({ _id: existing._id }, { $set: updateFields });
       savedJobsById.set(merged._id, merged);
+      updates.set(merged._id, merged);
       indexJobForBatchLookup(existingJobs, merged);
     }
+
+    await persistBatchMutations(this.jobs(), {
+      inserts,
+      updates: Array.from(updates.values()),
+    });
 
     return dedupeStoredJobs(Array.from(savedJobsById.values()));
   }
@@ -578,6 +596,55 @@ async function fetchJobsByField(
   }
 
   return collection.find({ [field]: { $in: values } }).toArray();
+}
+
+async function persistBatchMutations(
+  collection: CollectionAdapter<JobListing>,
+  operations: {
+    inserts: JobListing[];
+    updates: JobListing[];
+  },
+) {
+  const bulkOperations = [
+    ...operations.inserts.map(
+      (document) =>
+        ({
+          insertOne: {
+            document,
+          },
+        }) as const,
+    ),
+    ...operations.updates.map((document) => {
+      const { _id, ...updateFields } = document;
+      return {
+        updateOne: {
+          filter: { _id },
+          update: { $set: updateFields },
+        },
+      } as const;
+    }),
+  ];
+
+  if (bulkOperations.length === 0) {
+    return;
+  }
+
+  if (collection.bulkWrite) {
+    await collection.bulkWrite(bulkOperations);
+    return;
+  }
+
+  for (const operation of bulkOperations) {
+    if ("insertOne" in operation) {
+      await collection.insertOne(operation.insertOne.document);
+      continue;
+    }
+
+    await collection.updateOne(
+      operation.updateOne.filter,
+      operation.updateOne.update,
+    );
+  }
 }
 
 function collectUniqueStrings(values: Array<string | undefined>) {

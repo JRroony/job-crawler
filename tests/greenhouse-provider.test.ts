@@ -32,6 +32,13 @@ describe("Greenhouse provider preselection", () => {
               location: { name: "Remote, United States" },
             },
             {
+              id: "application-developer",
+              title: "Application Developer",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/application-developer",
+              company_name: "Acme",
+              location: { name: "Remote, United States" },
+            },
+            {
               id: "qa-engineer",
               title: "QA Engineer",
               absolute_url: "https://boards.greenhouse.io/acme/jobs/qa-engineer",
@@ -78,13 +85,14 @@ describe("Greenhouse provider preselection", () => {
     expect(result).toMatchObject({
       provider: "greenhouse",
       status: "success",
-      fetchedCount: 5,
-      matchedCount: 3,
+      fetchedCount: 6,
+      matchedCount: 4,
     });
     expect(result.jobs.map((job) => job.title)).toEqual([
       "Backend Developer",
       "Frontend Developer",
       "Full Stack Developer",
+      "Application Developer",
     ]);
   });
 });

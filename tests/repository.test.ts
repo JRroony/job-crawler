@@ -713,4 +713,121 @@ describe("JobCrawlerRepository", () => {
       db.collection(collectionNames.crawlRuns).indexes.map((index) => index.name),
     ).toContain("crawlRuns_validationMode_startedAt_desc");
   });
+
+  it("groups duplicate updates into a single bulk write instead of issuing per-job mutations", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      { title: "Software Engineer" },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const firstRun = await repository.createCrawlRun(search._id, "2026-03-29T00:00:00.000Z");
+    const secondRun = await repository.createCrawlRun(search._id, "2026-03-30T00:00:00.000Z");
+
+    await repository.persistJobs(firstRun._id, [
+      {
+        title: "Software Engineer",
+        company: "Acme",
+        country: "United States",
+        locationText: "Remote, United States",
+        sourcePlatform: "greenhouse",
+        sourceJobId: "role-1",
+        sourceUrl: "https://example.com/jobs/1",
+        applyUrl: "https://example.com/jobs/1/apply",
+        canonicalUrl: "https://example.com/jobs/1",
+        discoveredAt: "2026-03-29T00:00:00.000Z",
+        linkStatus: "unknown",
+        rawSourceMetadata: {},
+        sourceProvenance: [
+          {
+            sourcePlatform: "greenhouse",
+            sourceJobId: "role-1",
+            sourceUrl: "https://example.com/jobs/1",
+            applyUrl: "https://example.com/jobs/1/apply",
+            canonicalUrl: "https://example.com/jobs/1",
+            discoveredAt: "2026-03-29T00:00:00.000Z",
+            rawSourceMetadata: {},
+          },
+        ],
+        sourceLookupKeys: ["greenhouse:role-1"],
+        companyNormalized: "acme",
+        titleNormalized: "software engineer",
+        locationNormalized: "remote united states",
+        contentFingerprint: "fingerprint-1",
+      },
+    ]);
+
+    const jobsCollection = db.collection<JobListing>(collectionNames.jobs);
+    jobsCollection.stats.insertOneCalls = 0;
+    jobsCollection.stats.updateOneCalls = 0;
+    jobsCollection.stats.bulkWriteCalls = 0;
+
+    await repository.persistJobs(secondRun._id, [
+      {
+        title: "Software Engineer",
+        company: "Acme",
+        country: "United States",
+        locationText: "Remote, United States",
+        sourcePlatform: "greenhouse",
+        sourceJobId: "role-1",
+        sourceUrl: "https://example.com/jobs/1",
+        applyUrl: "https://example.com/jobs/1/apply",
+        canonicalUrl: "https://example.com/jobs/1",
+        discoveredAt: "2026-03-30T00:00:00.000Z",
+        linkStatus: "valid",
+        rawSourceMetadata: {},
+        sourceProvenance: [
+          {
+            sourcePlatform: "greenhouse",
+            sourceJobId: "role-1",
+            sourceUrl: "https://example.com/jobs/1",
+            applyUrl: "https://example.com/jobs/1/apply",
+            canonicalUrl: "https://example.com/jobs/1",
+            discoveredAt: "2026-03-30T00:00:00.000Z",
+            rawSourceMetadata: {},
+          },
+        ],
+        sourceLookupKeys: ["greenhouse:role-1"],
+        companyNormalized: "acme",
+        titleNormalized: "software engineer",
+        locationNormalized: "remote united states",
+        contentFingerprint: "fingerprint-1",
+      },
+      {
+        title: "Software Engineer",
+        company: "Acme",
+        country: "United States",
+        locationText: "Remote, United States",
+        sourcePlatform: "greenhouse",
+        sourceJobId: "role-1",
+        sourceUrl: "https://example.com/jobs/1",
+        applyUrl: "https://example.com/jobs/1/apply",
+        resolvedUrl: "https://example.com/jobs/1/apply",
+        canonicalUrl: "https://example.com/jobs/1",
+        discoveredAt: "2026-03-30T00:00:01.000Z",
+        linkStatus: "valid",
+        rawSourceMetadata: {},
+        sourceProvenance: [
+          {
+            sourcePlatform: "greenhouse",
+            sourceJobId: "role-1",
+            sourceUrl: "https://example.com/jobs/1",
+            applyUrl: "https://example.com/jobs/1/apply",
+            resolvedUrl: "https://example.com/jobs/1/apply",
+            canonicalUrl: "https://example.com/jobs/1",
+            discoveredAt: "2026-03-30T00:00:01.000Z",
+            rawSourceMetadata: {},
+          },
+        ],
+        sourceLookupKeys: ["greenhouse:role-1"],
+        companyNormalized: "acme",
+        titleNormalized: "software engineer",
+        locationNormalized: "remote united states",
+        contentFingerprint: "fingerprint-1",
+      },
+    ]);
+
+    expect(jobsCollection.stats.bulkWriteCalls).toBe(1);
+    expect(jobsCollection.stats.updateOneCalls).toBe(1);
+  });
 });

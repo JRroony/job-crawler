@@ -14,6 +14,11 @@ export class FakeCollection<TDocument extends Record<string, unknown>>
 {
   documents: TDocument[] = [];
   indexes: IndexSpec[] = [];
+  stats = {
+    insertOneCalls: 0,
+    updateOneCalls: 0,
+    bulkWriteCalls: 0,
+  };
 
   async findOne(
     filter: Record<string, unknown>,
@@ -24,14 +29,52 @@ export class FakeCollection<TDocument extends Record<string, unknown>>
   }
 
   async insertOne(document: TDocument) {
+    this.stats.insertOneCalls += 1;
     this.documents.push(clone(document));
     return { insertedId: document._id };
+  }
+
+  async bulkWrite(
+    operations: Array<
+      | { insertOne: { document: TDocument } }
+      | {
+          updateOne: {
+            filter: Record<string, unknown>;
+            update: Record<string, unknown>;
+          };
+        }
+    >,
+  ) {
+    this.stats.bulkWriteCalls += 1;
+    let insertedCount = 0;
+    let matchedCount = 0;
+
+    for (const operation of operations) {
+      if ("insertOne" in operation) {
+        await this.insertOne(operation.insertOne.document);
+        insertedCount += 1;
+        continue;
+      }
+
+      const result = await this.updateOne(
+        operation.updateOne.filter,
+        operation.updateOne.update,
+      );
+      matchedCount += Number((result as { matchedCount?: number }).matchedCount ?? 0);
+    }
+
+    return {
+      insertedCount,
+      matchedCount,
+      modifiedCount: matchedCount,
+    };
   }
 
   async updateOne(
     filter: Record<string, unknown>,
     update: Record<string, unknown>,
   ) {
+    this.stats.updateOneCalls += 1;
     const target = this.documents.find((document) => matches(document, filter));
     if (!target) {
       return { matchedCount: 0, modifiedCount: 0 };

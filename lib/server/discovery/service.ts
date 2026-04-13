@@ -9,6 +9,7 @@ import { discoverSourcesFromPublicSearchDetailed } from "@/lib/server/discovery/
 import { resolveOperationalCrawlerPlatforms, type CrawlMode } from "@/lib/types";
 import type {
   DiscoveryExecution,
+  DiscoveryExecutionStage,
   DiscoveredSource,
   DiscoveryInput,
   DiscoveryService,
@@ -43,6 +44,27 @@ export const defaultDiscoveryService: DiscoveryService = {
       env: getEnv(),
     });
   },
+  async discoverInStages(input) {
+    return discoverSourcesInStages({
+      ...input,
+      env: getEnv(),
+    });
+  },
+  async discoverBaseline(input) {
+    return discoverBaselineSourcesDetailed({
+      ...input,
+      env: getEnv(),
+    });
+  },
+  async discoverSupplemental(input, context) {
+    return discoverSupplementalSourcesDetailed(
+      {
+        ...input,
+        env: getEnv(),
+      },
+      context,
+    );
+  },
 };
 
 export async function discoverSources(input: DiscoveryInput & { env: DiscoveryEnvSnapshot }) {
@@ -53,6 +75,79 @@ export async function discoverSources(input: DiscoveryInput & { env: DiscoveryEn
 export async function discoverSourcesDetailed(
   input: DiscoveryInput & { env: DiscoveryEnvSnapshot },
 ): Promise<DiscoveryExecution> {
+  const stages = await discoverSourcesInStages(input);
+  const finalStage = stages[stages.length - 1];
+  const allSources = dedupeDiscoveredSources(stages.flatMap((stage) => stage.sources));
+  const allJobs = stages.flatMap((stage) => stage.jobs ?? []);
+
+  return {
+    sources: allSources,
+    jobs: allJobs,
+    diagnostics: finalStage?.diagnostics ?? {
+      configuredSources: 0,
+      curatedSources: 0,
+      publicSources: 0,
+      publicJobs: 0,
+      discoveredBeforeFiltering: allSources.length,
+      discoveredAfterFiltering: allSources.length,
+      platformCounts: summarizePlatformCounts(allSources),
+      publicJobPlatformCounts: summarizePublicJobPlatformCounts(allJobs),
+    },
+  };
+}
+
+export async function discoverSourcesInStages(
+  input: DiscoveryInput & { env: DiscoveryEnvSnapshot },
+): Promise<DiscoveryExecutionStage[]> {
+  const baseline = await discoverBaselineSourcesDetailed(input);
+  const supplemental = await discoverSupplementalSourcesDetailed(input, {
+    baselineSources: baseline.sources,
+  });
+
+  return [baseline, supplemental];
+}
+
+export async function discoverBaselineSourcesDetailed(
+  input: DiscoveryInput & { env: DiscoveryEnvSnapshot },
+): Promise<DiscoveryExecutionStage> {
+  const selectedPlatforms = input.filters.platforms
+    ? new Set<string>(resolveOperationalCrawlerPlatforms(input.filters.platforms))
+    : null;
+  const unfilteredConfiguredSources = buildConfiguredSources(input);
+  const configuredSources = filterDiscoveredSources(
+    unfilteredConfiguredSources,
+    selectedPlatforms,
+  );
+  const curatedSources = filterDiscoveredSources(
+    discoverCatalogSources(input.filters.platforms),
+    selectedPlatforms,
+  );
+  const companyPageExpandedSources = dedupeDiscoveredSources(
+    await expandCompanyPageSources(
+      dedupeDiscoveredSources([...unfilteredConfiguredSources, ...curatedSources]),
+      input.fetchImpl,
+    ),
+  );
+  const sources = filterDiscoveredSources(
+    dedupeDiscoveredSources([
+      ...configuredSources,
+      ...curatedSources,
+      ...companyPageExpandedSources,
+    ]),
+    selectedPlatforms,
+  );
+
+  return {
+    label: "baseline",
+    sources,
+    jobs: [],
+  };
+}
+
+export async function discoverSupplementalSourcesDetailed(
+  input: DiscoveryInput & { env: DiscoveryEnvSnapshot },
+  context: { baselineSources: DiscoveredSource[] },
+): Promise<DiscoveryExecutionStage> {
   const discoveryStartedMs = Date.now();
   const selectedPlatforms = input.filters.platforms
     ? new Set<string>(resolveOperationalCrawlerPlatforms(input.filters.platforms))
@@ -108,15 +203,21 @@ export async function discoverSourcesDetailed(
     : 0;
   const publicSources = publicSearchResult.sources;
   const publicJobs = publicSearchResult.jobs;
+  const baselineSources = dedupeDiscoveredSources(context.baselineSources);
   const discoveredBeforeFiltering = dedupeDiscoveredSources([
-    ...configuredSources,
-    ...curatedSources,
-    ...companyPageExpandedSources,
+    ...baselineSources,
     ...publicSources,
   ]);
   const discoveredSources = filterDiscoveredSources(
     discoveredBeforeFiltering,
     selectedPlatforms,
+  );
+  const filteredBaselineSources = filterDiscoveredSources(
+    baselineSources,
+    selectedPlatforms,
+  );
+  const publicSourcesOnly = discoveredSources.filter(
+    (source) => !filteredBaselineSources.some((baseline) => baseline.id === source.id),
   );
 
   logDiscoveryTrace(input.filters, {
@@ -138,7 +239,8 @@ export async function discoverSourcesDetailed(
   });
 
   return {
-    sources: discoveredSources,
+    label: shouldExecutePublicSearch ? "public_search" : "baseline",
+    sources: publicSourcesOnly,
     jobs: publicJobs,
     diagnostics: {
       configuredSources: configuredSources.length,
