@@ -36,6 +36,7 @@ import {
   type CrawlDiagnostics,
   type CrawlMode,
   type CrawlRun,
+  type CrawlRunStage,
   type CrawlRunStatus,
   type CrawlSourceResult,
   type CrawlValidationMode,
@@ -52,6 +53,7 @@ const defaultBalancedInlineValidationTopN = 5;
 
 type ExecuteCrawlPipelineInput = {
   search: SearchDocument;
+  crawlRun?: CrawlRun;
   repository: JobCrawlerRepository;
   discovery: DiscoveryService;
   providers: CrawlProvider[];
@@ -80,9 +82,20 @@ export async function executeCrawlPipeline(
     input.inlineValidationTopN,
     normalizedFilters.crawlMode,
   );
-  const crawlRun = await input.repository.createCrawlRun(search._id, input.now.toISOString(), {
-    validationMode: validationStrategy.mode,
-  });
+  const crawlRun =
+    input.crawlRun ??
+    (await input.repository.createCrawlRun(search._id, input.now.toISOString(), {
+      validationMode: validationStrategy.mode,
+      stage: "queued",
+    }));
+  if (!input.crawlRun) {
+    await input.repository.updateSearchLatestRun(
+      search._id,
+      crawlRun._id,
+      "running",
+      input.now.toISOString(),
+    );
+  }
 
   try {
     const stageTimingsMs = {
@@ -91,9 +104,165 @@ export async function executeCrawlPipeline(
       filtering: 0,
       dedupe: 0,
       persistence: 0,
+      validation: 0,
       responseAssembly: 0,
     };
-    // Boundary: discovery is the only stage that knows where candidate sources come from.
+    const diagnostics = createEmptyDiagnostics();
+    const sourceResultsByProvider = new Map<CrawlSourceResult["provider"], CrawlSourceResult>();
+    const providerSavedJobIds = new Map<CrawlSourceResult["provider"], Set<string>>();
+    const savedJobIds = new Set<string>();
+    const providerDurationsMs: Array<{
+      provider: CrawlSourceResult["provider"];
+      duration: number;
+      sourceCount: number;
+    }> = [];
+    let totalFetchedJobs = 0;
+    let totalMatchedJobs = 0;
+    let firstVisibleResultAtMs: number | undefined;
+    let mutationQueue = Promise.resolve();
+
+    const queueMutation = <T,>(task: () => Promise<T>) => {
+      const run = mutationQueue.then(task, task);
+      mutationQueue = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+    };
+
+    const buildSortedSourceResults = () =>
+      Array.from(sourceResultsByProvider.values()).sort((left, right) =>
+        left.provider.localeCompare(right.provider),
+      );
+
+    const updateRunProgress = async (
+      stage: CrawlRunStage,
+      now = new Date().toISOString(),
+    ) => {
+      diagnostics.jobsAfterDedupe = savedJobIds.size;
+      diagnostics.dedupedOut = Math.max(0, diagnostics.jobsBeforeDedupe - diagnostics.jobsAfterDedupe);
+
+      await input.repository.updateCrawlRunProgress(crawlRun._id, {
+        status: "running",
+        stage,
+        totalFetchedJobs,
+        totalMatchedJobs,
+        dedupedJobs: savedJobIds.size,
+        diagnostics,
+        validationMode: validationStrategy.mode,
+        providerSummary: buildProviderSummary(buildSortedSourceResults()),
+      });
+      await input.repository.updateSearchLatestRun(search._id, crawlRun._id, "running", now);
+    };
+
+    const persistSeedBatch = async (payload: {
+      batchLabel: string;
+      provider?: CrawlSourceResult["provider"];
+      seeds: NormalizedJobSeed[];
+      fetchedCount: number;
+      sourceCount: number;
+      status?: CrawlSourceResult["status"];
+      warningCount?: number;
+      errorMessage?: string;
+      startedAt: string;
+      finishedAt: string;
+      accumulateProviderTotals?: boolean;
+    }) => {
+      const filteringStartedMs = Date.now();
+      const filteredSeeds = filterSeedsForSearch(payload.seeds, normalizedFilters, {
+        deepExperienceInference: input.deepExperienceInference ?? false,
+      });
+      stageTimingsMs.filtering += Date.now() - filteringStartedMs;
+
+      diagnostics.excludedByTitle += filteredSeeds.excludedByTitle;
+      diagnostics.excludedByLocation += filteredSeeds.excludedByLocation;
+      diagnostics.excludedByExperience += filteredSeeds.excludedByExperience;
+      totalMatchedJobs += filteredSeeds.jobs.length;
+
+      const dedupeStartedMs = Date.now();
+      const hydratedJobs = hydrateJobs(filteredSeeds.jobs, input.now);
+      diagnostics.jobsBeforeDedupe += hydratedJobs.length;
+      const dedupedJobs = sortJobs(dedupeJobs(hydratedJobs), normalizedFilters.title);
+      stageTimingsMs.dedupe += Date.now() - dedupeStartedMs;
+
+      const persistenceStartedMs = Date.now();
+      const savedJobs = await input.repository.persistJobs(crawlRun._id, dedupedJobs);
+      stageTimingsMs.persistence += Date.now() - persistenceStartedMs;
+
+      let newVisibleJobCount = 0;
+      for (const job of savedJobs) {
+        if (!savedJobIds.has(job._id)) {
+          savedJobIds.add(job._id);
+          newVisibleJobCount += 1;
+        }
+      }
+
+      if (!firstVisibleResultAtMs && savedJobIds.size > 0) {
+        firstVisibleResultAtMs = Date.now();
+      }
+
+      if (payload.provider) {
+        const existing = sourceResultsByProvider.get(payload.provider);
+        if (existing) {
+          let providerSavedCount = existing.savedCount;
+          let providerSavedSet = providerSavedJobIds.get(payload.provider);
+          if (!providerSavedSet) {
+            providerSavedSet = new Set<string>();
+            providerSavedJobIds.set(payload.provider, providerSavedSet);
+          }
+
+          savedJobs.forEach((job) => {
+            if (!job.sourceProvenance.some((record) => record.sourcePlatform === payload.provider)) {
+              return;
+            }
+
+            providerSavedSet?.add(job._id);
+          });
+          providerSavedCount = providerSavedSet.size;
+
+          const updated = crawlSourceResultSchema.parse({
+            ...existing,
+            status: payload.status ?? existing.status,
+            sourceCount: payload.accumulateProviderTotals ? existing.sourceCount : payload.sourceCount,
+            fetchedCount: payload.accumulateProviderTotals
+              ? existing.fetchedCount + payload.fetchedCount
+              : payload.fetchedCount,
+            matchedCount: payload.accumulateProviderTotals
+              ? existing.matchedCount + filteredSeeds.jobs.length
+              : filteredSeeds.jobs.length,
+            savedCount: providerSavedCount,
+            warningCount: payload.accumulateProviderTotals
+              ? existing.warningCount + (payload.warningCount ?? 0)
+              : payload.warningCount ?? existing.warningCount,
+            errorMessage: payload.errorMessage ?? existing.errorMessage,
+            finishedAt: payload.finishedAt,
+          });
+          sourceResultsByProvider.set(payload.provider, updated);
+          await input.repository.updateCrawlSourceResult(updated);
+        }
+      }
+
+      console.info("[crawl:persistence-batch]", {
+        searchId: search._id,
+        batch: payload.batchLabel,
+        provider: payload.provider ?? "discovery_harvest",
+        sourceCount: payload.sourceCount,
+        fetchedCount: payload.fetchedCount,
+        matchedCount: filteredSeeds.jobs.length,
+        dedupeInputCount: hydratedJobs.length,
+        dedupeOutputCount: dedupedJobs.length,
+        touchedSavedCount: savedJobs.length,
+        newVisibleJobCount,
+        totalVisibleJobCount: savedJobIds.size,
+        warningCount: payload.warningCount ?? 0,
+        errorMessage: payload.errorMessage,
+      });
+
+      await updateRunProgress("crawling", payload.finishedAt);
+    };
+
+    await updateRunProgress("discovering", crawlRun.startedAt);
+
     const discoveryStartedMs = Date.now();
     const discoveryExecution = input.discovery.discoverWithDiagnostics
       ? await input.discovery.discoverWithDiagnostics({
@@ -111,6 +280,7 @@ export async function executeCrawlPipeline(
           diagnostics: undefined,
         };
     stageTimingsMs.discovery = Date.now() - discoveryStartedMs;
+
     const discoveredSources = discoveryExecution.sources;
     const harvestedDiscoveryJobs = discoveryExecution.jobs ?? [];
     const providerSources = selectedProviders.map((provider) =>
@@ -146,212 +316,248 @@ export async function executeCrawlPipeline(
       });
     }
 
-    const diagnostics = createEmptyDiagnostics({
-      discoveredSources: discoveredSources.length,
-      crawledSources: providerSources.reduce((total, sources) => total + sources.length, 0),
-      providersEnqueued: providerRouting.filter((entry) => entry.sourceCount > 0).length,
-      directJobsHarvested: harvestedDiscoveryJobs.length,
-      discovery: discoveryExecution.diagnostics,
-    });
+    Object.assign(
+      diagnostics,
+      createEmptyDiagnostics({
+        discoveredSources: discoveredSources.length,
+        crawledSources: providerSources.reduce((total, sources) => total + sources.length, 0),
+        providersEnqueued: providerRouting.filter((entry) => entry.sourceCount > 0).length,
+        directJobsHarvested: harvestedDiscoveryJobs.length,
+        discovery: discoveryExecution.diagnostics,
+      }),
+    );
 
-    // Boundary: providers only extract from already classified sources.
+    const initializedSourceResults = selectedProviders.map((provider, index) =>
+      crawlSourceResultSchema.parse({
+        _id: createId(),
+        crawlRunId: crawlRun._id,
+        searchId: search._id,
+        provider: provider.provider,
+        status: "running",
+        sourceCount: providerSources[index].length,
+        fetchedCount: 0,
+        matchedCount: 0,
+        savedCount: 0,
+        warningCount: 0,
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+      }),
+    );
+
+    if (initializedSourceResults.length > 0) {
+      initializedSourceResults.forEach((sourceResult) => {
+        sourceResultsByProvider.set(sourceResult.provider, sourceResult);
+      });
+      await input.repository.saveCrawlSourceResults(initializedSourceResults);
+    }
+
+    await updateRunProgress("crawling");
+
+    if (harvestedDiscoveryJobs.length > 0) {
+      await queueMutation(() =>
+        persistSeedBatch({
+          batchLabel: "discovery_harvest",
+          seeds: harvestedDiscoveryJobs,
+          fetchedCount: 0,
+          sourceCount: 0,
+          startedAt: crawlRun.startedAt,
+          finishedAt: new Date().toISOString(),
+        }),
+      );
+    }
+
     const providerExecutionStartedMs = Date.now();
-    const providerResults = await Promise.all(
+    await Promise.all(
       selectedProviders.map(async (provider, index) => {
         const startedAt = new Date().toISOString();
         const startedMs = Date.now();
+        const sourcesForProvider = providerSources[index];
+        let emittedLiveBatch = false;
+
+        const runningSourceResult = sourceResultsByProvider.get(provider.provider);
+        if (runningSourceResult) {
+          const updatedRunningResult = {
+            ...runningSourceResult,
+            startedAt,
+            finishedAt: startedAt,
+            sourceCount: sourcesForProvider.length,
+          };
+          sourceResultsByProvider.set(provider.provider, updatedRunningResult);
+          await input.repository.updateCrawlSourceResult(updatedRunningResult);
+        }
 
         try {
-          const value = await provider.crawlSources(
+          const result = await provider.crawlSources(
             {
               fetchImpl: input.fetchImpl,
               now: input.now,
               filters: normalizedFilters,
+              onBatch: async (batch) => {
+                emittedLiveBatch = true;
+                totalFetchedJobs += batch.fetchedCount;
+                await queueMutation(() =>
+                  persistSeedBatch({
+                    batchLabel: `${batch.provider}:batch`,
+                    provider: batch.provider,
+                    seeds: batch.jobs,
+                    fetchedCount: batch.fetchedCount,
+                    sourceCount: batch.sourceCount ?? sourcesForProvider.length,
+                    status: "running",
+                    startedAt,
+                    finishedAt: new Date().toISOString(),
+                    accumulateProviderTotals: true,
+                  }),
+                );
+              },
             },
-            providerSources[index],
+            sourcesForProvider,
           );
 
-          return {
-            status: "fulfilled" as const,
-            value,
-            startedAt,
-            finishedAt: new Date().toISOString(),
-            durationMs: Date.now() - startedMs,
-          };
+          const finishedAt = new Date().toISOString();
+          const durationMs = Date.now() - startedMs;
+          providerDurationsMs.push({
+            provider: result.provider,
+            duration: durationMs,
+            sourceCount: result.sourceCount ?? sourcesForProvider.length,
+          });
+
+          if (result.status === "failed" || result.status === "partial") {
+            diagnostics.providerFailures += 1;
+          }
+
+          if (!emittedLiveBatch) {
+            totalFetchedJobs += result.fetchedCount;
+
+            await queueMutation(() =>
+              persistSeedBatch({
+                batchLabel: result.provider,
+                provider: result.provider,
+                seeds: result.jobs,
+                fetchedCount: result.fetchedCount,
+                sourceCount: result.sourceCount ?? sourcesForProvider.length,
+                status: result.status,
+                warningCount: result.warningCount,
+                errorMessage: result.errorMessage,
+                startedAt,
+                finishedAt,
+              }),
+            );
+          } else {
+            await queueMutation(async () => {
+              const existing = sourceResultsByProvider.get(result.provider);
+              if (!existing) {
+                return;
+              }
+
+              const updated = crawlSourceResultSchema.parse({
+                ...existing,
+                status: result.status,
+                warningCount: result.warningCount ?? existing.warningCount,
+                errorMessage: result.errorMessage ?? existing.errorMessage,
+                finishedAt,
+              });
+              sourceResultsByProvider.set(result.provider, updated);
+              await input.repository.updateCrawlSourceResult(updated);
+              await updateRunProgress("crawling", finishedAt);
+            });
+          }
         } catch (reason) {
-          return {
-            status: "rejected" as const,
-            reason,
-            startedAt,
-            finishedAt: new Date().toISOString(),
-            durationMs: Date.now() - startedMs,
-          };
+          const finishedAt = new Date().toISOString();
+          const durationMs = Date.now() - startedMs;
+          providerDurationsMs.push({
+            provider: provider.provider,
+            duration: durationMs,
+            sourceCount: sourcesForProvider.length,
+          });
+
+          await queueMutation(async () => {
+            diagnostics.providerFailures += 1;
+            const failedResult = crawlSourceResultSchema.parse({
+              _id:
+                sourceResultsByProvider.get(provider.provider)?._id ??
+                createId(),
+              crawlRunId: crawlRun._id,
+              searchId: search._id,
+              provider: provider.provider,
+              status: "failed",
+              sourceCount: sourcesForProvider.length,
+              fetchedCount: 0,
+              matchedCount: 0,
+              savedCount: 0,
+              warningCount: 1,
+              errorMessage:
+                reason instanceof Error
+                  ? reason.message
+                  : `Provider ${provider.provider} failed unexpectedly.`,
+              startedAt,
+              finishedAt,
+            });
+            sourceResultsByProvider.set(provider.provider, failedResult);
+            await input.repository.updateCrawlSourceResult(failedResult);
+            await updateRunProgress("crawling", finishedAt);
+          });
         }
       }),
     );
+    await mutationQueue;
     stageTimingsMs.providerExecution = Date.now() - providerExecutionStartedMs;
 
-    const sourceResults: CrawlSourceResult[] = [];
-    const matchedSeeds: Array<{ provider: CrawlSourceResult["provider"]; seed: NormalizedJobSeed }> = [];
-    let totalFetchedJobs = 0;
-    let totalMatchedJobs = 0;
-    const filteringStartedMs = Date.now();
+    let savedJobs = await input.repository.getJobsByCrawlRun(crawlRun._id);
+    if (validationStrategy.mode === "deferred") {
+      diagnostics.validationDeferred = savedJobs.length;
+    } else if (savedJobs.length > 0) {
+      await updateRunProgress("validating");
+      const validationStartedMs = Date.now();
+      const {
+        jobs: jobsReadyToPersist,
+        validations: inlineValidations,
+        deferredCount,
+      } = await applyInlineValidationStrategy(
+        savedJobs,
+        validationStrategy,
+        input.repository,
+        input.fetchImpl,
+        input.now,
+      );
+      diagnostics.validationDeferred = deferredCount;
+      const validatedJobs = await input.repository.persistJobs(crawlRun._id, jobsReadyToPersist);
+      stageTimingsMs.validation = Date.now() - validationStartedMs;
 
-    if (harvestedDiscoveryJobs.length > 0) {
-      const filteredDiscoveryJobs = filterSeedsForSearch(harvestedDiscoveryJobs, normalizedFilters, {
-        deepExperienceInference: input.deepExperienceInference ?? false,
-      });
-      diagnostics.excludedByTitle += filteredDiscoveryJobs.excludedByTitle;
-      diagnostics.excludedByLocation += filteredDiscoveryJobs.excludedByLocation;
-      diagnostics.excludedByExperience += filteredDiscoveryJobs.excludedByExperience;
-      totalMatchedJobs += filteredDiscoveryJobs.jobs.length;
-      filteredDiscoveryJobs.jobs.forEach((seed) => {
-        matchedSeeds.push({ provider: seed.sourcePlatform, seed });
-      });
-    }
+      const validationJobIds = resolveValidationJobIds(validatedJobs, jobsReadyToPersist, inlineValidations);
+      for (let index = 0; index < inlineValidations.length; index += 1) {
+        const jobId = validationJobIds[index];
+        if (!jobId) {
+          continue;
+        }
 
-    for (let index = 0; index < providerResults.length; index += 1) {
-      const provider = selectedProviders[index];
-      const sourcesForProvider = providerSources[index];
-      const result = providerResults[index];
-
-      if (result.status === "rejected") {
-        diagnostics.providerFailures += 1;
-        sourceResults.push(
-          crawlSourceResultSchema.parse({
-            _id: createId(),
-            crawlRunId: crawlRun._id,
-            searchId: search._id,
-            provider: provider.provider,
-            status: "failed",
-            sourceCount: sourcesForProvider.length,
-            fetchedCount: 0,
-            matchedCount: 0,
-            savedCount: 0,
-            warningCount: 1,
-            errorMessage:
-              result.reason instanceof Error
-                ? result.reason.message
-                : `Provider ${provider.provider} failed unexpectedly.`,
-            startedAt: result.startedAt,
-            finishedAt: result.finishedAt,
-          }),
+        await input.repository.saveLinkValidation(
+          toStoredValidation(jobId, inlineValidations[index].validation),
         );
-        continue;
       }
 
-      totalFetchedJobs += result.value.fetchedCount;
-      if (result.value.status === "failed" || result.value.status === "partial") {
-        diagnostics.providerFailures += 1;
-      }
-
-      const filteredSeeds = filterSeedsForSearch(result.value.jobs, normalizedFilters, {
-        deepExperienceInference: input.deepExperienceInference ?? false,
-      });
-      // Counters are accumulated at the first stage that excludes a seed so title,
-      // location, and experience buckets stay mutually exclusive and easy to explain.
-      diagnostics.excludedByTitle += filteredSeeds.excludedByTitle;
-      diagnostics.excludedByLocation += filteredSeeds.excludedByLocation;
-      diagnostics.excludedByExperience += filteredSeeds.excludedByExperience;
-      totalMatchedJobs += filteredSeeds.jobs.length;
-
-      filteredSeeds.jobs.forEach((seed) => {
-        matchedSeeds.push({ provider: provider.provider, seed });
-      });
-
-      sourceResults.push(
-        crawlSourceResultSchema.parse({
-          _id: createId(),
-            crawlRunId: crawlRun._id,
-            searchId: search._id,
-            provider: result.value.provider,
-            status: result.value.status,
-            sourceCount: result.value.sourceCount ?? sourcesForProvider.length,
-            fetchedCount: result.value.fetchedCount,
-            matchedCount: filteredSeeds.jobs.length,
-            savedCount: 0,
-            warningCount: result.value.warningCount ?? 0,
-            errorMessage: result.value.errorMessage,
-            startedAt: result.startedAt,
-            finishedAt: result.finishedAt,
-        }),
-      );
-    }
-    stageTimingsMs.filtering = Date.now() - filteringStartedMs;
-
-    // Boundary: hydration/dedupe/persistence work on one shared normalized model.
-    //
-    // Link validation is deferred by default because HEAD + GET + stale-page scanning
-    // adds a lot of latency and network noise compared with normalizing and saving the
-    // matched jobs themselves. We still support explicit inline validation strategies
-    // for targeted use cases, but the standard crawl request keeps the hot path light.
-    const dedupeStartedMs = Date.now();
-    const hydratedJobs = hydrateJobs(
-      matchedSeeds.map((entry) => entry.seed),
-      input.now,
-    );
-    diagnostics.jobsBeforeDedupe = hydratedJobs.length;
-    const dedupedJobs = sortJobs(dedupeJobs(hydratedJobs), normalizedFilters.title);
-    diagnostics.jobsAfterDedupe = dedupedJobs.length;
-    // Dedupe happens after all provider/filter stages so this counter reflects true
-    // overlap between otherwise matchable seeds, not filter drop-offs.
-    diagnostics.dedupedOut = Math.max(0, hydratedJobs.length - dedupedJobs.length);
-    stageTimingsMs.dedupe = Date.now() - dedupeStartedMs;
-    const persistenceStartedMs = Date.now();
-    const {
-      jobs: jobsReadyToPersist,
-      validations: inlineValidations,
-      deferredCount,
-    } = await applyInlineValidationStrategy(
-      dedupedJobs,
-      validationStrategy,
-      input.repository,
-      input.fetchImpl,
-      input.now,
-    );
-    diagnostics.validationDeferred = deferredCount;
-    const savedJobs = dedupeStoredJobs(
-      await input.repository.persistJobs(crawlRun._id, jobsReadyToPersist),
-    );
-
-    for (const sourceResult of sourceResults) {
-      const savedCount = savedJobs.filter((job) =>
-        job.sourceProvenance.some((record) => record.sourcePlatform === sourceResult.provider),
-      ).length;
-      sourceResult.savedCount = savedCount;
+      validatedJobs.forEach((job) => savedJobIds.add(job._id));
+      savedJobs = await input.repository.getJobsByCrawlRun(crawlRun._id);
+      await updateRunProgress("validating");
     }
 
-    await input.repository.saveCrawlSourceResults(sourceResults);
+    await updateRunProgress("finalizing");
 
-    for (const inlineValidation of inlineValidations) {
-      await input.repository.saveLinkValidation(
-        toStoredValidation(
-          savedJobs[inlineValidation.jobIndex]._id,
-          inlineValidation.validation,
-        ),
-      );
-    }
-
-    const status = deriveRunStatus(sourceResults);
+    const sourceResults = buildSortedSourceResults();
+    const status = deriveRunStatus(sourceResults, savedJobIds.size);
     const finishedAt = new Date().toISOString();
 
     await input.repository.finalizeCrawlRun(crawlRun._id, {
       status,
+      stage: "finalizing",
       totalFetchedJobs,
       totalMatchedJobs,
-      dedupedJobs: savedJobs.length,
+      dedupedJobs: savedJobIds.size,
       diagnostics,
       validationMode: validationStrategy.mode,
       providerSummary: buildProviderSummary(sourceResults),
       finishedAt,
     });
-    await input.repository.updateSearchLatestRun(
-      search._id,
-      crawlRun._id,
-      status,
-      finishedAt,
-    );
-    stageTimingsMs.persistence = Date.now() - persistenceStartedMs;
+    await input.repository.updateSearchLatestRun(search._id, crawlRun._id, status, finishedAt);
 
     const responseAssemblyStartedMs = Date.now();
     const finalizedRun = (await input.repository.getCrawlRun(crawlRun._id)) as CrawlRun;
@@ -364,30 +570,27 @@ export async function executeCrawlPipeline(
       },
       crawlRun: finalizedRun,
       sourceResults,
-      jobs: savedJobs,
+      jobs: sortJobs(
+        dedupeStoredJobs(savedJobs).map(applyResolvedExperienceLevel),
+        normalizedFilters.title,
+      ),
       diagnostics: finalizedRun.diagnostics,
     });
     stageTimingsMs.responseAssembly = Date.now() - responseAssemblyStartedMs;
-
-    const providerDurationsMs = sourceResults.map((sourceResult) => ({
-      provider: sourceResult.provider,
-      duration:
-        Math.max(
-          0,
-          new Date(sourceResult.finishedAt).getTime() -
-            new Date(sourceResult.startedAt).getTime(),
-        ) || 0,
-    }));
 
     console.info("[crawl:summary]", {
       searchId: search._id,
       fetchedCount: totalFetchedJobs,
       directJobsHarvested: harvestedDiscoveryJobs.length,
       matchedCount: totalMatchedJobs,
-      jobsBeforeDedupe: hydratedJobs.length,
-      jobsAfterDedupe: dedupedJobs.length,
-      savedCount: savedJobs.length,
+      jobsBeforeDedupe: diagnostics.jobsBeforeDedupe,
+      jobsAfterDedupe: diagnostics.jobsAfterDedupe,
+      savedCount: savedJobIds.size,
       providerDurationsMs,
+      timeToFirstVisibleResultMs:
+        typeof firstVisibleResultAtMs === "number"
+          ? firstVisibleResultAtMs - crawlStartedMs
+          : undefined,
     });
     console.info("[crawl:timings]", {
       searchId: search._id,
@@ -396,6 +599,7 @@ export async function executeCrawlPipeline(
       filteringMs: stageTimingsMs.filtering,
       dedupeMs: stageTimingsMs.dedupe,
       persistenceMs: stageTimingsMs.persistence,
+      validationMs: stageTimingsMs.validation,
       responseAssemblyMs: stageTimingsMs.responseAssembly,
       totalMs: Date.now() - crawlStartedMs,
     });
@@ -407,6 +611,7 @@ export async function executeCrawlPipeline(
 
     await input.repository.finalizeCrawlRun(crawlRun._id, {
       status: "failed",
+      stage: "finalizing",
       totalFetchedJobs: 0,
       totalMatchedJobs: 0,
       dedupedJobs: 0,
@@ -827,14 +1032,63 @@ function sameExperienceClassification(
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
-function deriveRunStatus(sourceResults: CrawlSourceResult[]): CrawlRunStatus {
+function resolveValidationJobIds(
+  savedJobs: JobListing[],
+  jobsReadyToPersist: PersistableJob[],
+  inlineValidations: InlineValidationResult[],
+) {
+  const byCanonicalUrl = new Map<string, string>();
+  const byResolvedUrl = new Map<string, string>();
+  const byApplyUrl = new Map<string, string>();
+  const bySourceLookupKey = new Map<string, string>();
+  const byContentFingerprint = new Map<string, string>();
+
+  savedJobs.forEach((job) => {
+    if (job.canonicalUrl) {
+      byCanonicalUrl.set(job.canonicalUrl, job._id);
+    }
+
+    if (job.resolvedUrl) {
+      byResolvedUrl.set(job.resolvedUrl, job._id);
+    }
+
+    byApplyUrl.set(job.applyUrl, job._id);
+    byContentFingerprint.set(job.contentFingerprint, job._id);
+    job.sourceLookupKeys.forEach((lookupKey) => {
+      bySourceLookupKey.set(lookupKey, job._id);
+    });
+  });
+
+  return inlineValidations.map(({ jobIndex }) => {
+    const job = jobsReadyToPersist[jobIndex];
+    if (!job) {
+      return undefined;
+    }
+
+    return (
+      (job.canonicalUrl ? byCanonicalUrl.get(job.canonicalUrl) : undefined) ??
+      (job.resolvedUrl ? byResolvedUrl.get(job.resolvedUrl) : undefined) ??
+      byApplyUrl.get(job.applyUrl) ??
+      job.sourceLookupKeys.map((lookupKey) => bySourceLookupKey.get(lookupKey)).find(Boolean) ??
+      byContentFingerprint.get(job.contentFingerprint)
+    );
+  });
+}
+
+function deriveRunStatus(
+  sourceResults: CrawlSourceResult[],
+  savedJobCount: number,
+): CrawlRunStatus {
   const hasFailures = sourceResults.some((result) => result.status === "failed");
   const hasPartials = sourceResults.some((result) => result.status === "partial");
   const hasSupported = sourceResults.some(
-    (result) => result.status === "success" || result.status === "partial",
+    (result) =>
+      result.status === "success" ||
+      result.status === "partial" ||
+      result.status === "running",
   );
 
-  if (hasFailures && !hasSupported) {
+  if (hasFailures && !hasSupported && savedJobCount === 0) {
     return "failed";
   }
 

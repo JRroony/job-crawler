@@ -5,20 +5,40 @@ const path = require("node:path");
 const process = require("node:process");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
+const CLI_ARGS = parseCliArgs(process.argv.slice(2));
 
-const configuredPlatforms = parseCsv(process.env.VERIFY_CRAWL_PLATFORMS) ?? ["greenhouse"];
+const configuredPlatforms =
+  parseCsv(CLI_ARGS.platforms) ??
+  parseCsv(process.env.VERIFY_CRAWL_PLATFORMS) ??
+  ["greenhouse"];
 
 const VERIFY_CRAWL_CONFIG = {
   // Configure the acceptance-test query here.
   query: {
-    title: process.env.VERIFY_CRAWL_TITLE ?? "software engineer",
-    country: process.env.VERIFY_CRAWL_COUNTRY ?? "United States",
+    title: CLI_ARGS.title ?? process.env.VERIFY_CRAWL_TITLE ?? "software engineer",
+    country: CLI_ARGS.country ?? process.env.VERIFY_CRAWL_COUNTRY ?? "United States",
     // Configure the platform/source scope here. Implemented families today:
     // greenhouse, lever, ashby, company_page
     platforms: configuredPlatforms,
-    crawlMode: process.env.VERIFY_CRAWL_MODE ?? "fast",
+    crawlMode: CLI_ARGS.mode ?? process.env.VERIFY_CRAWL_MODE ?? "fast",
   },
-  sampleSize: parsePositiveInt(process.env.VERIFY_CRAWL_SAMPLE_SIZE, 5),
+  sampleSize: parsePositiveInt(
+    CLI_ARGS["sample-size"] ?? process.env.VERIFY_CRAWL_SAMPLE_SIZE,
+    5,
+  ),
+  createResponseBudgetMs: parsePositiveInt(
+    CLI_ARGS["create-response-budget-ms"] ??
+      process.env.VERIFY_CRAWL_CREATE_RESPONSE_BUDGET_MS,
+    2000,
+  ),
+  pollIntervalMs: parsePositiveInt(
+    CLI_ARGS["poll-interval-ms"] ?? process.env.VERIFY_CRAWL_POLL_INTERVAL_MS,
+    1500,
+  ),
+  pollTimeoutMs: parsePositiveInt(
+    CLI_ARGS["poll-timeout-ms"] ?? process.env.VERIFY_CRAWL_POLL_TIMEOUT_MS,
+    90000,
+  ),
   // Configure which API endpoint the verifier calls here.
   // - "route_handler" calls the Next.js route modules directly.
   // - "http" calls a running app server at VERIFY_CRAWL_API_BASE_URL.
@@ -41,6 +61,12 @@ async function main() {
     invalidJobsCount: 0,
     duplicateCount: 0,
     apiValidationPassed: false,
+    createResponseMs: 0,
+    firstVisibleResultMs: null,
+    terminalStatus: "unknown",
+    maxJobsSeen: 0,
+    sawVisibleJobsWhileRunning: false,
+    pollCount: 0,
     finalStatus: "FAIL",
   };
   const failures = [];
@@ -61,7 +87,9 @@ async function main() {
 
     const query = queryResult.data;
     const apiClient = loadApiClient();
+    const createStartedAt = Date.now();
     const createOutcome = await withCapturedConsole(() => apiClient.createSearch(query));
+    summary.createResponseMs = Date.now() - createStartedAt;
     diagnostics.push(...createOutcome.logs);
 
     const createCheck = await validateEndpointResponse(
@@ -71,7 +99,7 @@ async function main() {
       },
       sharedModules,
       "Create search",
-      { requireJobs: true },
+      { requireJobs: false },
     );
 
     if (!createCheck.ok) {
@@ -84,52 +112,52 @@ async function main() {
       return finish(summary, failures, diagnostics);
     }
 
-    const createAnalysis = updateSummaryFromJobs(summary, createCheck.jobs, sharedModules);
-    failures.push(...createAnalysis.sampleValidation.failures);
-    if (createAnalysis.duplicateOnlyReason) {
-      failures.push(createAnalysis.duplicateOnlyReason);
+    if (summary.createResponseMs > VERIFY_CRAWL_CONFIG.createResponseBudgetMs) {
+      failures.push(
+        `Create search response took ${summary.createResponseMs}ms, which exceeded the ${VERIFY_CRAWL_CONFIG.createResponseBudgetMs}ms budget.`,
+      );
     }
-    failures.push(...createCheck.failures);
 
     if (!hasNonEmptyString(createCheck.searchId)) {
       failures.push("Create search response did not include a search id.");
       return finish(summary, failures, diagnostics);
     }
 
-    const detailsOutcome = await withCapturedConsole(() =>
-      apiClient.getSearchDetails(createCheck.searchId),
-    );
-    diagnostics.push(...detailsOutcome.logs);
-
-    const detailsCheck = await validateEndpointResponse(
-      {
-        response: detailsOutcome.value.response,
-        payload: detailsOutcome.value.payload,
-      },
+    const detailsPoll = await pollSearchDetails(
+      apiClient,
+      createCheck.searchId,
       sharedModules,
-      "Search details",
-      { requireJobs: true },
     );
+    diagnostics.push(...detailsPoll.logs);
+    failures.push(...detailsPoll.failures);
+    summary.firstVisibleResultMs = detailsPoll.firstVisibleResultMs;
+    summary.terminalStatus = detailsPoll.terminalStatus;
+    summary.maxJobsSeen = detailsPoll.maxJobsSeen;
+    summary.sawVisibleJobsWhileRunning = detailsPoll.sawVisibleJobsWhileRunning;
+    summary.pollCount = detailsPoll.pollCount;
 
-    failures.push(...detailsCheck.failures);
-
-    if (detailsCheck.ok) {
-      if (detailsCheck.searchId !== createCheck.searchId) {
+    if (detailsPoll.detailsCheck?.ok) {
+      if (detailsPoll.detailsCheck.searchId !== createCheck.searchId) {
         failures.push(
-          `Search details returned a different search id (${String(detailsCheck.searchId)}) than the create search response (${createCheck.searchId}).`,
+          `Search details returned a different search id (${String(detailsPoll.detailsCheck.searchId)}) than the create search response (${createCheck.searchId}).`,
         );
       }
 
-      if (detailsCheck.jobs.length < 1) {
-        failures.push("Search details endpoint returned zero jobs.");
+      const detailsAnalysis = updateSummaryFromJobs(
+        summary,
+        detailsPoll.detailsCheck.jobs,
+        sharedModules,
+      );
+      failures.push(...detailsAnalysis.sampleValidation.failures);
+      if (detailsAnalysis.duplicateOnlyReason) {
+        failures.push(detailsAnalysis.duplicateOnlyReason);
       }
     }
 
     summary.apiValidationPassed =
       createCheck.ok &&
-      detailsCheck.ok &&
-      createCheck.jobs.length > 0 &&
-      detailsCheck.jobs.length > 0;
+      Boolean(detailsPoll.detailsCheck?.ok) &&
+      summary.maxJobsSeen > 0;
   } catch (error) {
     failures.push(formatUnexpectedError(error));
   }
@@ -370,6 +398,16 @@ function printSummary(summary, failures, diagnostics) {
     `query: ${VERIFY_CRAWL_CONFIG.query.title} | ${VERIFY_CRAWL_CONFIG.query.country ?? "anywhere"} | ${VERIFY_CRAWL_CONFIG.query.platforms.join(", ")}`,
   );
   console.log(`api mode: ${VERIFY_CRAWL_CONFIG.api.mode}`);
+  console.log(`create response ms: ${summary.createResponseMs}`);
+  console.log(
+    `first visible result ms: ${summary.firstVisibleResultMs ?? "none"}`,
+  );
+  console.log(`terminal status: ${summary.terminalStatus}`);
+  console.log(`max jobs seen: ${summary.maxJobsSeen}`);
+  console.log(
+    `visible jobs while running: ${summary.sawVisibleJobsWhileRunning ? "yes" : "no"}`,
+  );
+  console.log(`poll count: ${summary.pollCount}`);
   console.log(`total jobs found: ${summary.totalJobsFound}`);
   console.log(
     `sampled valid jobs count: ${summary.sampledValidJobsCount}/${sampledCount || 0}`,
@@ -583,6 +621,12 @@ function extractSearchId(payload) {
   return readNonEmptyString(payload?.search?._id);
 }
 
+function extractCrawlRun(payload) {
+  return payload?.crawlRun && typeof payload.crawlRun === "object"
+    ? payload.crawlRun
+    : undefined;
+}
+
 function extractErrorMessage(payload) {
   const readableErrors = Array.isArray(payload?.readableErrors)
     ? payload.readableErrors.filter(hasNonEmptyString)
@@ -642,6 +686,29 @@ function parseCsv(value) {
   return items.length > 0 ? items : undefined;
 }
 
+function parseCliArgs(argv) {
+  const parsed = {};
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const current = argv[index];
+    if (!current.startsWith("--")) {
+      continue;
+    }
+
+    const key = current.slice(2);
+    const nextValue = argv[index + 1];
+    if (!nextValue || nextValue.startsWith("--")) {
+      parsed[key] = "true";
+      continue;
+    }
+
+    parsed[key] = nextValue;
+    index += 1;
+  }
+
+  return parsed;
+}
+
 function parsePositiveInt(value, fallback) {
   if (!hasNonEmptyString(value)) {
     return fallback;
@@ -697,9 +764,113 @@ function dedupeMessages(messages) {
   return Array.from(new Set(messages.filter(Boolean)));
 }
 
+async function pollSearchDetails(apiClient, searchId, sharedModules) {
+  const startedAt = Date.now();
+  const logs = [];
+  const failures = [];
+  let firstVisibleResultMs = null;
+  let terminalStatus = "timeout";
+  let maxJobsSeen = 0;
+  let pollCount = 0;
+  let sawVisibleJobsWhileRunning = false;
+  let detailsCheck;
+
+  while (Date.now() - startedAt <= VERIFY_CRAWL_CONFIG.pollTimeoutMs) {
+    pollCount += 1;
+
+    const detailsOutcome = await withCapturedConsole(() =>
+      apiClient.getSearchDetails(searchId),
+    );
+    logs.push(...detailsOutcome.logs);
+
+    detailsCheck = await validateEndpointResponse(
+      {
+        response: detailsOutcome.value.response,
+        payload: detailsOutcome.value.payload,
+      },
+      sharedModules,
+      `Search details poll ${pollCount}`,
+      { requireJobs: false },
+    );
+
+    const jobs = detailsCheck.jobs;
+    const crawlRun = extractCrawlRun(detailsOutcome.value.payload);
+    maxJobsSeen = Math.max(maxJobsSeen, jobs.length);
+
+    if (jobs.length > 0 && firstVisibleResultMs == null) {
+      firstVisibleResultMs = Date.now() - startedAt;
+    }
+
+    if (crawlRun?.status === "running" && jobs.length > 0) {
+      sawVisibleJobsWhileRunning = true;
+    }
+
+    console.log(
+      `[verify-crawl:poll] #${pollCount} status=${crawlRun?.status ?? "unknown"} stage=${crawlRun?.stage ?? "unknown"} jobs=${jobs.length} fetched=${crawlRun?.totalFetchedJobs ?? 0} matched=${crawlRun?.totalMatchedJobs ?? 0} saved=${crawlRun?.dedupedJobs ?? 0}`,
+    );
+
+    if (!detailsCheck.ok) {
+      failures.push(...detailsCheck.failures);
+      break;
+    }
+
+    if (isTerminalStatus(crawlRun?.status)) {
+      terminalStatus = crawlRun.status;
+      break;
+    }
+
+    await wait(VERIFY_CRAWL_CONFIG.pollIntervalMs);
+  }
+
+  if (!detailsCheck) {
+    failures.push("Search details polling did not produce a response.");
+    return {
+      logs,
+      failures,
+      detailsCheck,
+      firstVisibleResultMs,
+      terminalStatus,
+      maxJobsSeen,
+      sawVisibleJobsWhileRunning,
+      pollCount,
+    };
+  }
+
+  if (!isTerminalStatus(terminalStatus) && maxJobsSeen < 1) {
+    failures.push(
+      `Polling timed out after ${VERIFY_CRAWL_CONFIG.pollTimeoutMs}ms without surfacing any jobs.`,
+    );
+  }
+
+  return {
+    logs,
+    failures,
+    detailsCheck,
+    firstVisibleResultMs,
+    terminalStatus,
+    maxJobsSeen,
+    sawVisibleJobsWhileRunning,
+    pollCount,
+  };
+}
+
+function isTerminalStatus(status) {
+  return status === "completed" || status === "partial" || status === "failed";
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 main().catch((error) => {
   console.log("verify-crawl");
   console.log(`query: ${VERIFY_CRAWL_CONFIG.query.title} | ${VERIFY_CRAWL_CONFIG.query.country ?? "anywhere"} | ${VERIFY_CRAWL_CONFIG.query.platforms.join(", ")}`);
+  console.log("create response ms: 0");
+  console.log("first visible result ms: none");
+  console.log("terminal status: unknown");
+  console.log("max jobs seen: 0");
+  console.log("visible jobs while running: no");
+  console.log("poll count: 0");
   console.log("total jobs found: 0");
   console.log("sampled valid jobs count: 0/0");
   console.log("invalid jobs count: 0");

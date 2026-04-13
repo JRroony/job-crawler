@@ -227,7 +227,18 @@ export const crawlRunStatuses = [
 
 export const crawlRunStatusSchema = z.enum(crawlRunStatuses);
 
+export const crawlRunStages = [
+  "queued",
+  "discovering",
+  "crawling",
+  "validating",
+  "finalizing",
+] as const;
+
+export const crawlRunStageSchema = z.enum(crawlRunStages);
+
 export const crawlSourceStatuses = [
+  "running",
   "success",
   "partial",
   "failed",
@@ -476,6 +487,7 @@ export const crawlRunDocumentSchema = z.object({
   startedAt: z.string().datetime(),
   finishedAt: nullableOptional(z.string().datetime()),
   status: crawlRunStatusSchema,
+  stage: nullableOptional(crawlRunStageSchema),
   discoveredSourcesCount: z.number().int().nonnegative().default(0),
   crawledSourcesCount: z.number().int().nonnegative().default(0),
   totalFetchedJobs: z.number().int().nonnegative(),
@@ -576,6 +588,7 @@ export type LinkValidationResult = z.infer<typeof linkValidationResultSchema>;
 export type SourceProvenance = z.infer<typeof sourceProvenanceSchema>;
 export type ProviderPlatform = z.infer<typeof providerPlatformSchema>;
 export type CrawlRunStatus = z.infer<typeof crawlRunStatusSchema>;
+export type CrawlRunStage = z.infer<typeof crawlRunStageSchema>;
 export type CrawlSourceStatus = z.infer<typeof crawlSourceStatusSchema>;
 export type LinkStatus = z.infer<typeof linkStatusSchema>;
 export type CompanyPageSourceConfig = z.infer<typeof companyPageSourceConfigSchema>;

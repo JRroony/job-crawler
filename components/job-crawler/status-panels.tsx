@@ -1,5 +1,7 @@
 "use client";
 
+import { labelForProviderPlatform, labelForProviderStatus } from "@/components/job-crawler/ui-config";
+import type { CrawlResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type NoticeTone = "amber" | "tide";
@@ -54,9 +56,9 @@ export function StatePanel(props: {
 
       {props.highlights?.length ? (
         <div className="mx-auto mt-6 grid max-w-4xl gap-3 text-left sm:grid-cols-2">
-          {props.highlights.map((highlight) => (
+          {props.highlights.map((highlight, index) => (
             <div
-              key={highlight}
+              key={`state-highlight-${index}`}
               className="rounded-[22px] border border-ink/8 bg-white px-4 py-4 text-sm leading-6 text-ink"
             >
               {highlight}
@@ -128,9 +130,9 @@ export function NoticeBanner(props: {
 
       {props.highlights?.length ? (
         <div className="mt-4 grid gap-3 md:grid-cols-2">
-          {props.highlights.map((highlight) => (
+          {props.highlights.map((highlight, index) => (
             <div
-              key={highlight}
+              key={`notice-highlight-${index}`}
               className="rounded-[20px] border border-white/70 bg-white/70 px-4 py-3 text-sm leading-6 text-ink"
             >
               {highlight}
@@ -142,12 +144,17 @@ export function NoticeBanner(props: {
   );
 }
 
-export function LoadingPanel() {
-  const steps = [
-    "Discovering public job sources",
-    "Fetching matching jobs from enabled platforms",
-    "Normalizing and preparing the result list",
-  ];
+export function LoadingPanel(props: {
+  stage?: CrawlResponse["crawlRun"]["stage"];
+  foundCount?: number;
+  fetchedCount?: number;
+  matchedCount?: number;
+  providerSummary?: CrawlResponse["crawlRun"]["providerSummary"];
+}) {
+  const stageLabel = describeStage(props.stage);
+  const providerSummary = props.providerSummary ?? [];
+  const activeProviders = providerSummary.filter((provider) => provider.sourceCount > 0);
+  const hasVisibleResults = (props.foundCount ?? 0) > 0;
 
   return (
     <section className="rounded-[28px] border border-ink/8 bg-white p-8 shadow-[0_18px_48px_rgba(15,23,42,0.05)]">
@@ -155,25 +162,49 @@ export function LoadingPanel() {
         Search in progress
       </div>
       <h2 className="mt-3 text-2xl font-semibold text-ink">
-        Gathering fresh job results
+        {hasVisibleResults ? "Showing partial results while the crawl continues" : "Gathering fresh job results"}
       </h2>
+      <p className="mt-3 max-w-3xl text-sm leading-6 text-slate">
+        {stageLabel}
+        {(props.foundCount ?? 0) > 0
+          ? ` ${props.foundCount} saved job${props.foundCount === 1 ? "" : "s"} are already available to review.`
+          : ""}
+      </p>
+      <div className="mt-4 flex flex-wrap gap-2 text-sm text-slate">
+        <span className="rounded-full border border-ink/10 bg-mist/35 px-3 py-1.5">
+          {props.fetchedCount ?? 0} fetched
+        </span>
+        <span className="rounded-full border border-ink/10 bg-mist/35 px-3 py-1.5">
+          {props.matchedCount ?? 0} matched
+        </span>
+        <span className="rounded-full border border-ink/10 bg-mist/35 px-3 py-1.5">
+          {props.foundCount ?? 0} saved
+        </span>
+      </div>
       <div className="mt-5 grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
         <div className="space-y-3">
-          {steps.map((step, index) => (
+          {(activeProviders.length > 0 ? activeProviders : providerSummary).slice(0, 4).map((provider) => (
             <div
-              key={step}
+              key={`${provider.provider}-${provider.status}`}
               className="rounded-[22px] border border-ink/10 bg-sand/45 px-4 py-4"
             >
-              <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-slate">
-                Step {index + 1}
+              <div className="flex items-center justify-between gap-3">
+                <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-slate">
+                  {labelForProviderPlatform(provider.provider)}
+                </div>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/75">
+                  {labelForProviderStatus(provider.status)}
+                </div>
               </div>
-              <div className="mt-2 text-sm font-medium leading-6 text-ink">{step}</div>
+              <div className="mt-2 text-sm font-medium leading-6 text-ink">
+                {provider.sourceCount} source{provider.sourceCount === 1 ? "" : "s"} • {provider.fetchedCount} fetched • {provider.savedCount} saved
+              </div>
             </div>
           ))}
         </div>
 
         <div className="grid gap-4">
-          {Array.from({ length: 4 }).map((_, index) => (
+          {Array.from({ length: hasVisibleResults ? 2 : 4 }).map((_, index) => (
             <div
               key={index}
               className="h-16 rounded-[20px] bg-[linear-gradient(90deg,rgba(79,93,117,0.08),rgba(79,93,117,0.18),rgba(79,93,117,0.08))] bg-[length:200%_100%] animate-shimmer"
@@ -183,4 +214,24 @@ export function LoadingPanel() {
       </div>
     </section>
   );
+}
+
+function describeStage(stage?: CrawlResponse["crawlRun"]["stage"]) {
+  if (stage === "discovering") {
+    return "Discovering runnable sources and recovering direct job URLs.";
+  }
+
+  if (stage === "crawling") {
+    return "Fetching provider boards and saving matching jobs in batches.";
+  }
+
+  if (stage === "validating") {
+    return "Validating the newest saved links before the run wraps up.";
+  }
+
+  if (stage === "finalizing") {
+    return "Finalizing counts and preparing the latest saved result set.";
+  }
+
+  return "Queueing the crawl and preparing the first provider batch.";
 }

@@ -33,6 +33,7 @@ import type { CrawlProvider } from "@/lib/server/providers/types";
 import {
   crawlResponseSchema,
   searchFiltersSchema,
+  type CrawlRun,
   type JobListing,
   type SearchDocument,
 } from "@/lib/types";
@@ -80,9 +81,15 @@ export async function runSearchFromFilters(
   const repository = await resolveRepository(runtime.repository);
   const now = runtime.now ?? new Date();
   const search = await repository.createSearch(filters, now.toISOString());
+  const crawlRun = await repository.createCrawlRun(search._id, now.toISOString(), {
+    validationMode: runtime.linkValidationMode ?? defaultCrawlLinkValidationMode,
+    stage: "queued",
+  });
+  await repository.updateSearchLatestRun(search._id, crawlRun._id, "running", now.toISOString());
 
   return executeCrawl({
     search,
+    crawlRun,
     repository,
     discovery: runtime.discovery ?? defaultDiscoveryService,
     providers: runtime.providers ?? createDefaultProviders(),
@@ -102,13 +109,21 @@ export async function rerunSearch(searchId: string, runtime: Runtime = {}) {
     throw new ResourceNotFoundError(`Search ${searchId} was not found.`);
   }
 
+  const now = runtime.now ?? new Date();
+  const crawlRun = await repository.createCrawlRun(search._id, now.toISOString(), {
+    validationMode: runtime.linkValidationMode ?? defaultCrawlLinkValidationMode,
+    stage: "queued",
+  });
+  await repository.updateSearchLatestRun(search._id, crawlRun._id, "running", now.toISOString());
+
   return executeCrawl({
     search,
+    crawlRun,
     repository,
     discovery: runtime.discovery ?? defaultDiscoveryService,
     providers: runtime.providers ?? createDefaultProviders(),
     fetchImpl: runtime.fetchImpl ?? fetch,
-    now: runtime.now ?? new Date(),
+    now,
     deepExperienceInference: runtime.deepExperienceInference ?? false,
     linkValidationMode: runtime.linkValidationMode,
     inlineValidationTopN: runtime.inlineValidationTopN,
@@ -131,11 +146,17 @@ export async function startSearchFromFilters(
   const repository = await resolveRepository(runtime.repository);
   const now = runtime.now ?? new Date();
   const search = await repository.createSearch(filters, now.toISOString());
+  const crawlRun = await repository.createCrawlRun(search._id, now.toISOString(), {
+    validationMode: runtime.linkValidationMode ?? defaultCrawlLinkValidationMode,
+    stage: "queued",
+  });
+  await repository.updateSearchLatestRun(search._id, crawlRun._id, "running", now.toISOString());
 
   const queued =
     queueSearchRun(search._id, async () => {
       await executeCrawl({
         search,
+        crawlRun,
         repository,
         discovery: runtime.discovery ?? defaultDiscoveryService,
         providers: runtime.providers ?? createDefaultProviders(),
@@ -166,10 +187,16 @@ export async function startSearchRerun(searchId: string, runtime: Runtime = {}) 
   }
 
   const now = runtime.now ?? new Date();
+  const crawlRun = await repository.createCrawlRun(search._id, now.toISOString(), {
+    validationMode: runtime.linkValidationMode ?? defaultCrawlLinkValidationMode,
+    stage: "queued",
+  });
+  await repository.updateSearchLatestRun(search._id, crawlRun._id, "running", now.toISOString());
   const queued =
     queueSearchRun(search._id, async () => {
       await executeCrawl({
         search,
+        crawlRun,
         repository,
         discovery: runtime.discovery ?? defaultDiscoveryService,
         providers: runtime.providers ?? createDefaultProviders(),
@@ -211,7 +238,9 @@ export async function getSearchDetails(searchId: string, runtime: Runtime = {}) 
   }
 
   let jobs = await repository.getJobsByCrawlRun(crawlRun._id);
-  jobs = await refreshStaleJobs(jobs, repository, runtime.fetchImpl ?? fetch, runtime.now ?? new Date());
+  if (crawlRun.status !== "running") {
+    jobs = await refreshStaleJobs(jobs, repository, runtime.fetchImpl ?? fetch, runtime.now ?? new Date());
+  }
   const sourceResults = await repository.getCrawlSourceResults(crawlRun._id);
 
   return crawlResponseSchema.parse({
@@ -277,6 +306,7 @@ export function isInputValidationError(
 
 type ExecuteCrawlInput = {
   search: Parameters<typeof executeCrawlPipeline>[0]["search"];
+  crawlRun?: CrawlRun;
   repository: Parameters<typeof executeCrawlPipeline>[0]["repository"];
   discovery: Parameters<typeof executeCrawlPipeline>[0]["discovery"];
   providers: Parameters<typeof executeCrawlPipeline>[0]["providers"];

@@ -40,6 +40,7 @@ export type ProviderExecutionContext = {
   fetchImpl: FetchLike;
   now: Date;
   filters: SearchFilters;
+  onBatch?: (batch: ProviderBatchProgress) => Promise<void> | void;
 };
 
 type ProviderSourceMap = {
@@ -63,6 +64,13 @@ export type ProviderResult<P extends ProviderPlatform = ProviderPlatform> = {
   matchedCount: number;
   warningCount?: number;
   errorMessage?: string;
+};
+
+export type ProviderBatchProgress<P extends ProviderPlatform = ProviderPlatform> = {
+  provider: P;
+  jobs: NormalizedJobSeed[];
+  sourceCount?: number;
+  fetchedCount: number;
 };
 
 export type SourceDrivenProvider<

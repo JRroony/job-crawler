@@ -1,11 +1,18 @@
 import "server-only";
 
+import { normalizeComparableText } from "@/lib/server/crawler/helpers";
+import { parseGreenhouseUrl } from "@/lib/server/discovery/greenhouse-url";
 import type { JobListing } from "@/lib/types";
 
 type ComparableJobRecord = Omit<JobListing, "_id" | "crawlRunIds"> &
   Partial<Pick<JobListing, "_id" | "crawlRunIds">>;
 
 type PersistableDedupeCandidate = Omit<JobListing, "_id" | "crawlRunIds">;
+
+type IdentityBucket<T extends ComparableJobRecord> = {
+  job: T;
+  keys: string[];
+};
 
 export function dedupeJobs<T extends PersistableDedupeCandidate>(jobs: T[]) {
   return dedupeComparableJobs(jobs);
@@ -16,39 +23,167 @@ export function dedupeStoredJobs(jobs: JobListing[]) {
 }
 
 function dedupeComparableJobs<T extends ComparableJobRecord>(jobs: T[]) {
-  const deduped: T[] = [];
+  const buckets: Array<IdentityBucket<T> | undefined> = [];
+  const keyToBucketIndex = new Map<string, number>();
 
   for (const job of jobs) {
-    const existingIndex = deduped.findIndex((candidate) => isDuplicate(candidate, job));
-    if (existingIndex === -1) {
-      deduped.push(job);
+    const jobKeys = buildIdentityKeys(job);
+    const matchedBucketIndexes = collectMatchedBucketIndexes(jobKeys, keyToBucketIndex);
+
+    if (matchedBucketIndexes.length === 0) {
+      const nextIndex = buckets.length;
+      const keys = Array.from(new Set(jobKeys));
+      buckets.push({
+        job,
+        keys,
+      });
+      keys.forEach((key) => keyToBucketIndex.set(key, nextIndex));
       continue;
     }
 
-    deduped[existingIndex] = mergeCandidates(deduped[existingIndex], job);
+    const primaryBucketIndex = matchedBucketIndexes[0];
+    const primaryBucket = buckets[primaryBucketIndex];
+    if (!primaryBucket) {
+      continue;
+    }
+
+    let mergedJob = primaryBucket.job;
+    const mergedKeys = new Set<string>([...primaryBucket.keys, ...jobKeys]);
+
+    for (const bucketIndex of matchedBucketIndexes.slice(1)) {
+      const candidateBucket = buckets[bucketIndex];
+      if (!candidateBucket) {
+        continue;
+      }
+
+      mergedJob = mergeCandidates(mergedJob, candidateBucket.job);
+      candidateBucket.keys.forEach((key) => mergedKeys.add(key));
+      buckets[bucketIndex] = undefined;
+    }
+
+    mergedJob = mergeCandidates(mergedJob, job);
+    buildIdentityKeys(mergedJob).forEach((key) => mergedKeys.add(key));
+
+    const mergedKeyList = Array.from(mergedKeys);
+    buckets[primaryBucketIndex] = {
+      job: mergedJob,
+      keys: mergedKeyList,
+    };
+    mergedKeyList.forEach((key) => keyToBucketIndex.set(key, primaryBucketIndex));
   }
 
-  return deduped;
+  return buckets
+    .filter((bucket): bucket is IdentityBucket<T> => Boolean(bucket))
+    .map((bucket) => bucket.job);
 }
 
-function isDuplicate(left: ComparableJobRecord, right: ComparableJobRecord) {
-  if (left._id && right._id && left._id === right._id) {
-    return true;
+function collectMatchedBucketIndexes(
+  keys: string[],
+  keyToBucketIndex: Map<string, number>,
+) {
+  const matchedIndexes: number[] = [];
+  const seen = new Set<number>();
+
+  for (const key of keys) {
+    const bucketIndex = keyToBucketIndex.get(key);
+    if (typeof bucketIndex !== "number" || seen.has(bucketIndex)) {
+      continue;
+    }
+
+    seen.add(bucketIndex);
+    matchedIndexes.push(bucketIndex);
   }
 
-  if (left.canonicalUrl && right.canonicalUrl && left.canonicalUrl === right.canonicalUrl) {
-    return true;
+  return matchedIndexes;
+}
+
+function buildIdentityKeys(job: ComparableJobRecord) {
+  const keys: string[] = [];
+
+  if (job._id) {
+    keys.push(`id:${job._id}`);
   }
 
-  if (left.resolvedUrl && right.resolvedUrl && left.resolvedUrl === right.resolvedUrl) {
-    return true;
+  if (job.canonicalUrl) {
+    keys.push(`canonical:${job.canonicalUrl}`);
   }
 
-  if (left.applyUrl === right.applyUrl) {
-    return true;
+  if (job.resolvedUrl) {
+    keys.push(`resolved:${job.resolvedUrl}`);
   }
 
-  return left.sourceLookupKeys.some((lookupKey) => right.sourceLookupKeys.includes(lookupKey));
+  if (job.applyUrl) {
+    keys.push(`apply:${job.applyUrl}`);
+  }
+
+  job.sourceLookupKeys.forEach((lookupKey) => {
+    if (lookupKey) {
+      keys.push(`lookup:${lookupKey}`);
+    }
+  });
+
+  const fallbackKey = buildFallbackIdentityKey(job);
+  if (fallbackKey) {
+    keys.push(`fallback:${buildScopedFallbackIdentityKey(job, fallbackKey)}`);
+  }
+
+  return keys;
+}
+
+function buildFallbackIdentityKey(job: ComparableJobRecord) {
+  if (job.contentFingerprint) {
+    return job.contentFingerprint;
+  }
+
+  const company = job.companyNormalized || normalizeComparableText(job.company);
+  const title = job.titleNormalized || normalizeComparableText(job.title);
+  const location =
+    job.locationNormalized ||
+    normalizeComparableText(
+      `${job.city ?? ""} ${job.state ?? ""} ${job.country ?? ""} ${job.locationText ?? ""}`,
+    );
+
+  if (!company || !title || !location) {
+    return undefined;
+  }
+
+  return `${company}|${title}|${location}`;
+}
+
+function buildScopedFallbackIdentityKey(
+  job: ComparableJobRecord,
+  fallbackKey: string,
+) {
+  const greenhouseBoardToken = resolveGreenhouseBoardToken(job);
+  if (!greenhouseBoardToken) {
+    return fallbackKey;
+  }
+
+  return `greenhouse:${greenhouseBoardToken}:${fallbackKey}`;
+}
+
+function resolveGreenhouseBoardToken(job: ComparableJobRecord) {
+  const lookupBoardToken = resolveGreenhouseBoardTokenFromLookupKeys(job.sourceLookupKeys);
+  if (lookupBoardToken) {
+    return lookupBoardToken;
+  }
+
+  return (
+    parseGreenhouseUrl(job.canonicalUrl ?? "")?.boardSlug ??
+    parseGreenhouseUrl(job.sourceUrl)?.boardSlug ??
+    parseGreenhouseUrl(job.applyUrl)?.boardSlug
+  );
+}
+
+function resolveGreenhouseBoardTokenFromLookupKeys(sourceLookupKeys: string[]) {
+  for (const lookupKey of sourceLookupKeys) {
+    const parts = lookupKey.split(":");
+    if (parts.length >= 3 && parts[0] === "greenhouse" && parts[1]) {
+      return parts[1];
+    }
+  }
+
+  return undefined;
 }
 
 function mergeCandidates<T extends ComparableJobRecord>(left: T, right: T): T {

@@ -22,6 +22,7 @@ export function SourceCoveragePanel(props: SourceCoveragePanelProps) {
       return counts;
     },
     {
+      running: 0,
       success: 0,
       partial: 0,
       failed: 0,
@@ -47,6 +48,7 @@ export function SourceCoveragePanel(props: SourceCoveragePanelProps) {
       </div>
 
       <div className="mt-4 flex flex-wrap gap-2">
+        <StatusSummaryPill label="Running" value={summary.running} tone="running" />
         <StatusSummaryPill label="Healthy" value={summary.success} tone="success" />
         <StatusSummaryPill label="Degraded" value={summary.partial} tone="partial" />
         <StatusSummaryPill label="Failed" value={summary.failed} tone="failed" />
@@ -144,12 +146,13 @@ function MetricPill(props: { label: string; value: number }) {
 function StatusSummaryPill(props: {
   label: string;
   value: number;
-  tone: "success" | "partial" | "failed" | "unsupported";
+  tone: "running" | "success" | "partial" | "failed" | "unsupported";
 }) {
   return (
     <span
       className={cn(
         "rounded-full px-3 py-2 text-xs font-semibold uppercase tracking-[0.16em]",
+        props.tone === "running" && "bg-tide/10 text-tide",
         props.tone === "success" && "bg-pine/10 text-pine",
         props.tone === "partial" && "bg-amber-100 text-amber-900",
         props.tone === "failed" && "bg-red-100 text-red-700",
@@ -162,17 +165,21 @@ function StatusSummaryPill(props: {
 }
 
 function statusRank(status: SourceCoveragePanelProps["sourceResults"][number]["status"]) {
-  if (status === "failed") {
+  if (status === "running") {
     return 0;
   }
 
-  if (status === "partial") {
+  if (status === "failed") {
     return 1;
   }
 
-  if (status === "unsupported") {
+  if (status === "partial") {
     return 2;
   }
 
-  return 3;
+  if (status === "unsupported") {
+    return 3;
+  }
+
+  return 4;
 }

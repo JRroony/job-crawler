@@ -54,9 +54,27 @@ type GreenhouseApiResponse = {
 
 type GreenhouseJob = NonNullable<GreenhouseApiResponse["jobs"]>[number];
 
+type GreenhouseBoardFetchOutcome = {
+  cacheState: "hit" | "miss" | "inflight_hit";
+  result: SafeFetchResult<GreenhouseApiResponse>;
+};
+
+type GreenhouseBoardCacheEntry = {
+  expiresAt: number;
+  promise: Promise<{ result: SafeFetchResult<GreenhouseApiResponse>; expiresAt: number }>;
+  value?: { result: SafeFetchResult<GreenhouseApiResponse>; expiresAt: number };
+};
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __jobCrawlerGreenhouseBoardCache: Map<string, GreenhouseBoardCacheEntry> | undefined;
+}
+
 const greenhouseStructuredExperiencePattern =
   /\b(intern(ship)?|co op|cooperative education|apprentice(ship)?|working student|student(?: program| opportunity| role| position)?|for students|new grad|new graduate|recent grad|recent graduate|entry level|early career|junior|associate|mid level|senior|staff|principal|distinguished|fellow|member of technical staff|mts|lead|architect|manager|director|level [2-5]|ii|iii|iv|v|\d+(?:\.\d+)?\s*(?:\+|plus)?\s*(?:-|to|–|—)?\s*\d*(?:\.\d+)?\s*(?:years?|yrs?|yoe))\b/i;
 const greenhouseSmallBoardFallbackThreshold = 12;
+const greenhouseBoardCacheTtlMs = 5 * 60_000;
+const greenhouseBoardFailureCacheTtlMs = 30_000;
 
 export function normalizeGreenhouseJob(input: {
   companyToken: string;
@@ -162,9 +180,13 @@ export function createGreenhouseProvider() {
         crawlStrategy.maxTitleVariants,
       );
       const providerStartedMs = Date.now();
+      const uniqueBoardSources = dedupeGreenhouseSources(sources);
+      let cacheHits = 0;
+      let cacheMisses = 0;
+      let inflightCacheHits = 0;
 
       const boards = await runWithConcurrency(
-        sources,
+        uniqueBoardSources,
         async (source) => {
           const sourceStartedMs = Date.now();
           const apiUrl = resolveGreenhouseApiUrl(source);
@@ -198,23 +220,28 @@ export function createGreenhouseProvider() {
           }
 
           const fetchStartedMs = Date.now();
-          const result = await safeFetchJson<GreenhouseApiResponse>(apiUrl, {
+          const boardFetch = await fetchGreenhouseBoard(apiUrl, {
             fetchImpl: context.fetchImpl,
-            method: "GET",
-            headers: {
-              Accept: "application/json",
-            },
-            cache: "no-store",
             timeoutMs: crawlStrategy.timeoutMs,
             retries: crawlStrategy.retries,
           });
+          const result = boardFetch.result;
           const fetchMs = Date.now() - fetchStartedMs;
+
+          if (boardFetch.cacheState === "hit") {
+            cacheHits += 1;
+          } else if (boardFetch.cacheState === "inflight_hit") {
+            inflightCacheHits += 1;
+          } else {
+            cacheMisses += 1;
+          }
 
           if (!result.ok) {
             warnings.push(formatGreenhouseFetchWarning(source, result));
             console.warn("[greenhouse:crawl-source]", {
               ...sourceDescriptor,
               status: "fetch_failed",
+              cacheState: boardFetch.cacheState,
               errorType: result.errorType,
               statusCode: result.statusCode,
               message: result.message,
@@ -263,6 +290,7 @@ export function createGreenhouseProvider() {
           console.info("[greenhouse:crawl-source]", {
             ...sourceDescriptor,
             status: "success",
+            cacheState: boardFetch.cacheState,
             fetchedCount: rawJobs.length,
             preselectedCount: preselectedRawJobs.length,
             normalizationInputCount: normalizationInput.length,
@@ -275,6 +303,13 @@ export function createGreenhouseProvider() {
               normalization: normalizationMs,
               total: Date.now() - sourceStartedMs,
             },
+          });
+
+          await context.onBatch?.({
+            provider: "greenhouse",
+            jobs,
+            sourceCount: 1,
+            fetchedCount: rawJobs.length,
           });
 
           return {
@@ -306,7 +341,12 @@ export function createGreenhouseProvider() {
       );
 
       console.info("[greenhouse:crawl-summary]", {
-        sourceCount: sources.length,
+        inputSourceCount: sources.length,
+        boardCount: uniqueBoardSources.length,
+        fetchCount: cacheMisses,
+        cacheHits,
+        cacheMisses,
+        inflightCacheHits,
         fetchedCount,
         preselectedCount,
         normalizedCount: jobs.length,
@@ -326,7 +366,7 @@ export function createGreenhouseProvider() {
       return finalizeProviderResult({
         provider: "greenhouse",
         jobs,
-        sourceCount: sources.length,
+        sourceCount: uniqueBoardSources.length,
         fetchedCount,
         warnings,
       });
@@ -543,8 +583,8 @@ function buildProviderCompanyToken(companyHint?: string) {
 function resolveGreenhouseCrawlStrategy(crawlMode?: string) {
   if (crawlMode === "fast") {
     return {
-      concurrency: 8,
-      timeoutMs: 4_000,
+      concurrency: 12,
+      timeoutMs: 3_500,
       retries: 0,
       maxTitleVariants: 14,
     };
@@ -552,7 +592,7 @@ function resolveGreenhouseCrawlStrategy(crawlMode?: string) {
 
   if (crawlMode === "deep") {
     return {
-      concurrency: 4,
+      concurrency: 6,
       timeoutMs: 6_500,
       retries: 1,
       maxTitleVariants: 20,
@@ -560,11 +600,126 @@ function resolveGreenhouseCrawlStrategy(crawlMode?: string) {
   }
 
   return {
-    concurrency: 6,
-    timeoutMs: 5_000,
+    concurrency: 8,
+    timeoutMs: 4_500,
     retries: 1,
     maxTitleVariants: 18,
   };
+}
+
+function dedupeGreenhouseSources(sources: readonly GreenhouseDiscoveredSource[]) {
+  const deduped = new Map<string, GreenhouseDiscoveredSource>();
+
+  for (const source of sources) {
+    const dedupeKey =
+      resolveGreenhouseToken(source) ??
+      resolveGreenhouseApiUrl(source) ??
+      resolveGreenhouseBoardUrl(source) ??
+      source.url;
+
+    if (!deduped.has(dedupeKey)) {
+      deduped.set(dedupeKey, source);
+    }
+  }
+
+  return Array.from(deduped.values());
+}
+
+async function fetchGreenhouseBoard(
+  apiUrl: string,
+  options: {
+    fetchImpl: typeof fetch;
+    timeoutMs: number;
+    retries: number;
+  },
+): Promise<GreenhouseBoardFetchOutcome> {
+  if (options.fetchImpl !== fetch) {
+    return {
+      cacheState: "miss",
+      result: await safeFetchJson<GreenhouseApiResponse>(apiUrl, {
+        fetchImpl: options.fetchImpl,
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+        },
+        cache: "no-store",
+        timeoutMs: options.timeoutMs,
+        retries: options.retries,
+      }),
+    };
+  }
+
+  const cache = getGreenhouseBoardCache();
+  const now = Date.now();
+  const cached = cache.get(apiUrl);
+
+  if (cached?.value && cached.expiresAt > now) {
+    return {
+      cacheState: "hit",
+      result: cached.value.result,
+    };
+  }
+
+  if (cached?.promise && cached.expiresAt > now) {
+    const settled = await cached.promise;
+    return {
+      cacheState: "inflight_hit",
+      result: settled.result,
+    };
+  }
+
+  const requestPromise = safeFetchJson<GreenhouseApiResponse>(apiUrl, {
+    fetchImpl: options.fetchImpl,
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+    },
+    cache: "no-store",
+    timeoutMs: options.timeoutMs,
+    retries: options.retries,
+  })
+    .then((result) => {
+      const expiresAt =
+        Date.now() + (result.ok ? greenhouseBoardCacheTtlMs : greenhouseBoardFailureCacheTtlMs);
+      const settled = {
+        result,
+        expiresAt,
+      };
+
+      cache.set(apiUrl, {
+        expiresAt,
+        promise: Promise.resolve(settled),
+        value: settled,
+      });
+
+      return settled;
+    })
+    .catch((error) => {
+      cache.delete(apiUrl);
+      throw error;
+    });
+
+  cache.set(apiUrl, {
+    expiresAt: now + greenhouseBoardFailureCacheTtlMs,
+    promise: requestPromise,
+  });
+
+  const settled = await requestPromise;
+  return {
+    cacheState: "miss",
+    result: settled.result,
+  };
+}
+
+function getGreenhouseBoardCache() {
+  if (!globalThis.__jobCrawlerGreenhouseBoardCache) {
+    globalThis.__jobCrawlerGreenhouseBoardCache = new Map<
+      string,
+      GreenhouseBoardCacheEntry
+    >();
+  }
+
+  return globalThis.__jobCrawlerGreenhouseBoardCache;
 }
 
 function formatGreenhouseFetchWarning(

@@ -71,7 +71,7 @@ describe("dedupeJobs", () => {
     expect(result[0].sourceProvenance).toHaveLength(2);
   });
 
-  it("does not merge distinct jobs that only share company, title, and location", () => {
+  it("falls back to the normalized company-title-location fingerprint when stronger ids differ", () => {
     const result = dedupeJobs([
       createCandidate({
         canonicalUrl: undefined,
@@ -92,7 +92,7 @@ describe("dedupeJobs", () => {
       }),
     ]);
 
-    expect(result).toHaveLength(2);
+    expect(result).toHaveLength(1);
   });
 
   it("dedupes by apply URL when validation metadata is still unknown", () => {

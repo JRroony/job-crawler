@@ -7,6 +7,8 @@ import { companyPageSourceConfigSchema } from "@/lib/types";
 
 const envSchema = z.object({
   MONGODB_URI: z.string().url().default("mongodb://127.0.0.1:27017/job_crawler"),
+  MONGODB_SERVER_SELECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(1500),
+  MONGODB_UNAVAILABLE_COOLDOWN_MS: z.coerce.number().int().nonnegative().default(15000),
   LINK_VALIDATION_TTL_MINUTES: z.coerce.number().int().positive().default(360),
   GREENHOUSE_BOARD_TOKENS: z.string().default(""),
   GREENHOUSE_BOARD_REGISTRY_APPEND: z.string().default(""),
@@ -45,6 +47,10 @@ export function getEnv() {
   if (!cachedEnv) {
     cachedEnv = envSchema.parse({
       MONGODB_URI: process.env.MONGODB_URI ?? "mongodb://127.0.0.1:27017/job_crawler",
+      MONGODB_SERVER_SELECTION_TIMEOUT_MS:
+        process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS ?? "1500",
+      MONGODB_UNAVAILABLE_COOLDOWN_MS:
+        process.env.MONGODB_UNAVAILABLE_COOLDOWN_MS ?? "15000",
       LINK_VALIDATION_TTL_MINUTES: process.env.LINK_VALIDATION_TTL_MINUTES ?? "360",
       GREENHOUSE_BOARD_TOKENS: process.env.GREENHOUSE_BOARD_TOKENS ?? "",
       GREENHOUSE_BOARD_REGISTRY_APPEND:

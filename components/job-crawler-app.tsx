@@ -342,7 +342,7 @@ export function JobCrawlerApp({
   }
 
   async function loadSearch(searchId: string) {
-    pollSequenceRef.current += 1;
+    const pollToken = ++pollSequenceRef.current;
     setViewState("loading");
     setMessage("");
     setErrorKind(null);
@@ -358,6 +358,12 @@ export function JobCrawlerApp({
       }
 
       applyLoadedResult(payload);
+      if (payload.crawlRun.status === "running") {
+        await pollSearchUntilSettled(searchId, {
+          updatedAfter: payload.search.updatedAt,
+          pollToken,
+        });
+      }
     } catch (error) {
       setViewState("error");
       setErrorKind(resolveErrorKind(error));
@@ -483,7 +489,13 @@ export function JobCrawlerApp({
 
         <div className="mt-4 space-y-4">
           {viewState === "loading" ? (
-            <LoadingPanel />
+            <LoadingPanel
+              stage={activeResult?.crawlRun.stage}
+              foundCount={activeResult?.jobs.length}
+              fetchedCount={activeResult?.crawlRun.totalFetchedJobs}
+              matchedCount={activeResult?.crawlRun.totalMatchedJobs}
+              providerSummary={activeResult?.crawlRun.providerSummary}
+            />
           ) : null}
 
           {viewState === "idle" ? (
@@ -562,9 +574,9 @@ export function JobCrawlerApp({
                       <p className="mt-1 text-sm text-slate">{resultNotice.description}</p>
                     </div>
                     <div className="flex flex-wrap gap-2 text-sm text-slate">
-                      {(resultNotice.highlights ?? []).slice(0, 2).map((highlight) => (
+                      {(resultNotice.highlights ?? []).slice(0, 2).map((highlight, index) => (
                         <span
-                          key={highlight}
+                          key={`result-notice-${index}`}
                           className="rounded-full border border-ink/10 bg-mist/40 px-3 py-1.5"
                         >
                           {highlight}

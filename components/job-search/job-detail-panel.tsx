@@ -58,9 +58,9 @@ export function JobDetailPanel(props: JobDetailPanelProps) {
 
       {tags.length > 0 ? (
         <div className="mt-4 flex flex-wrap gap-2">
-          {tags.map((tag) => (
+          {tags.map((tag, index) => (
             <span
-              key={tag}
+              key={`${job._id}-tag-${index}`}
               className="rounded-full border border-ink/8 bg-white px-3 py-1 text-[11px] font-medium uppercase tracking-[0.14em] text-slate"
             >
               {tag}

@@ -189,6 +189,7 @@ export function DiagnosticsDrawer(props: DiagnosticsDrawerProps) {
                       <span
                         className={cn(
                           "rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]",
+                          sourceResult.status === "running" && "bg-tide/10 text-tide",
                           sourceResult.status === "success" && "bg-pine/10 text-pine",
                           sourceResult.status === "partial" && "bg-amber-100 text-amber-900",
                           sourceResult.status === "failed" && "bg-red-100 text-red-700",

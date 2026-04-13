@@ -287,7 +287,7 @@ describe("JobCrawlerRepository", () => {
     expect(storedJobs).toHaveLength(1);
   });
 
-  it("keeps distinct same-title same-location jobs separate when their source ids and URLs differ", async () => {
+  it("merges same-title same-location jobs when the normalized fallback fingerprint matches", async () => {
     const db = new FakeDb();
     const repository = new JobCrawlerRepository(db);
     const search = await repository.createSearch(
@@ -369,7 +369,7 @@ describe("JobCrawlerRepository", () => {
     ]);
 
     const storedJobs = db.snapshot<JobListing>(collectionNames.jobs);
-    expect(storedJobs).toHaveLength(2);
+    expect(storedJobs).toHaveLength(1);
   });
 
   it("normalizes legacy saved search filters when they are read back", async () => {

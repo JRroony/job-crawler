@@ -189,6 +189,10 @@ export function labelForCrawlerPlatform(platform: CrawlerPlatform | ProviderPlat
 }
 
 export function labelForProviderStatus(status: CrawlSourceResult["status"]) {
+  if (status === "running") {
+    return "Running";
+  }
+
   if (status === "success") {
     return "Healthy";
   }
@@ -205,6 +209,13 @@ export function labelForProviderStatus(status: CrawlSourceResult["status"]) {
 }
 
 export function sourceStatusTone(status: CrawlSourceResult["status"]) {
+  if (status === "running") {
+    return {
+      badge: "bg-tide/10 text-tide border border-tide/20",
+      card: "border-tide/20 bg-[linear-gradient(180deg,rgba(63,114,175,0.08),rgba(255,255,255,0.95))]",
+    };
+  }
+
   if (status === "success") {
     return {
       badge: "bg-pine/10 text-pine border border-pine/20",

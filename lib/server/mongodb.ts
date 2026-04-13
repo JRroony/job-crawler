@@ -21,8 +21,13 @@ function databaseNameFromUri(uri: string) {
 }
 
 const env = getEnv();
+let mongoUnavailableUntil = 0;
 
 export async function getMongoDb() {
+  if (mongoUnavailableUntil > Date.now()) {
+    throw new Error("MongoDB connection is in cooldown after a recent failure.");
+  }
+
   const client = await getMongoClient();
   const db = client.db(databaseNameFromUri(env.MONGODB_URI));
   await ensureDatabaseIndexes(db);
@@ -35,12 +40,17 @@ async function getMongoClient() {
     return cachedPromise;
   }
 
-  const connectionPromise = new MongoClient(env.MONGODB_URI)
+  const connectionPromise = new MongoClient(env.MONGODB_URI, {
+    serverSelectionTimeoutMS: env.MONGODB_SERVER_SELECTION_TIMEOUT_MS,
+  })
     .connect()
     .catch((error) => {
       if (globalThis.__jobCrawlerMongoClientPromise === connectionPromise) {
         globalThis.__jobCrawlerMongoClientPromise = undefined;
       }
+
+      mongoUnavailableUntil =
+        Date.now() + env.MONGODB_UNAVAILABLE_COOLDOWN_MS;
 
       throw error;
     });

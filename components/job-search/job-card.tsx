@@ -50,9 +50,9 @@ export function JobCard(props: JobCardProps) {
 
       {tags.length > 0 ? (
         <div className="mt-3 flex flex-wrap gap-2">
-          {tags.map((tag) => (
+          {tags.map((tag, index) => (
             <span
-              key={tag}
+              key={`${props.selectionKey}-tag-${index}`}
               className="rounded-full border border-ink/8 bg-[#faf8f2] px-3 py-1 text-[11px] font-medium uppercase tracking-[0.14em] text-slate"
             >
               {tag}

@@ -5,12 +5,14 @@ import type { Db } from "mongodb";
 import { dedupeJobs, dedupeStoredJobs } from "@/lib/server/crawler/dedupe";
 import { buildSourceLookupKey, createId } from "@/lib/server/crawler/helpers";
 import { collectionNames } from "@/lib/server/db/indexes";
+import { parseGreenhouseUrl } from "@/lib/server/discovery/greenhouse-url";
 import { getMemoryDb } from "@/lib/server/db/memory";
 import { getMongoDb } from "@/lib/server/mongodb";
 import type {
   CrawlDiagnostics,
   CrawlProviderSummary,
   CrawlRun,
+  CrawlRunStage,
   CrawlRunStatus,
   CrawlSourceResult,
   CrawlValidationMode,
@@ -114,9 +116,15 @@ export class JobCrawlerRepository {
     now = new Date().toISOString(),
     options: {
       validationMode?: CrawlValidationMode;
+      stage?: CrawlRunStage;
     } = {},
   ) {
-    const document = createStoredCrawlRunDocument(searchId, now, options.validationMode);
+    const document = createStoredCrawlRunDocument(
+      searchId,
+      now,
+      options.validationMode,
+      options.stage,
+    );
 
     await this.crawlRuns().insertOne(document);
     return document;
@@ -131,6 +139,7 @@ export class JobCrawlerRepository {
     crawlRunId: string,
     payload: {
       status: CrawlRunStatus;
+      stage?: CrawlRunStage;
       totalFetchedJobs: number;
       totalMatchedJobs: number;
       dedupedJobs: number;
@@ -151,6 +160,7 @@ export class JobCrawlerRepository {
           diagnostics,
           discoveredSourcesCount: diagnostics.discoveredSources,
           crawledSourcesCount: diagnostics.crawledSources,
+          stage: payload.stage,
           validationMode: payload.validationMode ?? "deferred",
           providerSummary: normalizeProviderSummary(payload.providerSummary),
           finishedAt: payload.finishedAt ?? new Date().toISOString(),
@@ -159,10 +169,97 @@ export class JobCrawlerRepository {
     );
   }
 
+  async updateCrawlRunProgress(
+    crawlRunId: string,
+    payload: {
+      status?: CrawlRunStatus;
+      stage?: CrawlRunStage;
+      totalFetchedJobs?: number;
+      totalMatchedJobs?: number;
+      dedupedJobs?: number;
+      diagnostics?: CrawlDiagnostics;
+      validationMode?: CrawlValidationMode;
+      providerSummary?: CrawlProviderSummary[];
+      errorMessage?: string;
+      finishedAt?: string;
+    },
+  ) {
+    const updateFields: Record<string, unknown> = {};
+
+    if (typeof payload.status !== "undefined") {
+      updateFields.status = payload.status;
+    }
+
+    if (typeof payload.stage !== "undefined") {
+      updateFields.stage = payload.stage;
+    }
+
+    if (typeof payload.totalFetchedJobs === "number") {
+      updateFields.totalFetchedJobs = payload.totalFetchedJobs;
+    }
+
+    if (typeof payload.totalMatchedJobs === "number") {
+      updateFields.totalMatchedJobs = payload.totalMatchedJobs;
+    }
+
+    if (typeof payload.dedupedJobs === "number") {
+      updateFields.dedupedJobs = payload.dedupedJobs;
+    }
+
+    if (typeof payload.validationMode !== "undefined") {
+      updateFields.validationMode = payload.validationMode;
+    }
+
+    if (typeof payload.errorMessage !== "undefined") {
+      updateFields.errorMessage = payload.errorMessage;
+    }
+
+    if (typeof payload.finishedAt !== "undefined") {
+      updateFields.finishedAt = payload.finishedAt;
+    }
+
+    if (typeof payload.diagnostics !== "undefined") {
+      const diagnostics = normalizeCrawlDiagnostics(payload.diagnostics);
+      updateFields.diagnostics = diagnostics;
+      updateFields.discoveredSourcesCount = diagnostics.discoveredSources;
+      updateFields.crawledSourcesCount = diagnostics.crawledSources;
+    }
+
+    if (typeof payload.providerSummary !== "undefined") {
+      updateFields.providerSummary = normalizeProviderSummary(payload.providerSummary);
+    }
+
+    if (Object.keys(updateFields).length === 0) {
+      return;
+    }
+
+    await this.crawlRuns().updateOne(
+      { _id: crawlRunId },
+      {
+        $set: updateFields,
+      },
+    );
+  }
+
   async saveCrawlSourceResults(sourceResults: CrawlSourceResult[]) {
     for (const sourceResult of sourceResults) {
       await this.crawlSourceResults().insertOne(crawlSourceResultSchema.parse(sourceResult));
     }
+  }
+
+  async updateCrawlSourceResult(sourceResult: CrawlSourceResult) {
+    const normalized = crawlSourceResultSchema.parse(sourceResult);
+    const { _id, ...updateFields } = normalized;
+    const updateResult = (await this.crawlSourceResults().updateOne(
+      { _id },
+      { $set: updateFields },
+    )) as { matchedCount?: number };
+
+    if ((updateResult.matchedCount ?? 0) > 0) {
+      return;
+    }
+
+    await this.crawlSourceResults().insertOne(normalized);
   }
 
   async getCrawlSourceResults(crawlRunId: string) {
@@ -192,9 +289,10 @@ export class JobCrawlerRepository {
   async persistJobs(crawlRunId: string, jobs: PersistableJob[]) {
     const savedJobsById = new Map<string, JobListing>();
     const sanitizedJobs = dedupeJobs(jobs.map((job) => sanitizePersistableJob(job)));
+    const existingJobs = await this.findExistingJobsForBatch(sanitizedJobs);
 
     for (const job of sanitizedJobs) {
-      const existing = await this.findExistingJob(job);
+      const existing = resolveExistingJobForPersistable(existingJobs, job);
       if (!existing) {
         const document = jobListingSchema.parse({
           _id: createId(),
@@ -203,6 +301,7 @@ export class JobCrawlerRepository {
         });
         await this.jobs().insertOne(document);
         savedJobsById.set(document._id, document);
+        indexJobForBatchLookup(existingJobs, document);
         continue;
       }
 
@@ -210,6 +309,7 @@ export class JobCrawlerRepository {
       const { _id: _ignoredId, ...updateFields } = merged;
       await this.jobs().updateOne({ _id: existing._id }, { $set: updateFields });
       savedJobsById.set(merged._id, merged);
+      indexJobForBatchLookup(existingJobs, merged);
     }
 
     return dedupeStoredJobs(Array.from(savedJobsById.values()));
@@ -229,34 +329,28 @@ export class JobCrawlerRepository {
     return normalized.find((validation) => validation.checkedAt >= checkedAfter) ?? null;
   }
 
-  private async findExistingJob(job: PersistableJob) {
-    if (job.canonicalUrl) {
-      const byCanonical = await this.jobs().findOne({ canonicalUrl: job.canonicalUrl });
-      if (byCanonical) {
-        return parseStoredJob(byCanonical);
-      }
-    }
+  private async findExistingJobsForBatch(jobs: PersistableJob[]) {
+    const lookup = createPersistBatchLookup();
+    const canonicalUrls = collectUniqueStrings(jobs.map((job) => job.canonicalUrl));
+    const resolvedUrls = collectUniqueStrings(jobs.map((job) => job.resolvedUrl));
+    const applyUrls = collectUniqueStrings(jobs.map((job) => job.applyUrl));
+    const sourceLookupKeys = collectUniqueStrings(jobs.flatMap((job) => job.sourceLookupKeys));
+    const contentFingerprints = collectUniqueStrings(jobs.map((job) => job.contentFingerprint));
 
-    if (job.resolvedUrl) {
-      const byResolved = await this.jobs().findOne({ resolvedUrl: job.resolvedUrl });
-      if (byResolved) {
-        return parseStoredJob(byResolved);
-      }
-    }
+    const queryResults = await Promise.all([
+      fetchJobsByField(this.jobs(), "canonicalUrl", canonicalUrls),
+      fetchJobsByField(this.jobs(), "resolvedUrl", resolvedUrls),
+      fetchJobsByField(this.jobs(), "applyUrl", applyUrls),
+      fetchJobsByField(this.jobs(), "sourceLookupKeys", sourceLookupKeys),
+      fetchJobsByField(this.jobs(), "contentFingerprint", contentFingerprints),
+    ]);
 
-    const byApplyUrl = await this.jobs().findOne({ applyUrl: job.applyUrl });
-    if (byApplyUrl) {
-      return parseStoredJob(byApplyUrl);
-    }
+    queryResults
+      .flat()
+      .map((document) => parseStoredJob(document))
+      .forEach((job) => indexJobForBatchLookup(lookup, job));
 
-    for (const lookupKey of job.sourceLookupKeys) {
-      const bySourceLookup = await this.jobs().findOne({ sourceLookupKeys: lookupKey });
-      if (bySourceLookup) {
-        return parseStoredJob(bySourceLookup);
-      }
-    }
-
-    return null;
+    return lookup;
   }
 
   private searches() {
@@ -397,6 +491,155 @@ function dedupeProvenance(records: JobListing["sourceProvenance"]) {
   return Array.from(map.values());
 }
 
+type PersistBatchLookup = {
+  byCanonicalUrl: Map<string, JobListing>;
+  byResolvedUrl: Map<string, JobListing>;
+  byApplyUrl: Map<string, JobListing>;
+  bySourceLookupKey: Map<string, JobListing>;
+  byContentFingerprint: Map<string, JobListing>;
+};
+
+function createPersistBatchLookup(): PersistBatchLookup {
+  return {
+    byCanonicalUrl: new Map<string, JobListing>(),
+    byResolvedUrl: new Map<string, JobListing>(),
+    byApplyUrl: new Map<string, JobListing>(),
+    bySourceLookupKey: new Map<string, JobListing>(),
+    byContentFingerprint: new Map<string, JobListing>(),
+  };
+}
+
+function indexJobForBatchLookup(lookup: PersistBatchLookup, job: JobListing) {
+  if (job.canonicalUrl) {
+    lookup.byCanonicalUrl.set(job.canonicalUrl, job);
+  }
+
+  if (job.resolvedUrl) {
+    lookup.byResolvedUrl.set(job.resolvedUrl, job);
+  }
+
+  lookup.byApplyUrl.set(job.applyUrl, job);
+
+  const fingerprintLookupKey = buildContentFingerprintLookupKey(job);
+  if (fingerprintLookupKey) {
+    lookup.byContentFingerprint.set(fingerprintLookupKey, job);
+  }
+
+  job.sourceLookupKeys.forEach((key) => {
+    lookup.bySourceLookupKey.set(key, job);
+  });
+}
+
+function resolveExistingJobForPersistable(
+  lookup: PersistBatchLookup,
+  job: PersistableJob,
+) {
+  if (job.canonicalUrl) {
+    const byCanonical = lookup.byCanonicalUrl.get(job.canonicalUrl);
+    if (byCanonical) {
+      return byCanonical;
+    }
+  }
+
+  if (job.resolvedUrl) {
+    const byResolved = lookup.byResolvedUrl.get(job.resolvedUrl);
+    if (byResolved) {
+      return byResolved;
+    }
+  }
+
+  const byApply = lookup.byApplyUrl.get(job.applyUrl);
+  if (byApply) {
+    return byApply;
+  }
+
+  for (const lookupKey of job.sourceLookupKeys) {
+    const bySourceLookup = lookup.bySourceLookupKey.get(lookupKey);
+    if (bySourceLookup) {
+      return bySourceLookup;
+    }
+  }
+
+  const fingerprintLookupKey = buildContentFingerprintLookupKey(job);
+  if (!fingerprintLookupKey) {
+    return null;
+  }
+
+  return lookup.byContentFingerprint.get(fingerprintLookupKey) ?? null;
+}
+
+async function fetchJobsByField(
+  collection: CollectionAdapter<JobListing>,
+  field: "canonicalUrl" | "resolvedUrl" | "applyUrl" | "sourceLookupKeys" | "contentFingerprint",
+  values: string[],
+) {
+  if (values.length === 0) {
+    return [];
+  }
+
+  return collection.find({ [field]: { $in: values } }).toArray();
+}
+
+function collectUniqueStrings(values: Array<string | undefined>) {
+  const results: string[] = [];
+  const seen = new Set<string>();
+
+  values.forEach((value) => {
+    if (!value || seen.has(value)) {
+      return;
+    }
+
+    seen.add(value);
+    results.push(value);
+  });
+
+  return results;
+}
+
+function buildContentFingerprintLookupKey(
+  job: Pick<
+    JobListing,
+    "contentFingerprint" | "sourceLookupKeys" | "canonicalUrl" | "sourceUrl" | "applyUrl"
+  >,
+) {
+  if (!job.contentFingerprint) {
+    return undefined;
+  }
+
+  const greenhouseBoardToken = resolveGreenhouseBoardTokenForIdentity(job);
+  if (!greenhouseBoardToken) {
+    return job.contentFingerprint;
+  }
+
+  return `greenhouse:${greenhouseBoardToken}:${job.contentFingerprint}`;
+}
+
+function resolveGreenhouseBoardTokenForIdentity(
+  job: Pick<JobListing, "sourceLookupKeys" | "canonicalUrl" | "sourceUrl" | "applyUrl">,
+) {
+  const lookupBoardToken = resolveGreenhouseBoardTokenFromLookupKeys(job.sourceLookupKeys);
+  if (lookupBoardToken) {
+    return lookupBoardToken;
+  }
+
+  return (
+    parseGreenhouseUrl(job.canonicalUrl ?? "")?.boardSlug ??
+    parseGreenhouseUrl(job.sourceUrl)?.boardSlug ??
+    parseGreenhouseUrl(job.applyUrl)?.boardSlug
+  );
+}
+
+function resolveGreenhouseBoardTokenFromLookupKeys(sourceLookupKeys: string[]) {
+  for (const lookupKey of sourceLookupKeys) {
+    const parts = lookupKey.split(":");
+    if (parts.length >= 3 && parts[0] === "greenhouse" && parts[1]) {
+      return parts[1];
+    }
+  }
+
+  return undefined;
+}
+
 function parseStoredSearch(document: Record<string, unknown>) {
   return searchDocumentSchema.parse({
     ...document,
@@ -414,6 +657,10 @@ function parseStoredCrawlRun(document: Record<string, unknown>) {
     ...normalizedDocument,
     finishedAt: normalizeOptionalDocumentString(normalizedDocument.finishedAt),
     errorMessage: normalizeOptionalDocumentString(normalizedDocument.errorMessage),
+    stage:
+      typeof normalizedDocument.stage === "string"
+        ? normalizedDocument.stage
+        : undefined,
     diagnostics,
     discoveredSourcesCount:
       typeof normalizedDocument.discoveredSourcesCount === "number"
@@ -466,6 +713,7 @@ function createStoredCrawlRunDocument(
   searchId: string,
   now: string,
   validationMode: CrawlValidationMode | undefined,
+  stage: CrawlRunStage | undefined,
 ) {
   const diagnostics = normalizeCrawlDiagnostics();
 
@@ -474,6 +722,7 @@ function createStoredCrawlRunDocument(
     searchId,
     startedAt: now,
     status: "running",
+    stage: stage ?? "queued",
     discoveredSourcesCount: diagnostics.discoveredSources,
     crawledSourcesCount: diagnostics.crawledSources,
     totalFetchedJobs: 0,
