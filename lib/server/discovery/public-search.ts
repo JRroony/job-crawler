@@ -519,6 +519,17 @@ function buildPlatformLocationPlan(
 function logQueryPlan(filters: SearchFilters, plan: PublicSearchQueryPlan) {
   console.info("[discovery:query-plan]", {
     filters,
+    titleExpansion: {
+      originalQuery: filters.title,
+      normalizedQuery: plan.roleQueryVariants[0]?.normalized ?? "",
+      aliasesUsed: plan.roleQueryVariants.map((variant) => variant.query),
+      variants: plan.roleQueryVariants.slice(0, 12).map((variant) => ({
+        query: variant.query,
+        kind: variant.kind,
+        family: variant.family,
+        conceptId: variant.conceptId,
+      })),
+    },
     maxResultsPerQuery: plan.maxResultsPerQuery,
     maxQueries: plan.maxQueries,
     maxSources: plan.maxSources,

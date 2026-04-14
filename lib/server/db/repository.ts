@@ -2,10 +2,10 @@ import "server-only";
 
 import type { Db } from "mongodb";
 
+import { buildCanonicalJobIdentity, normalizeComparableIdentityText } from "@/lib/job-identity";
 import { dedupeJobs, dedupeStoredJobs } from "@/lib/server/crawler/dedupe";
 import { buildSourceLookupKey, createId } from "@/lib/server/crawler/helpers";
 import { collectionNames } from "@/lib/server/db/indexes";
-import { parseGreenhouseUrl } from "@/lib/server/discovery/greenhouse-url";
 import { getMemoryDb } from "@/lib/server/db/memory";
 import { getMongoDb } from "@/lib/server/mongodb";
 import type {
@@ -25,17 +25,21 @@ import type {
 } from "@/lib/types";
 import {
   crawlDiagnosticsSchema,
-  experienceClassificationSchema,
   crawlProviderSummarySchema,
   crawlRunDocumentSchema,
   crawlSourceResultSchema,
+  employmentTypeSchema,
+  experienceClassificationSchema,
+  experienceLevelSchema,
   jobListingSchema,
   linkValidationResultSchema,
   persistableJobSchema,
   resolvedLocationSchema,
+  salaryInfoSchema,
   sanitizeSearchFiltersInput,
   searchDocumentSchema,
   sourceProvenanceSchema,
+  sponsorshipHintSchema,
 } from "@/lib/types";
 
 type SortSpec = Record<string, 1 | -1>;
@@ -286,7 +290,7 @@ export class JobCrawlerRepository {
     const documents = await this.jobs()
       .find(
         { crawlRunIds: crawlRunId },
-        { sort: { postedAt: -1, sourcePlatform: 1, title: 1 } },
+        { sort: { postingDate: -1, crawledAt: -1, discoveredAt: -1, title: 1 } },
       )
       .toArray();
 
@@ -352,13 +356,19 @@ export class JobCrawlerRepository {
     const canonicalUrls = collectUniqueStrings(jobs.map((job) => job.canonicalUrl));
     const resolvedUrls = collectUniqueStrings(jobs.map((job) => job.resolvedUrl));
     const applyUrls = collectUniqueStrings(jobs.map((job) => job.applyUrl));
+    const sourceUrls = collectUniqueStrings(jobs.map((job) => job.sourceUrl));
     const sourceLookupKeys = collectUniqueStrings(jobs.flatMap((job) => job.sourceLookupKeys));
-    const contentFingerprints = collectUniqueStrings(jobs.map((job) => job.contentFingerprint));
+    const contentFingerprints = collectUniqueStrings(
+      jobs
+        .filter((job) => !buildCanonicalJobIdentity(job).hasStrongIdentity)
+        .map((job) => job.contentFingerprint),
+    );
 
     const queryResults = await Promise.all([
       fetchJobsByField(this.jobs(), "canonicalUrl", canonicalUrls),
       fetchJobsByField(this.jobs(), "resolvedUrl", resolvedUrls),
       fetchJobsByField(this.jobs(), "applyUrl", applyUrls),
+      fetchJobsByField(this.jobs(), "sourceUrl", sourceUrls),
       fetchJobsByField(this.jobs(), "sourceLookupKeys", sourceLookupKeys),
       fetchJobsByField(this.jobs(), "contentFingerprint", contentFingerprints),
     ]);
@@ -436,6 +446,8 @@ function mergeJobRecords(
       existing.discoveredAt < incoming.discoveredAt
         ? existing.discoveredAt
         : incoming.discoveredAt,
+    crawledAt: latestDate(existing.crawledAt, incoming.crawledAt) ?? existing.crawledAt,
+    postingDate: latestDate(existing.postingDate, incoming.postingDate),
     postedAt: latestDate(existing.postedAt, incoming.postedAt),
   };
 }
@@ -513,7 +525,8 @@ type PersistBatchLookup = {
   byCanonicalUrl: Map<string, JobListing>;
   byResolvedUrl: Map<string, JobListing>;
   byApplyUrl: Map<string, JobListing>;
-  bySourceLookupKey: Map<string, JobListing>;
+  bySourceUrl: Map<string, JobListing>;
+  byPlatformJobKey: Map<string, JobListing>;
   byContentFingerprint: Map<string, JobListing>;
 };
 
@@ -522,12 +535,15 @@ function createPersistBatchLookup(): PersistBatchLookup {
     byCanonicalUrl: new Map<string, JobListing>(),
     byResolvedUrl: new Map<string, JobListing>(),
     byApplyUrl: new Map<string, JobListing>(),
-    bySourceLookupKey: new Map<string, JobListing>(),
+    bySourceUrl: new Map<string, JobListing>(),
+    byPlatformJobKey: new Map<string, JobListing>(),
     byContentFingerprint: new Map<string, JobListing>(),
   };
 }
 
 function indexJobForBatchLookup(lookup: PersistBatchLookup, job: JobListing) {
+  const identity = buildCanonicalJobIdentity(job);
+
   if (job.canonicalUrl) {
     lookup.byCanonicalUrl.set(job.canonicalUrl, job);
   }
@@ -537,21 +553,23 @@ function indexJobForBatchLookup(lookup: PersistBatchLookup, job: JobListing) {
   }
 
   lookup.byApplyUrl.set(job.applyUrl, job);
+  lookup.bySourceUrl.set(job.sourceUrl, job);
 
-  const fingerprintLookupKey = buildContentFingerprintLookupKey(job);
-  if (fingerprintLookupKey) {
-    lookup.byContentFingerprint.set(fingerprintLookupKey, job);
-  }
-
-  job.sourceLookupKeys.forEach((key) => {
-    lookup.bySourceLookupKey.set(key, job);
+  identity.normalizedIdentity.platformJobKeys.forEach((key) => {
+    lookup.byPlatformJobKey.set(key, job);
   });
+
+  if (!identity.hasStrongIdentity && identity.normalizedIdentity.fallbackFingerprint) {
+    lookup.byContentFingerprint.set(identity.normalizedIdentity.fallbackFingerprint, job);
+  }
 }
 
 function resolveExistingJobForPersistable(
   lookup: PersistBatchLookup,
   job: PersistableJob,
 ) {
+  const identity = buildCanonicalJobIdentity(job);
+
   if (job.canonicalUrl) {
     const byCanonical = lookup.byCanonicalUrl.get(job.canonicalUrl);
     if (byCanonical) {
@@ -571,24 +589,34 @@ function resolveExistingJobForPersistable(
     return byApply;
   }
 
-  for (const lookupKey of job.sourceLookupKeys) {
-    const bySourceLookup = lookup.bySourceLookupKey.get(lookupKey);
-    if (bySourceLookup) {
-      return bySourceLookup;
+  const bySourceUrl = lookup.bySourceUrl.get(job.sourceUrl);
+  if (bySourceUrl) {
+    return bySourceUrl;
+  }
+
+  for (const platformJobKey of identity.normalizedIdentity.platformJobKeys) {
+    const byPlatformJobKey = lookup.byPlatformJobKey.get(platformJobKey);
+    if (byPlatformJobKey) {
+      return byPlatformJobKey;
     }
   }
 
-  const fingerprintLookupKey = buildContentFingerprintLookupKey(job);
-  if (!fingerprintLookupKey) {
+  if (identity.hasStrongIdentity || !identity.normalizedIdentity.fallbackFingerprint) {
     return null;
   }
 
-  return lookup.byContentFingerprint.get(fingerprintLookupKey) ?? null;
+  return lookup.byContentFingerprint.get(identity.normalizedIdentity.fallbackFingerprint) ?? null;
 }
 
 async function fetchJobsByField(
   collection: CollectionAdapter<JobListing>,
-  field: "canonicalUrl" | "resolvedUrl" | "applyUrl" | "sourceLookupKeys" | "contentFingerprint",
+  field:
+    | "canonicalUrl"
+    | "resolvedUrl"
+    | "applyUrl"
+    | "sourceUrl"
+    | "sourceLookupKeys"
+    | "contentFingerprint",
   values: string[],
 ) {
   if (values.length === 0) {
@@ -661,50 +689,6 @@ function collectUniqueStrings(values: Array<string | undefined>) {
   });
 
   return results;
-}
-
-function buildContentFingerprintLookupKey(
-  job: Pick<
-    JobListing,
-    "contentFingerprint" | "sourceLookupKeys" | "canonicalUrl" | "sourceUrl" | "applyUrl"
-  >,
-) {
-  if (!job.contentFingerprint) {
-    return undefined;
-  }
-
-  const greenhouseBoardToken = resolveGreenhouseBoardTokenForIdentity(job);
-  if (!greenhouseBoardToken) {
-    return job.contentFingerprint;
-  }
-
-  return `greenhouse:${greenhouseBoardToken}:${job.contentFingerprint}`;
-}
-
-function resolveGreenhouseBoardTokenForIdentity(
-  job: Pick<JobListing, "sourceLookupKeys" | "canonicalUrl" | "sourceUrl" | "applyUrl">,
-) {
-  const lookupBoardToken = resolveGreenhouseBoardTokenFromLookupKeys(job.sourceLookupKeys);
-  if (lookupBoardToken) {
-    return lookupBoardToken;
-  }
-
-  return (
-    parseGreenhouseUrl(job.canonicalUrl ?? "")?.boardSlug ??
-    parseGreenhouseUrl(job.sourceUrl)?.boardSlug ??
-    parseGreenhouseUrl(job.applyUrl)?.boardSlug
-  );
-}
-
-function resolveGreenhouseBoardTokenFromLookupKeys(sourceLookupKeys: string[]) {
-  for (const lookupKey of sourceLookupKeys) {
-    const parts = lookupKey.split(":");
-    if (parts.length >= 3 && parts[0] === "greenhouse" && parts[1]) {
-      return parts[1];
-    }
-  }
-
-  return undefined;
 }
 
 function parseStoredSearch(document: Record<string, unknown>) {
@@ -921,24 +905,77 @@ function normalizeStoredJobFields(document: Record<string, unknown>) {
   const sourceLookupKeys = normalizeSourceLookupKeys(document, sourceProvenance);
   const crawlRunIds = normalizeStringArray(document.crawlRunIds);
   const resolvedLocation = normalizeResolvedLocation(document.resolvedLocation);
+  const company = normalizeOptionalDocumentString(document.company) ?? "";
+  const title = normalizeOptionalDocumentString(document.title) ?? "";
+  const locationRaw =
+    normalizeOptionalDocumentString(document.locationRaw) ??
+    normalizeOptionalDocumentString(document.locationText) ??
+    buildFallbackLocationRaw(document, resolvedLocation) ??
+    "Location unavailable";
+  const normalizedCompany =
+    normalizeOptionalDocumentString(document.normalizedCompany) ??
+    normalizeOptionalDocumentString(document.companyNormalized) ??
+    normalizeComparableIdentityText(company);
+  const normalizedTitle =
+    normalizeOptionalDocumentString(document.normalizedTitle) ??
+    normalizeOptionalDocumentString(document.titleNormalized) ??
+    normalizeComparableIdentityText(title);
+  const normalizedLocation =
+    normalizeOptionalDocumentString(document.normalizedLocation) ??
+    normalizeOptionalDocumentString(document.locationNormalized) ??
+    normalizeComparableIdentityText(locationRaw);
+  const postingDate =
+    normalizeOptionalDocumentString(document.postingDate) ??
+    normalizeOptionalDocumentString(document.postedAt);
+  const crawledAt =
+    normalizeOptionalDocumentString(document.crawledAt) ??
+    normalizeOptionalDocumentString(document.discoveredAt);
+  const dedupeFingerprint =
+    normalizeOptionalDocumentString(document.dedupeFingerprint) ??
+    normalizeOptionalDocumentString(document.contentFingerprint) ??
+    [normalizedCompany, normalizedTitle, normalizedLocation].filter(Boolean).join("|");
 
   return {
     ...document,
+    company,
+    title,
+    normalizedCompany,
+    normalizedTitle,
     country: normalizeOptionalDocumentString(document.country),
     state: normalizeOptionalDocumentString(document.state),
     city: normalizeOptionalDocumentString(document.city),
+    locationRaw,
+    normalizedLocation,
+    locationText: normalizeOptionalDocumentString(document.locationText) ?? locationRaw,
     ...(resolvedLocation ? { resolvedLocation } : {}),
+    remoteType: normalizeRemoteType(document.remoteType, resolvedLocation, locationRaw),
+    employmentType: normalizeEmploymentType(document.employmentType),
+    seniority:
+      normalizeOptionalExperienceLevel(document.seniority) ??
+      normalizeOptionalExperienceLevel(document.experienceLevel),
     experienceLevel: document.experienceLevel == null ? undefined : document.experienceLevel,
     experienceClassification: normalizeExperienceClassification(document.experienceClassification),
+    sourceCompanySlug: normalizeOptionalDocumentString(document.sourceCompanySlug),
     resolvedUrl: normalizeOptionalDocumentString(document.resolvedUrl),
     canonicalUrl: normalizeOptionalDocumentString(document.canonicalUrl),
-    postedAt: normalizeOptionalDocumentString(document.postedAt),
+    postingDate,
+    postedAt: postingDate,
     lastValidatedAt: normalizeOptionalDocumentString(document.lastValidatedAt),
+    discoveredAt: normalizeOptionalDocumentString(document.discoveredAt),
+    crawledAt,
+    descriptionSnippet: normalizeOptionalDocumentString(document.descriptionSnippet),
+    salaryInfo: normalizeSalaryInfo(document.salaryInfo),
+    sponsorshipHint: normalizeSponsorshipHint(document.sponsorshipHint),
     rawSourceMetadata,
     sourceProvenance,
     sourceLookupKeys,
     crawlRunIds,
+    dedupeFingerprint,
     linkStatus: typeof document.linkStatus === "string" ? document.linkStatus : "unknown",
+    companyNormalized: normalizedCompany,
+    titleNormalized: normalizedTitle,
+    locationNormalized: normalizedLocation,
+    contentFingerprint: dedupeFingerprint,
   };
 }
 
@@ -1008,6 +1045,61 @@ function normalizeResolvedLocation(value: unknown) {
   return parsed.success ? parsed.data : undefined;
 }
 
+function buildFallbackLocationRaw(
+  document: Record<string, unknown>,
+  resolvedLocation?: JobListing["resolvedLocation"],
+) {
+  const city = normalizeOptionalDocumentString(document.city) ?? resolvedLocation?.city;
+  const state = normalizeOptionalDocumentString(document.state) ?? resolvedLocation?.state;
+  const country = normalizeOptionalDocumentString(document.country) ?? resolvedLocation?.country;
+
+  return [city, state, country].filter(Boolean).join(", ") || undefined;
+}
+
+function normalizeOptionalExperienceLevel(value: unknown) {
+  const parsed = experienceLevelSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function normalizeRemoteType(
+  value: unknown,
+  resolvedLocation?: JobListing["resolvedLocation"],
+  locationRaw?: string,
+) {
+  if (typeof value === "string" && ["remote", "hybrid", "onsite", "unknown"].includes(value)) {
+    return value as JobListing["remoteType"];
+  }
+
+  if (typeof locationRaw === "string" && /\bhybrid\b/i.test(locationRaw)) {
+    return "hybrid";
+  }
+
+  if (resolvedLocation?.isRemote || (typeof locationRaw === "string" && /\bremote\b/i.test(locationRaw))) {
+    return "remote";
+  }
+
+  return locationRaw ? "onsite" : "unknown";
+}
+
+function normalizeEmploymentType(value: unknown) {
+  const parsed = employmentTypeSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function normalizeSalaryInfo(value: unknown) {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = salaryInfoSchema.safeParse(normalizeLegacyStoredValue(value));
+  return parsed.success ? parsed.data : undefined;
+}
+
+function normalizeSponsorshipHint(value: unknown) {
+  const parsed = sponsorshipHintSchema.safeParse(value);
+  return parsed.success ? parsed.data : "unknown";
+}
+
 function normalizeLegacyStoredValue(value: unknown): unknown {
   if (value == null) {
     return undefined;
@@ -1044,7 +1136,7 @@ function normalizeOptionalDocumentString(value: unknown) {
   }
 
   if (typeof value !== "string") {
-    return value;
+    return undefined;
   }
 
   const trimmed = value.trim();

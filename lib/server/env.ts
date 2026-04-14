@@ -24,6 +24,8 @@ const envSchema = z.object({
   PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: z.coerce.number().int().positive().default(96),
   PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: z.coerce.number().int().positive().default(4),
   GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: z.coerce.number().int().positive().default(32),
+  CRAWL_PROVIDER_TIMEOUT_MS: z.coerce.number().int().positive().default(9000),
+  CRAWL_PROGRESS_UPDATE_INTERVAL_MS: z.coerce.number().int().positive().default(250),
 });
 
 type ParsedEnv = z.infer<typeof envSchema>;
@@ -70,6 +72,10 @@ export function getEnv() {
         process.env.PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY ?? "4",
       GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES:
         process.env.GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES ?? "32",
+      CRAWL_PROVIDER_TIMEOUT_MS:
+        process.env.CRAWL_PROVIDER_TIMEOUT_MS ?? "9000",
+      CRAWL_PROGRESS_UPDATE_INTERVAL_MS:
+        process.env.CRAWL_PROGRESS_UPDATE_INTERVAL_MS ?? "250",
     });
   }
 

@@ -2,10 +2,12 @@ import "server-only";
 
 import {
   areTitleConceptsAdjacent,
+  findMatchingTitleAliases,
   getTitleConcept,
   getTitleFamily,
 } from "@/lib/server/title-retrieval/catalog";
 import { analyzeTitle } from "@/lib/server/title-retrieval/analyze";
+import { buildTitleQueryVariants } from "@/lib/server/title-retrieval/build-queries";
 import type {
   TitleAnalysis,
   TitleMatchMode,
@@ -274,6 +276,9 @@ function buildTitleMatchResult(input: {
   penalties: MatchPenalty[];
   explanation: string;
 }) {
+  const queryDiagnostics = buildTitleDiagnostics(input.query, true);
+  const jobDiagnostics = buildTitleDiagnostics(input.job, false);
+
   return {
     matches: input.tier !== "none" && input.score >= input.threshold,
     mode: input.mode,
@@ -288,7 +293,27 @@ function buildTitleMatchResult(input: {
     matchedTerms: input.matchedTerms ?? [],
     penalties: input.penalties.map((penalty) => penalty.reason),
     explanation: input.explanation,
+    queryDiagnostics,
+    jobDiagnostics,
   } satisfies TitleMatchResult;
+}
+
+function buildTitleDiagnostics(analysis: TitleAnalysis, includeExpansionVariants: boolean) {
+  const matchedAliases = findMatchingTitleAliases(analysis.input)
+    .map((alias) => alias.phrase)
+    .filter(Boolean);
+  const expandedAliases = includeExpansionVariants
+    ? buildTitleQueryVariants(analysis.input, { maxQueries: 24 }).map((variant) => variant.query)
+    : [];
+
+  return {
+    original: analysis.input,
+    normalized: analysis.normalized,
+    canonical: analysis.canonicalTitle,
+    family: analysis.family,
+    conceptId: analysis.primaryConceptId,
+    aliasesUsed: Array.from(new Set([...matchedAliases, ...expandedAliases])),
+  };
 }
 
 function scoreAfterPenalties(baseScore: number, penalties: MatchPenalty[]) {

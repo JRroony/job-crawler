@@ -21,6 +21,12 @@ describe("provider normalization", () => {
 
     expect(job.sourcePlatform).toBe("greenhouse");
     expect(job.company).toBe("Openai");
+    expect(job.normalizedCompany).toBe("openai");
+    expect(job.normalizedTitle).toBe("senior software engineer");
+    expect(job.locationRaw).toBe("San Francisco, California, United States");
+    expect(job.remoteType).toBe("onsite");
+    expect(job.seniority).toBe("senior");
+    expect(job.sourceCompanySlug).toBe("openai");
     expect(job.city).toBe("San Francisco");
     expect(job.experienceLevel).toBe("senior");
     expect(job.experienceClassification).toMatchObject({
@@ -51,6 +57,9 @@ describe("provider normalization", () => {
     expect(job.applyUrl).toContain("/apply");
     expect(job.city).toBe("New York");
     expect(job.country).toBe("United States");
+    expect(job.employmentType).toBeUndefined();
+    expect(job.remoteType).toBe("onsite");
+    expect(job.sourceCompanySlug).toBe("figma");
     expect(job.experienceLevel).toBe("junior");
     expect(job.experienceClassification).toMatchObject({
       explicitLevel: "junior",
@@ -76,6 +85,8 @@ describe("provider normalization", () => {
     });
 
     expect(job.experienceLevel).toBe("senior");
+    expect(job.remoteType).toBe("remote");
+    expect(job.descriptionSnippet).toContain("Minimum qualifications");
     expect(job.experienceClassification).toMatchObject({
       inferredLevel: "senior",
       confidence: "medium",
@@ -99,6 +110,8 @@ describe("provider normalization", () => {
     expect(job.sourcePlatform).toBe("ashby");
     expect(job.company).toBe("Notion");
     expect(job.locationText).toBe("Remote, United States");
+    expect(job.remoteType).toBe("remote");
+    expect(job.sourceCompanySlug).toBe("notion");
     expect(job.experienceLevel).toBe("staff");
     expect(job.experienceClassification).toMatchObject({
       explicitLevel: "staff",
@@ -132,7 +145,9 @@ describe("provider normalization", () => {
     expect(job.city).toBe("Seattle");
     expect(job.state).toBe("Washington");
     expect(job.country).toBe("United States");
-    expect(job.experienceLevel).toBe("staff");
+    expect(job.experienceLevel).toBe("principal");
+    expect(job.seniority).toBe("principal");
+    expect(job.sourceCompanySlug).toBe("careers");
     expect(job.canonicalUrl).toBe(
       "https://acme.wd1.myworkdayjobs.com/en-US/Careers/job/Seattle-WA/Principal-Data-Engineer_R12345",
     );
@@ -179,6 +194,8 @@ describe("provider normalization", () => {
 
     expect(job.sourcePlatform).toBe("lever");
     expect(job.country).toBe("United States");
+    expect(job.employmentType).toBe("internship");
+    expect(job.seniority).toBe("intern");
     expect(job.experienceLevel).toBe("intern");
     expect(job.experienceClassification).toMatchObject({
       explicitLevel: "intern",
@@ -232,6 +249,7 @@ describe("provider normalization", () => {
     });
 
     expect(job.experienceLevel).toBe("senior");
+    expect(job.descriptionSnippet).toContain("5+ years of experience");
     expect(job.experienceClassification).toMatchObject({
       inferredLevel: "senior",
       source: "description",
@@ -245,7 +263,11 @@ describe("provider normalization", () => {
     },
     {
       title: "Principal Software Engineer",
-      expected: "staff",
+      expected: "principal",
+    },
+    {
+      title: "Lead Backend Engineer",
+      expected: "lead",
     },
   ])(
     "applies shared title seniority precedence through Greenhouse normalization for $title",
@@ -310,7 +332,7 @@ describe("provider normalization", () => {
     });
 
     expect(job.experienceLevel).toBeUndefined();
-    expect(job.experienceClassification).toEqual({
+    expect(job.experienceClassification).toMatchObject({
       confidence: "none",
       source: "unknown",
       reasons: [],

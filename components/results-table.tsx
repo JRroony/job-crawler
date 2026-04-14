@@ -60,8 +60,8 @@ export function ResultsTable({
   }, [selectedJobKey]);
 
   return (
-    <section className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(380px,0.82fr)]">
-      <div className="rounded-[28px] border border-ink/10 bg-white/92 shadow-[0_18px_50px_rgba(15,23,42,0.06)] backdrop-blur">
+    <section className="grid gap-5 xl:grid-cols-[minmax(0,0.92fr)_minmax(360px,0.78fr)]">
+      <div className="rounded-[24px] border border-ink/10 bg-white/94 shadow-[0_18px_50px_rgba(15,23,42,0.06)] backdrop-blur">
         <div className="border-b border-ink/8 px-5 py-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
             <div>
@@ -73,9 +73,12 @@ export function ResultsTable({
                   ? `${visibleCount} job${visibleCount === 1 ? "" : "s"}`
                   : `${visibleCount} of ${fullCount} jobs`}
               </h2>
+              <p className="mt-1 text-sm text-slate">
+                Compare roles from the list while keeping the selected posting preview visible.
+              </p>
             </div>
             <div className="rounded-full border border-ink/10 bg-mist/35 px-3 py-1.5 text-sm text-slate">
-              Original posting stays pinned on the right
+              Selected job stays pinned on larger screens
             </div>
           </div>
         </div>
@@ -92,7 +95,7 @@ export function ResultsTable({
         </div>
       </div>
 
-      <div ref={detailPanelRef} className="xl:sticky xl:top-6 xl:self-start">
+      <div ref={detailPanelRef} className="xl:sticky xl:top-5 xl:self-start">
         <JobDetailPanel
           job={selectedJob}
           isRevalidating={Boolean(selectedJob && revalidatingIds.includes(selectedJob._id))}

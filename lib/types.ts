@@ -84,10 +84,18 @@ export const experienceLevels = [
   "junior",
   "mid",
   "senior",
+  "lead",
   "staff",
+  "principal",
 ] as const;
 
 export const experienceLevelSchema = z.enum(experienceLevels);
+
+export const experienceClassifierOutcomes = [...experienceLevels, "unknown"] as const;
+
+export const experienceClassifierOutcomeSchema = z.enum(
+  experienceClassifierOutcomes,
+);
 
 export const experienceInferenceConfidences = [
   "high",
@@ -111,6 +119,33 @@ export const experienceClassificationSources = [
 export const experienceClassificationSourceSchema = z.enum(
   experienceClassificationSources,
 );
+
+export const experienceClassificationSignalSchema = z.object({
+  ruleId: z.string().min(1),
+  signalType: z.enum([
+    "title_keyword",
+    "acronym",
+    "level_code",
+    "leadership_context",
+    "years_of_experience",
+    "structured_hint",
+    "description_hint",
+    "metadata_hint",
+  ]),
+  source: experienceClassificationSourceSchema,
+  level: experienceLevelSchema,
+  confidence: experienceInferenceConfidenceSchema,
+  matchedText: z.string().min(1),
+  rationale: z.string().min(1),
+});
+
+export const experienceClassificationDiagnosticsSchema = z.object({
+  originalTitle: z.string().default(""),
+  normalizedTitle: z.string().default(""),
+  finalSeniority: experienceClassifierOutcomeSchema,
+  matchedSignals: z.array(experienceClassificationSignalSchema).default([]),
+  rationale: z.array(z.string().min(1)).default([]),
+});
 
 export const experienceMatchModes = ["strict", "balanced", "broad"] as const;
 
@@ -137,6 +172,47 @@ export const crawlerPlatforms = [
 ] as const;
 
 export const crawlerPlatformSchema = z.enum(crawlerPlatforms);
+
+export const remoteTypes = ["remote", "hybrid", "onsite", "unknown"] as const;
+
+export const remoteTypeSchema = z.enum(remoteTypes);
+
+export const employmentTypes = [
+  "full_time",
+  "part_time",
+  "contract",
+  "temporary",
+  "internship",
+  "apprenticeship",
+  "seasonal",
+  "freelance",
+  "unknown",
+] as const;
+
+export const employmentTypeSchema = z.enum(employmentTypes);
+
+export const sponsorshipHints = ["supported", "not_supported", "unknown"] as const;
+
+export const sponsorshipHintSchema = z.enum(sponsorshipHints);
+
+export const salaryIntervals = [
+  "hour",
+  "day",
+  "week",
+  "month",
+  "year",
+  "unknown",
+] as const;
+
+export const salaryIntervalSchema = z.enum(salaryIntervals);
+
+export const salaryInfoSchema = z.object({
+  minAmount: z.number().nonnegative().optional(),
+  maxAmount: z.number().nonnegative().optional(),
+  currency: z.string().min(1).optional(),
+  interval: salaryIntervalSchema.default("unknown"),
+  rawText: z.string().min(1).optional(),
+});
 
 export function normalizeExperienceLevels(
   value?: ExperienceLevel | ExperienceLevel[] | null,
@@ -187,6 +263,7 @@ export const experienceClassificationSchema = z.object({
   source: experienceClassificationSourceSchema,
   reasons: z.array(z.string().min(1)).default([]),
   isUnspecified: z.boolean(),
+  diagnostics: experienceClassificationDiagnosticsSchema.optional(),
 });
 
 export const linkStatuses = ["valid", "invalid", "stale", "unknown"] as const;
@@ -306,6 +383,135 @@ export const crawlDiagnosticsSchema = z.object({
   excludedByExperience: z.number().int().nonnegative().default(0),
   dedupedOut: z.number().int().nonnegative().default(0),
   validationDeferred: z.number().int().nonnegative().default(0),
+  performance: z
+    .object({
+      timeToFirstVisibleResultMs: nullableOptional(z.number().nonnegative()),
+      stageTimingsMs: z
+        .object({
+          discovery: z.number().nonnegative().default(0),
+          providerExecution: z.number().nonnegative().default(0),
+          filtering: z.number().nonnegative().default(0),
+          dedupe: z.number().nonnegative().default(0),
+          persistence: z.number().nonnegative().default(0),
+          validation: z.number().nonnegative().default(0),
+          responseAssembly: z.number().nonnegative().default(0),
+          total: z.number().nonnegative().default(0),
+        })
+        .default({}),
+      providerTimingsMs: z
+        .array(
+          z.object({
+            provider: providerPlatformSchema,
+            duration: z.number().nonnegative(),
+            sourceCount: z.number().int().nonnegative(),
+            timedOut: z.boolean().default(false),
+          }),
+        )
+        .default([]),
+      progressUpdateCount: z.number().int().nonnegative().default(0),
+      persistenceBatchCount: z.number().int().nonnegative().default(0),
+    })
+    .default({}),
+  dropReasonCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
+  filterDecisionTraces: z
+    .array(
+      z.object({
+        traceId: z.string().min(1),
+        sourcePlatform: providerPlatformSchema,
+        sourceJobId: z.string().min(1),
+        sourceUrl: z.string().url(),
+        applyUrl: z.string().url(),
+        canonicalUrl: nullableOptional(z.string().url()),
+        company: z.string().min(1),
+        title: z.string().min(1),
+        locationText: z.string().min(1),
+        filterStage: z.enum(["title", "location", "experience"]),
+        outcome: z.enum(["passed", "dropped"]),
+        dropReason: nullableOptional(z.string()),
+        titleDiagnostics: z.object({
+          original: z.string(),
+          normalized: z.string(),
+          canonical: nullableOptional(z.string()),
+          family: nullableOptional(z.string()),
+          tier: nullableOptional(z.string()),
+          score: nullableOptional(z.number()),
+          threshold: nullableOptional(z.number()),
+          explanation: nullableOptional(z.string()),
+          matchedTerms: z.array(z.string()).default([]),
+          penalties: z.array(z.string()).default([]),
+          passed: z.boolean(),
+        }),
+        locationDiagnostics: z.object({
+          raw: z.string(),
+          normalized: z.string(),
+          country: nullableOptional(z.string()),
+          state: nullableOptional(z.string()),
+          stateCode: nullableOptional(z.string()),
+          city: nullableOptional(z.string()),
+          isRemote: z.boolean(),
+          isUnitedStates: z.boolean(),
+          explanation: nullableOptional(z.string()),
+          matchedTerms: z.array(z.string()).default([]),
+          passed: z.boolean(),
+        }),
+        experienceDiagnostics: z.object({
+          level: nullableOptional(experienceLevelSchema),
+          finalSeniority: experienceClassifierOutcomeSchema,
+          normalizedTitle: z.string(),
+          source: z.string(),
+          confidence: experienceInferenceConfidenceSchema,
+          selectedLevels: z.array(experienceLevelSchema).default([]),
+          mode: experienceMatchModeSchema,
+          includeUnspecified: z.boolean(),
+          explanation: z.string(),
+          passed: z.boolean(),
+          reasons: z.array(z.string()).default([]),
+          matchedSignals: z.array(experienceClassificationSignalSchema).default([]),
+        }),
+      }),
+    )
+    .default([]),
+  dedupeDecisionTraces: z
+    .array(
+      z.object({
+        traceId: z.string().min(1),
+        keptTraceId: z.string().min(1),
+        originalIdentifiers: z.object({
+          databaseId: nullableOptional(z.string()),
+          sourcePlatform: providerPlatformSchema,
+          sourceJobId: z.string().min(1),
+          sourceUrl: z.string().url(),
+          applyUrl: z.string().url(),
+          resolvedUrl: nullableOptional(z.string().url()),
+          canonicalUrl: nullableOptional(z.string().url()),
+          sourceLookupKeys: z.array(z.string()).default([]),
+        }),
+        normalizedIdentity: z.object({
+          company: z.string().min(1),
+          title: z.string().min(1),
+          location: z.string().min(1),
+          platformJobKeys: z.array(z.string()).default([]),
+          sourceUrl: z.string().min(1),
+          applyUrl: z.string().min(1),
+          resolvedUrl: nullableOptional(z.string()),
+          canonicalUrl: nullableOptional(z.string()),
+          fallbackFingerprint: z.string().min(1),
+        }),
+        sourcePlatform: providerPlatformSchema,
+        sourceJobId: z.string().min(1),
+        sourceUrl: z.string().url(),
+        canonicalUrl: nullableOptional(z.string().url()),
+        applyUrl: z.string().url(),
+        title: z.string().min(1),
+        company: z.string().min(1),
+        locationText: z.string().min(1),
+        outcome: z.enum(["kept", "deduped"]),
+        dropReason: nullableOptional(z.string()),
+        decisionReason: z.string().min(1),
+        matchedKeys: z.array(z.string()).default([]),
+      }),
+    )
+    .default([]),
   discovery: discoveryStageDiagnosticsSchema.optional(),
 });
 
@@ -436,31 +642,46 @@ export const resolvedLocationSchema = z.object({
   evidence: z.array(resolvedLocationEvidenceSchema).default([]),
 });
 
+// Canonical job-search entity. Keep this aligned with docs/normalized-job-model.md.
 export const jobListingSchema = z.object({
   _id: z.string().min(1),
   title: z.string().min(1),
   company: z.string().min(1),
+  normalizedCompany: z.string().min(1),
+  normalizedTitle: z.string().min(1),
   country: z.string().optional(),
   state: z.string().optional(),
   city: z.string().optional(),
+  locationRaw: z.string().min(1),
+  normalizedLocation: z.string().min(1),
   locationText: z.string().min(1),
   resolvedLocation: resolvedLocationSchema.optional(),
+  remoteType: remoteTypeSchema.default("unknown"),
+  employmentType: employmentTypeSchema.optional(),
+  seniority: experienceLevelSchema.optional(),
   experienceLevel: experienceLevelSchema.optional(),
   experienceClassification: experienceClassificationSchema.optional(),
   sourcePlatform: providerPlatformSchema,
+  sourceCompanySlug: z.string().min(1).optional(),
   sourceJobId: z.string().min(1),
   sourceUrl: z.string().url(),
   applyUrl: z.string().url(),
   resolvedUrl: z.string().url().optional(),
   canonicalUrl: z.string().url().optional(),
+  postingDate: z.string().datetime().optional(),
   postedAt: z.string().datetime().optional(),
   discoveredAt: z.string().datetime(),
+  crawledAt: z.string().datetime(),
+  descriptionSnippet: z.string().min(1).optional(),
+  salaryInfo: salaryInfoSchema.optional(),
+  sponsorshipHint: sponsorshipHintSchema.default("unknown"),
   linkStatus: linkStatusSchema.default("unknown"),
   lastValidatedAt: z.string().datetime().optional(),
   rawSourceMetadata: z.record(z.string(), z.unknown()).default({}),
   sourceProvenance: z.array(sourceProvenanceSchema).default([]),
   sourceLookupKeys: z.array(z.string().min(1)).default([]),
   crawlRunIds: z.array(z.string().min(1)).default([]),
+  dedupeFingerprint: z.string().min(1),
   companyNormalized: z.string().min(1),
   titleNormalized: z.string().min(1),
   locationNormalized: z.string().min(1),
@@ -567,6 +788,10 @@ export type CrawlerPlatform = z.infer<typeof crawlerPlatformSchema>;
 export type ActiveCrawlerPlatform = z.infer<typeof activeCrawlerPlatformSchema>;
 export type CrawlMode = z.infer<typeof crawlModeSchema>;
 export type CrawlValidationMode = z.infer<typeof crawlValidationModeSchema>;
+export type RemoteType = z.infer<typeof remoteTypeSchema>;
+export type EmploymentType = z.infer<typeof employmentTypeSchema>;
+export type SponsorshipHint = z.infer<typeof sponsorshipHintSchema>;
+export type SalaryInfo = z.infer<typeof salaryInfoSchema>;
 export type SearchFilters = z.infer<typeof searchFiltersSchema>;
 export type ResolvedLocationConfidence = z.infer<
   typeof resolvedLocationConfidenceSchema

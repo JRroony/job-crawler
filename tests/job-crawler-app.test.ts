@@ -25,6 +25,25 @@ function createResult(
     excludedByExperience: 0,
     dedupedOut: 0,
     validationDeferred: 0,
+    performance: {
+      timeToFirstVisibleResultMs: undefined,
+      stageTimingsMs: {
+        discovery: 0,
+        providerExecution: 0,
+        filtering: 0,
+        dedupe: 0,
+        persistence: 0,
+        validation: 0,
+        responseAssembly: 0,
+        total: 0,
+      },
+      providerTimingsMs: [],
+      progressUpdateCount: 0,
+      persistenceBatchCount: 0,
+    },
+    dropReasonCounts: {},
+    filterDecisionTraces: [],
+    dedupeDecisionTraces: [],
     ...overrides,
   };
 

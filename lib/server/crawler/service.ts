@@ -24,7 +24,7 @@ import {
   toStoredValidation,
   validateJobLink,
 } from "@/lib/server/crawler/link-validation";
-import { sortJobs } from "@/lib/server/crawler/sort";
+import { sortJobsWithDiagnostics } from "@/lib/server/crawler/sort";
 import { getRepository, JobCrawlerRepository } from "@/lib/server/db/repository";
 import { defaultDiscoveryService } from "@/lib/server/discovery/service";
 import type { DiscoveryService } from "@/lib/server/discovery/types";
@@ -63,6 +63,8 @@ type Runtime = {
   // Inline validation remains available for narrow or explicitly opt-in workflows.
   linkValidationMode?: CrawlLinkValidationMode;
   inlineValidationTopN?: number;
+  providerTimeoutMs?: number;
+  progressUpdateIntervalMs?: number;
 };
 
 export async function runSearchFromFilters(
@@ -98,6 +100,8 @@ export async function runSearchFromFilters(
     deepExperienceInference: runtime.deepExperienceInference ?? false,
     linkValidationMode: runtime.linkValidationMode,
     inlineValidationTopN: runtime.inlineValidationTopN,
+    providerTimeoutMs: runtime.providerTimeoutMs,
+    progressUpdateIntervalMs: runtime.progressUpdateIntervalMs,
   });
 }
 
@@ -127,6 +131,8 @@ export async function rerunSearch(searchId: string, runtime: Runtime = {}) {
     deepExperienceInference: runtime.deepExperienceInference ?? false,
     linkValidationMode: runtime.linkValidationMode,
     inlineValidationTopN: runtime.inlineValidationTopN,
+    providerTimeoutMs: runtime.providerTimeoutMs,
+    progressUpdateIntervalMs: runtime.progressUpdateIntervalMs,
   });
 }
 
@@ -165,6 +171,8 @@ export async function startSearchFromFilters(
         deepExperienceInference: runtime.deepExperienceInference ?? false,
         linkValidationMode: runtime.linkValidationMode,
         inlineValidationTopN: runtime.inlineValidationTopN,
+        providerTimeoutMs: runtime.providerTimeoutMs,
+        progressUpdateIntervalMs: runtime.progressUpdateIntervalMs,
       });
     }) || isSearchRunPending(search._id);
 
@@ -205,6 +213,8 @@ export async function startSearchRerun(searchId: string, runtime: Runtime = {}) 
         deepExperienceInference: runtime.deepExperienceInference ?? false,
         linkValidationMode: runtime.linkValidationMode,
         inlineValidationTopN: runtime.inlineValidationTopN,
+        providerTimeoutMs: runtime.providerTimeoutMs,
+        progressUpdateIntervalMs: runtime.progressUpdateIntervalMs,
       });
     }) || isSearchRunPending(search._id);
 
@@ -247,9 +257,10 @@ export async function getSearchDetails(searchId: string, runtime: Runtime = {}) 
     search,
     crawlRun,
     sourceResults,
-    jobs: sortJobs(
-      dedupeStoredJobs(jobs).map(applyResolvedExperienceLevel),
+    jobs: sortJobsWithDiagnostics(
+      jobs.map(applyResolvedExperienceLevel),
       search.filters.title,
+      runtime.now ?? new Date(),
     ),
     diagnostics: crawlRun.diagnostics,
   });
@@ -315,6 +326,8 @@ type ExecuteCrawlInput = {
   deepExperienceInference?: Parameters<typeof executeCrawlPipeline>[0]["deepExperienceInference"];
   linkValidationMode?: Parameters<typeof executeCrawlPipeline>[0]["linkValidationMode"];
   inlineValidationTopN?: Parameters<typeof executeCrawlPipeline>[0]["inlineValidationTopN"];
+  providerTimeoutMs?: Parameters<typeof executeCrawlPipeline>[0]["providerTimeoutMs"];
+  progressUpdateIntervalMs?: Parameters<typeof executeCrawlPipeline>[0]["progressUpdateIntervalMs"];
 };
 
 async function executeCrawl(input: ExecuteCrawlInput) {

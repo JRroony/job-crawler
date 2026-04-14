@@ -137,7 +137,7 @@ export function buildTitleQueryVariants(
   }
 
   const maxQueries = options.maxQueries ?? 16;
-  const minimumQueries = analysis.family === "software_engineering" ? 20 : 12;
+  const minimumQueries = analysis.family === "software_engineering" ? 20 : 18;
   const effectiveMaxQueries = Math.max(minimumQueries, maxQueries);
   return variants
     .sort(compareTitleQueryVariants)
@@ -300,6 +300,8 @@ const softwareTierTwoQueries = new Set([
   "java engineer",
   "mobile engineer",
   "mobile developer",
+  "member of technical staff",
+  "mts",
   "api developer",
   "api engineer",
   "server engineer",
@@ -366,6 +368,8 @@ const softwareQueryPriority = new Map(
     "platform engineer",
     "java developer",
     "mobile engineer",
+    "member of technical staff",
+    "mts",
     "application software engineer",
     "web application developer",
     "api developer",
@@ -441,7 +445,12 @@ function buildCandidateConceptVariants(analysis: TitleAnalysis) {
       return;
     }
 
-    variants.add(normalizedCanonicalTitle);
+    if (
+      analysis.modifierTokens.length === 0 ||
+      sharesModifierSignals(analysis, normalizedCanonicalTitle)
+    ) {
+      variants.add(normalizedCanonicalTitle);
+    }
 
     const relatedQueries = dedupeNormalizedValues([
       ...(concept.aliases ?? []),

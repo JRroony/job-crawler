@@ -196,6 +196,24 @@ describe("matchesFilters country matching", () => {
         locationText: "Remote USA",
       }),
     },
+    {
+      label: "Hybrid in Chicago, IL",
+      job: createJob({
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Hybrid in Chicago, IL",
+      }),
+    },
+    {
+      label: "San Jose, CA",
+      job: createJob({
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "San Jose, CA",
+      }),
+    },
   ])("matches a United States country-only filter against inferred US location $label", ({ job }) => {
     expect(
       matchesFilters(
@@ -279,6 +297,70 @@ describe("matchesFilters location filter combinations", () => {
         }),
       ),
     ).toBe(false);
+  });
+
+  it("matches a Seattle city filter against hybrid Seattle roles without over-including nearby cities", () => {
+    const seattleJob = createJob({
+      country: undefined,
+      state: undefined,
+      city: undefined,
+      locationText: "Hybrid in Seattle, WA",
+    });
+    const bellevueJob = createJob({
+      country: undefined,
+      state: undefined,
+      city: undefined,
+      locationText: "Bellevue, WA",
+    });
+
+    expect(
+      matchesFilters(
+        seattleJob,
+        createFilters({
+          city: "Seattle",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      matchesFilters(
+        bellevueJob,
+        createFilters({
+          city: "Seattle",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("matches a California state filter against city-state and remote-state forms", () => {
+    const stateOnly = createJob({
+      country: undefined,
+      state: undefined,
+      city: undefined,
+      locationText: "San Jose, CA",
+    });
+    const remoteState = createJob({
+      country: undefined,
+      state: undefined,
+      city: undefined,
+      locationText: "Remote - California",
+    });
+
+    expect(
+      matchesFilters(
+        stateOnly,
+        createFilters({
+          state: "California",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      matchesFilters(
+        remoteState,
+        createFilters({
+          state: "California",
+        }),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -559,6 +641,26 @@ describe("matchesFilters experience matching", () => {
       }),
     },
     {
+      label: "principal roles from title inference",
+      job: createJob({
+        title: "Principal Software Engineer",
+        experienceLevel: undefined,
+      }),
+      filters: createFilters({
+        experienceLevels: ["principal"],
+      }),
+    },
+    {
+      label: "lead roles from title inference",
+      job: createJob({
+        title: "Lead Backend Engineer",
+        experienceLevel: undefined,
+      }),
+      filters: createFilters({
+        experienceLevels: ["lead"],
+      }),
+    },
+    {
       label: "intern roles from metadata inference",
       job: createJob({
         title: "Software Engineer",
@@ -649,6 +751,20 @@ describe("matchesFilters experience matching", () => {
         }),
         createFilters({
           experienceLevels: ["senior"],
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps ambiguous manager-family roles unspecified instead of coercing them into mid", () => {
+    expect(
+      matchesFilters(
+        createJob({
+          title: "Product Manager",
+          experienceLevel: undefined,
+        }),
+        createFilters({
+          experienceLevels: ["mid"],
         }),
       ),
     ).toBe(false);

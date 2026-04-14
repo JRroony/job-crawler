@@ -18,11 +18,11 @@ export function JobDetailPanel(props: JobDetailPanelProps) {
     return (
       <section className="rounded-[20px] border border-ink/10 bg-white p-6 shadow-sm">
         <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
-          Details
+          Preview
         </div>
-        <h3 className="mt-3 text-2xl font-semibold text-ink">Select a job to inspect it.</h3>
+        <h3 className="mt-3 text-2xl font-semibold text-ink">Select a result to preview it.</h3>
         <p className="mt-2 text-sm leading-6 text-slate">
-          The selected posting stays here while you move through the list on the left.
+          The full posting summary, source details, and validation state will appear here.
         </p>
       </section>
     );
@@ -33,11 +33,11 @@ export function JobDetailPanel(props: JobDetailPanelProps) {
   const postingUrl = jobPostingUrl(job);
 
   return (
-    <section className="rounded-[28px] border border-ink/10 bg-white/94 p-6 shadow-[0_18px_50px_rgba(15,23,42,0.07)] backdrop-blur">
+    <section className="rounded-[24px] border border-ink/10 bg-white/96 p-6 shadow-[0_18px_50px_rgba(15,23,42,0.07)] backdrop-blur">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
-            Details
+            Job preview
           </div>
           <h3 className="mt-2 text-[28px] font-semibold leading-tight text-ink">
             {job.title}
@@ -48,12 +48,6 @@ export function JobDetailPanel(props: JobDetailPanelProps) {
         <span className="rounded-full border border-ink/10 bg-mist/45 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate">
           {labelForProviderPlatform(job.sourcePlatform)}
         </span>
-      </div>
-
-      <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate">
-        <span>{job.locationText}</span>
-        <span className="text-slate/35">•</span>
-        <span>{formatPostedDate(job.postedAt)}</span>
       </div>
 
       {tags.length > 0 ? (
@@ -68,6 +62,22 @@ export function JobDetailPanel(props: JobDetailPanelProps) {
           ))}
         </div>
       ) : null}
+
+      <div className="mt-5 grid gap-3 text-sm text-slate sm:grid-cols-2">
+        <DetailItem label="Location" value={job.locationRaw || job.locationText} />
+        <DetailItem label="Posted" value={formatPostedDate(job.postingDate ?? job.postedAt)} />
+        <DetailItem label="Source" value={labelForProviderPlatform(job.sourcePlatform)} />
+        <DetailItem label="Validation" value={labelForLinkStatus(job.linkStatus)} tone={job.linkStatus} />
+        <DetailItem
+          label="Last checked"
+          value={
+            job.lastValidatedAt
+              ? formatRelativeMoment(job.lastValidatedAt)
+              : "Pending validation"
+          }
+        />
+        <DetailItem label="Source host" value={formatSourceHost(postingUrl)} />
+      </div>
 
       <div className="mt-6 flex flex-wrap gap-3">
         <a
@@ -92,40 +102,21 @@ export function JobDetailPanel(props: JobDetailPanelProps) {
         </button>
       </div>
 
-      <div className="mt-6 grid gap-3 sm:grid-cols-2">
-        <DetailItem
-          label="Validation"
-          value={labelForLinkStatus(job.linkStatus)}
-          tone={job.linkStatus}
-        />
-        <DetailItem
-          label="Last checked"
-          value={
-            job.lastValidatedAt
-              ? formatRelativeMoment(job.lastValidatedAt)
-              : "Pending validation"
-          }
-        />
-        <DetailItem
-          label="Posted"
-          value={job.postedAt ? formatPostedDate(job.postedAt) : "Date unavailable"}
-        />
-        <DetailItem
-          label="Source"
-          value={formatSourceHost(postingUrl)}
-        />
-      </div>
-
-      <div className="mt-6 rounded-[20px] border border-ink/8 bg-mist/35 px-5 py-5">
+      <div className="mt-6 rounded-[20px] border border-ink/8 bg-mist/30 px-5 py-5">
         <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
-          Notes
+          Summary
         </div>
         <p className="mt-3 text-sm leading-7 text-slate">
-          This role was pulled from {labelForProviderPlatform(job.sourcePlatform)} and links directly to the original public posting so you can verify the source without leaving the search flow.
+          This posting links back to the original public source so you can review the live listing without breaking your search flow.
           {job.sourceProvenance.length > 1
-            ? ` The crawler merged ${job.sourceProvenance.length} matching source records into this listing.`
+            ? ` ${job.sourceProvenance.length} source records were merged into this result during dedupe.`
             : ""}
         </p>
+        {job.descriptionSnippet ? (
+          <p className="mt-3 text-sm leading-7 text-slate">
+            {job.descriptionSnippet}
+          </p>
+        ) : null}
       </div>
     </section>
   );

@@ -38,13 +38,16 @@ export function FilterBar(props: FilterBarProps) {
     props.resultFilters.postedDate !== "any";
 
   return (
-    <section className="rounded-[22px] border border-ink/10 bg-white/88 px-4 py-4 shadow-sm sm:px-5">
+    <section className="rounded-[20px] border border-ink/10 bg-white/92 px-4 py-4 shadow-sm sm:px-5">
       <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate/70">
               Filters
             </h2>
+            <p className="mt-1 text-sm text-slate">
+              Keep the main list focused with quick filters. Open advanced filters only when you need extra control.
+            </p>
           </div>
           <button
             type="button"
@@ -59,38 +62,6 @@ export function FilterBar(props: FilterBarProps) {
           >
             Clear filters
           </button>
-        </div>
-
-        <div className="grid gap-4 xl:grid-cols-[1.1fr_1fr]">
-          <FilterGroup label="Platform">
-            {platformFilterOptions.map((option) => (
-              <FilterChip
-                key={option.value}
-                label={option.label}
-                selected={activePlatformSet.has(option.value)}
-                onClick={() => props.onTogglePlatform(option.value)}
-              />
-            ))}
-            {disabledPlatformFilterOptions.map((option) => (
-              <FilterChip
-                key={option.label}
-                label={`${option.label} · ${option.detail}`}
-                selected={false}
-                disabled
-              />
-            ))}
-          </FilterGroup>
-
-          <FilterGroup label="Experience">
-            {experienceFilterOptions.map((option) => (
-              <FilterChip
-                key={option.value}
-                label={option.label}
-                selected={activeExperienceSet.has(option.value)}
-                onClick={() => props.onToggleExperience(option.value)}
-              />
-            ))}
-          </FilterGroup>
         </div>
 
         <div className="grid gap-3 lg:grid-cols-[0.8fr_0.8fr_1fr]">
@@ -121,6 +92,52 @@ export function FilterBar(props: FilterBarProps) {
             ))}
           </FilterGroup>
         </div>
+
+        <details className="group rounded-[18px] border border-ink/8 bg-mist/30 px-4 py-3">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-ink">Advanced filters</div>
+              <div className="mt-1 text-sm text-slate">
+                Narrow by platform and experience without turning the page into a control panel.
+              </div>
+            </div>
+            <span className="rounded-full border border-ink/10 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate">
+              More
+            </span>
+          </summary>
+
+          <div className="mt-4 grid gap-4 border-t border-ink/8 pt-4 xl:grid-cols-[1.1fr_1fr]">
+            <FilterGroup label="Platform">
+              {platformFilterOptions.map((option) => (
+                <FilterChip
+                  key={option.value}
+                  label={option.label}
+                  selected={activePlatformSet.has(option.value)}
+                  onClick={() => props.onTogglePlatform(option.value)}
+                />
+              ))}
+              {disabledPlatformFilterOptions.map((option) => (
+                <FilterChip
+                  key={option.label}
+                  label={`${option.label} · ${option.detail}`}
+                  selected={false}
+                  disabled
+                />
+              ))}
+            </FilterGroup>
+
+            <FilterGroup label="Experience">
+              {experienceFilterOptions.map((option) => (
+                <FilterChip
+                  key={option.value}
+                  label={option.label}
+                  selected={activeExperienceSet.has(option.value)}
+                  onClick={() => props.onToggleExperience(option.value)}
+                />
+              ))}
+            </FilterGroup>
+          </div>
+        </details>
       </div>
     </section>
   );

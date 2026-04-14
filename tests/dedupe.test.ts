@@ -7,19 +7,29 @@ function createCandidate(overrides: Partial<Omit<JobListing, "_id" | "crawlRunId
   return {
     title: "Software Engineer",
     company: "Acme",
+    normalizedCompany: "acme",
+    normalizedTitle: "software engineer",
     country: "United States",
     state: "California",
     city: "San Francisco",
+    locationRaw: "San Francisco, California, United States",
+    normalizedLocation: "san francisco california united states",
     locationText: "San Francisco, California, United States",
+    remoteType: "onsite",
+    seniority: "mid",
     experienceLevel: "mid",
     sourcePlatform: "greenhouse",
+    sourceCompanySlug: "acme",
     sourceJobId: "1",
     sourceUrl: "https://example.com/job",
     applyUrl: "https://example.com/job/apply",
     resolvedUrl: "https://example.com/job/apply",
     canonicalUrl: "https://example.com/job",
+    postingDate: "2026-03-20T00:00:00.000Z",
     postedAt: "2026-03-20T00:00:00.000Z",
     discoveredAt: "2026-03-29T00:00:00.000Z",
+    crawledAt: "2026-03-29T00:00:00.000Z",
+    sponsorshipHint: "unknown",
     linkStatus: "valid",
     lastValidatedAt: "2026-03-29T00:00:00.000Z",
     rawSourceMetadata: {},
@@ -36,6 +46,7 @@ function createCandidate(overrides: Partial<Omit<JobListing, "_id" | "crawlRunId
       },
     ],
     sourceLookupKeys: ["greenhouse:1"],
+    dedupeFingerprint: "fingerprint-1",
     companyNormalized: "acme",
     titleNormalized: "software engineer",
     locationNormalized: "san francisco california united states",
@@ -71,24 +82,23 @@ describe("dedupeJobs", () => {
     expect(result[0].sourceProvenance).toHaveLength(2);
   });
 
-  it("falls back to the normalized company-title-location fingerprint when stronger ids differ", () => {
+  it("dedupes the same job discovered through different paths when the canonical posting URL matches", () => {
     const result = dedupeJobs([
       createCandidate({
-        canonicalUrl: undefined,
+        sourcePlatform: "company_page",
+        sourceJobId: "detail-role-1",
+        sourceLookupKeys: ["company_page:detail-role-1"],
+        sourceUrl: "https://example.com/careers/software-engineer",
+        applyUrl: "https://example.com/careers/software-engineer",
         resolvedUrl: undefined,
-        applyUrl: "https://example.com/job/a/apply",
-        sourceUrl: "https://example.com/job/a",
-        sourceJobId: "role-a",
-        sourceLookupKeys: ["greenhouse:role-a"],
       }),
       createCandidate({
-        canonicalUrl: undefined,
-        resolvedUrl: undefined,
-        applyUrl: "https://example.com/job/b/apply",
-        sourceUrl: "https://example.com/job/b",
         sourcePlatform: "greenhouse",
-        sourceJobId: "role-b",
-        sourceLookupKeys: ["greenhouse:role-b"],
+        sourceJobId: "role-1-recovered",
+        sourceLookupKeys: ["greenhouse:role-1-recovered"],
+        sourceUrl: "https://boards.greenhouse.io/acme/jobs/role-1",
+        applyUrl: "https://boards.greenhouse.io/acme/jobs/role-1/apply",
+        canonicalUrl: "https://example.com/job",
       }),
     ]);
 
@@ -127,7 +137,7 @@ describe("dedupeJobs", () => {
     expect(result).toHaveLength(1);
   });
 
-  it("dedupes by shared source lookup keys when the same job reappears with incomplete URL metadata", () => {
+  it("dedupes by shared platform job identity when the same job reappears with incomplete URL metadata", () => {
     const result = dedupeJobs([
       createCandidate({
         canonicalUrl: undefined,
@@ -143,6 +153,60 @@ describe("dedupeJobs", () => {
     ]);
 
     expect(result).toHaveLength(1);
+  });
+
+  it("preserves distinct jobs at the same company when similar titles have different canonical identities", () => {
+    const result = dedupeJobs([
+      createCandidate({
+        title: "Software Engineer",
+        titleNormalized: "software engineer",
+        sourceJobId: "role-backend",
+        sourceLookupKeys: ["greenhouse:role-backend"],
+        sourceUrl: "https://example.com/jobs/backend",
+        applyUrl: "https://example.com/jobs/backend/apply",
+        resolvedUrl: "https://example.com/jobs/backend/apply",
+        canonicalUrl: "https://example.com/jobs/backend",
+      }),
+      createCandidate({
+        title: "Senior Software Engineer",
+        titleNormalized: "senior software engineer",
+        sourceJobId: "role-senior",
+        sourceLookupKeys: ["greenhouse:role-senior"],
+        sourceUrl: "https://example.com/jobs/senior",
+        applyUrl: "https://example.com/jobs/senior/apply",
+        resolvedUrl: "https://example.com/jobs/senior/apply",
+        canonicalUrl: "https://example.com/jobs/senior",
+      }),
+    ]);
+
+    expect(result).toHaveLength(2);
+  });
+
+  it("preserves same company and title when locations differ", () => {
+    const result = dedupeJobs([
+      createCandidate({
+        sourceJobId: "role-sf",
+        sourceLookupKeys: ["greenhouse:role-sf"],
+        sourceUrl: "https://example.com/jobs/sf",
+        applyUrl: "https://example.com/jobs/sf/apply",
+        resolvedUrl: "https://example.com/jobs/sf/apply",
+        canonicalUrl: "https://example.com/jobs/sf",
+      }),
+      createCandidate({
+        sourceJobId: "role-nyc",
+        sourceLookupKeys: ["greenhouse:role-nyc"],
+        sourceUrl: "https://example.com/jobs/nyc",
+        applyUrl: "https://example.com/jobs/nyc/apply",
+        resolvedUrl: "https://example.com/jobs/nyc/apply",
+        canonicalUrl: "https://example.com/jobs/nyc",
+        city: "New York",
+        state: "New York",
+        locationText: "New York, New York, United States",
+        locationNormalized: "new york new york united states",
+      }),
+    ]);
+
+    expect(result).toHaveLength(2);
   });
 
   it("keeps Greenhouse jobs from different boards distinct when the scoped identity differs", () => {

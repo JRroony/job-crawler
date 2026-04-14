@@ -309,6 +309,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "web application developer",
     ],
     abbreviations: ["swe", "sde"],
+    tokenSynonyms: [
+      ["software", "application", "applications"],
+      ["engineer", "developer"],
+    ],
     adjacentConceptIds: [
       "backend_engineer",
       "frontend_engineer",
@@ -316,6 +320,7 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "platform_engineer",
       "mobile_engineer",
       "java_developer",
+      "member_of_technical_staff",
     ],
     broadDiscoveryQueries: [
       "software engineer",
@@ -331,6 +336,8 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "platform engineer",
       "mobile engineer",
       "java developer",
+      "member of technical staff",
+      "mts",
       "swe",
     ],
   },
@@ -348,6 +355,11 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "api engineer",
       "api developer",
       "server engineer",
+      "backend software engineer",
+    ],
+    tokenSynonyms: [
+      ["backend", "server", "api"],
+      ["engineer", "developer"],
     ],
     adjacentConceptIds: [
       "software_engineer",
@@ -377,6 +389,11 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "front end engineering",
       "ui engineer",
       "web engineer",
+      "frontend software engineer",
+    ],
+    tokenSynonyms: [
+      ["frontend", "ui", "web"],
+      ["engineer", "developer"],
     ],
     adjacentConceptIds: [
       "software_engineer",
@@ -402,6 +419,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "full stack engineering",
       "fullstack engineering",
       "full stack software engineer",
+    ],
+    tokenSynonyms: [
+      ["full stack", "fullstack"],
+      ["engineer", "developer"],
     ],
     adjacentConceptIds: [
       "software_engineer",
@@ -431,6 +452,11 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "sre",
     ],
     abbreviations: ["sre"],
+    tokenSynonyms: [
+      ["platform", "infrastructure", "systems", "service"],
+      ["engineer", "developer"],
+      ["site reliability engineer", "sre"],
+    ],
     adjacentConceptIds: [
       "software_engineer",
       "backend_engineer",
@@ -458,6 +484,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "ios developer",
       "android developer",
     ],
+    tokenSynonyms: [
+      ["mobile", "ios", "android"],
+      ["engineer", "developer"],
+    ],
     adjacentConceptIds: ["software_engineer", "frontend_engineer"],
     broadDiscoveryQueries: [
       "mobile engineer",
@@ -472,12 +502,42 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
     family: "software_engineering",
     canonicalTitle: "java developer",
     aliases: ["java engineer", "java software engineer", "java development", "jvm engineer"],
+    tokenSynonyms: [
+      ["java", "jvm"],
+      ["engineer", "developer"],
+    ],
     adjacentConceptIds: ["backend_engineer", "software_engineer"],
     broadDiscoveryQueries: [
       "java developer",
       "java engineer",
       "backend engineer",
       "software engineer",
+    ],
+  },
+  {
+    id: "member_of_technical_staff",
+    family: "software_engineering",
+    canonicalTitle: "member of technical staff",
+    aliases: [
+      "member technical staff",
+      "technical staff member",
+    ],
+    abbreviations: ["mts"],
+    tokenSynonyms: [
+      ["member of technical staff", "mts"],
+      ["engineer", "developer"],
+    ],
+    adjacentConceptIds: [
+      "software_engineer",
+      "backend_engineer",
+      "platform_engineer",
+    ],
+    broadDiscoveryQueries: [
+      "member of technical staff",
+      "mts",
+      "software engineer",
+      "backend engineer",
+      "platform engineer",
     ],
   },
   {
@@ -582,8 +642,14 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "insights analyst",
       "product analyst",
       "decision scientist",
+      "analytics consultant",
     ],
     abbreviations: ["bi analyst"],
+    tokenSynonyms: [
+      ["data", "analytics", "insights", "reporting"],
+      ["business intelligence", "bi"],
+      ["analyst", "scientist"],
+    ],
     adjacentConceptIds: ["business_analyst", "operations_analyst"],
     broadDiscoveryQueries: [
       "data analyst",
@@ -606,12 +672,20 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "business systems analyst",
       "systems analyst",
       "process analyst",
+      "business process analyst",
+      "functional analyst",
+    ],
+    tokenSynonyms: [
+      ["business", "process", "functional", "systems"],
+      ["analyst", "consultant"],
     ],
     adjacentConceptIds: ["data_analyst", "operations_analyst"],
     broadDiscoveryQueries: [
       "business analyst",
       "business systems analyst",
       "systems analyst",
+      "business process analyst",
+      "functional analyst",
       "data analyst",
       "operations analyst",
     ],
@@ -633,6 +707,11 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
     id: "product_manager",
     family: "product",
     canonicalTitle: "product manager",
+    aliases: ["product owner", "product lead", "product mgr"],
+    tokenSynonyms: [
+      ["product", "platform", "growth"],
+      ["manager", "owner", "lead"],
+    ],
     adjacentConceptIds: [
       "technical_product_manager",
       "growth_product_manager",
@@ -650,7 +729,12 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
     id: "technical_product_manager",
     family: "product",
     canonicalTitle: "technical product manager",
-    aliases: ["platform product manager", "technical product owner"],
+    aliases: ["platform product manager", "technical product owner", "technical product mgr"],
+    tokenSynonyms: [
+      ["technical", "platform"],
+      ["product", "pm"],
+      ["manager", "owner"],
+    ],
     adjacentConceptIds: [
       "product_manager",
       "growth_product_manager",
@@ -668,6 +752,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
     family: "product",
     canonicalTitle: "growth product manager",
     aliases: ["growth pm", "growth product lead"],
+    tokenSynonyms: [
+      ["growth", "product"],
+      ["manager", "lead", "pm"],
+    ],
     adjacentConceptIds: [
       "product_manager",
       "technical_product_manager",
@@ -685,6 +773,11 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
     family: "product",
     canonicalTitle: "associate product manager",
     abbreviations: ["apm"],
+    tokenSynonyms: [
+      ["associate", "apm"],
+      ["product", "pm"],
+      ["manager", "owner"],
+    ],
     adjacentConceptIds: [
       "product_manager",
       "technical_product_manager",

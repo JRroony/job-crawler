@@ -83,6 +83,7 @@ export type TitleConceptDefinition = {
   canonicalTitle: string;
   aliases?: string[];
   abbreviations?: string[];
+  tokenSynonyms?: Array<readonly string[]>;
   adjacentConceptIds?: TitleConceptId[];
   broadDiscoveryQueries?: string[];
   negativeConceptIds?: TitleConceptId[];
@@ -151,4 +152,20 @@ export type TitleMatchResult = {
   matchedTerms: string[];
   penalties: string[];
   explanation: string;
+  queryDiagnostics: {
+    original: string;
+    normalized: string;
+    canonical: string;
+    family?: TitleRoleFamily;
+    conceptId?: TitleConceptId;
+    aliasesUsed: string[];
+  };
+  jobDiagnostics: {
+    original: string;
+    normalized: string;
+    canonical: string;
+    family?: TitleRoleFamily;
+    conceptId?: TitleConceptId;
+    aliasesUsed: string[];
+  };
 };

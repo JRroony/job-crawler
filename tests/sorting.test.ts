@@ -1,100 +1,148 @@
 import { describe, expect, it } from "vitest";
 
-import { sortJobs } from "@/lib/server/crawler/sort";
+import {
+  explainJobRanking,
+  rankJobs,
+  sortJobsWithDiagnostics,
+} from "@/lib/server/crawler/sort";
 
-describe("sortJobs", () => {
-  it("sorts by posted date descending first", () => {
-    const jobs = sortJobs([
-      {
-        title: "B Role",
-        sourcePlatform: "lever",
-        postedAt: undefined,
-      },
-      {
-        title: "A Role",
-        sourcePlatform: "greenhouse",
-        postedAt: "2026-03-20T00:00:00.000Z",
-      },
-      {
-        title: "C Role",
-        sourcePlatform: "ashby",
-        postedAt: "2026-03-21T00:00:00.000Z",
-      },
-    ]);
+const now = new Date("2026-04-13T12:00:00.000Z");
 
-    expect(jobs.map((job) => job.title)).toEqual(["C Role", "A Role", "B Role"]);
-  });
-
-  it("falls back to source and title when posted date is unavailable", () => {
-    const jobs = sortJobs([
-      {
-        title: "Z Role",
-        sourcePlatform: "lever",
-        postedAt: undefined,
-      },
-      {
-        title: "A Role",
-        sourcePlatform: "ashby",
-        postedAt: undefined,
-      },
-      {
-        title: "B Role",
-        sourcePlatform: "ashby",
-        postedAt: undefined,
-      },
-    ]);
-
-    expect(jobs.map((job) => `${job.sourcePlatform}:${job.title}`)).toEqual([
-      "ashby:A Role",
-      "ashby:B Role",
-      "lever:Z Role",
-    ]);
-  });
-
-  it("ranks stronger title matches ahead of newer but broader ones", () => {
-    const jobs = sortJobs(
+describe("crawl ranking", () => {
+  it("ranks exact title matches above weaker semantic matches", () => {
+    const ranked = rankJobs(
       [
-        {
+        buildJob({
           title: "Backend Engineer",
           sourcePlatform: "lever",
-          postedAt: "2026-03-25T00:00:00.000Z",
-        },
-        {
-          title: "SWE",
-          sourcePlatform: "ashby",
-          postedAt: "2026-03-24T00:00:00.000Z",
-        },
-        {
-          title: "Software Developer",
-          sourcePlatform: "greenhouse",
-          postedAt: "2026-03-23T00:00:00.000Z",
-        },
-        {
-          title: "Senior Software Engineer",
-          sourcePlatform: "ashby",
-          postedAt: "2026-03-22T00:00:00.000Z",
-        },
-        {
-          title: "Staff Software Engineer",
-          sourcePlatform: "lever",
-          postedAt: "2026-03-26T00:00:00.000Z",
-        },
-        {
+          postingDate: "2026-04-13T00:00:00.000Z",
+        }),
+        buildJob({
           title: "Software Engineer",
           sourcePlatform: "greenhouse",
-          postedAt: "2026-03-21T00:00:00.000Z",
-        },
+          postingDate: "2026-04-02T00:00:00.000Z",
+        }),
+        buildJob({
+          title: "Software Developer",
+          sourcePlatform: "ashby",
+          postingDate: "2026-04-12T00:00:00.000Z",
+        }),
       ],
       "Software Engineer",
+      now,
     );
 
-    expect(jobs.map((job) => job.title)).toEqual([
+    expect(ranked.map(({ job }) => job.title)).toEqual([
       "Software Engineer",
-      "Staff Software Engineer",
-      "Senior Software Engineer",
       "Software Developer",
-      "SWE",
       "Backend Engineer",
     ]);
+    expect(ranked[0]?.ranking.relevanceScore).toBeGreaterThan(ranked[1]?.ranking.relevanceScore ?? 0);
+  });
+
+  it("ranks more recent relevant jobs above stale ones", () => {
+    const ranked = rankJobs(
+      [
+        buildJob({
+          title: "Software Engineer",
+          sourcePlatform: "greenhouse",
+          postingDate: "2026-04-12T00:00:00.000Z",
+        }),
+        buildJob({
+          title: "Software Engineer",
+          sourcePlatform: "lever",
+          postingDate: "2026-01-10T00:00:00.000Z",
+        }),
+      ],
+      "Software Engineer",
+      now,
+    );
+
+    expect(ranked.map(({ job }) => job.sourcePlatform)).toEqual(["greenhouse", "lever"]);
+    expect(ranked[0]?.ranking.dateScore).toBeGreaterThan(ranked[1]?.ranking.dateScore ?? 0);
+    expect(ranked[0]?.ranking.dateSource).toBe("postingDate");
+  });
+
+  it("uses crawled or discovered timestamps as a defined fallback when posting date is missing", () => {
+    const ranked = sortJobsWithDiagnostics(
+      [
+        buildJob({
+          title: "Software Engineer",
+          sourcePlatform: "lever",
+          crawledAt: "2026-04-12T12:00:00.000Z",
+          discoveredAt: "2026-04-10T12:00:00.000Z",
+        }),
+        buildJob({
+          title: "Software Engineer",
+          sourcePlatform: "ashby",
+          discoveredAt: "2026-04-12T10:00:00.000Z",
+        }),
+        buildJob({
+          title: "Software Engineer",
+          sourcePlatform: "greenhouse",
+          postingDate: "2026-02-01T00:00:00.000Z",
+        }),
+      ],
+      "Software Engineer",
+      now,
+    );
+
+    expect(ranked.map((job) => job.sourcePlatform)).toEqual(["lever", "ashby", "greenhouse"]);
+    expect(ranked[0]?.rawSourceMetadata.crawlRanking).toMatchObject({
+      dateSource: "crawledAt",
+      usedFallbackDate: true,
+    });
+    expect(ranked[1]?.rawSourceMetadata.crawlRanking).toMatchObject({
+      dateSource: "discoveredAt",
+      usedFallbackDate: true,
+    });
+    expect(ranked[2]?.rawSourceMetadata.crawlRanking).toMatchObject({
+      dateSource: "postingDate",
+      usedFallbackDate: false,
+    });
+  });
+
+  it("emits explainable diagnostics for relevance, date handling, and final contributors", () => {
+    const job = buildJob({
+      title: "Software Engineer",
+      sourcePlatform: "greenhouse",
+      postingDate: "2026-04-12T00:00:00.000Z",
+    });
+
+    expect(explainJobRanking(job, "Software Engineer", now)).toMatchObject({
+      relevanceScore: 1000,
+      relevanceTier: "exact",
+      dateSource: "postingDate",
+      dateScore: expect.any(Number),
+      finalScore: expect.any(Number),
+      finalRankContributors: expect.arrayContaining([
+        "relevance=1000",
+        expect.stringMatching(/^date=\d+$/),
+        "dateSource=postingDate",
+      ]),
+    });
   });
 });
+
+function buildJob(input: {
+  title: string;
+  sourcePlatform: "greenhouse" | "lever" | "ashby";
+  postingDate?: string;
+  discoveredAt?: string;
+  crawledAt?: string;
+}) {
+  return {
+    title: input.title,
+    company: "Acme",
+    sourcePlatform: input.sourcePlatform,
+    sourceJobId: `${input.sourcePlatform}-${input.title}`,
+    sourceUrl: `https://example.com/${input.sourcePlatform}/${encodeURIComponent(input.title)}`,
+    applyUrl: `https://example.com/${input.sourcePlatform}/${encodeURIComponent(input.title)}/apply`,
+    canonicalUrl: `https://example.com/${input.sourcePlatform}/${encodeURIComponent(input.title)}`,
+    postingDate: input.postingDate,
+    postedAt: input.postingDate,
+    discoveredAt: input.discoveredAt ?? "2026-04-01T00:00:00.000Z",
+    crawledAt: input.crawledAt,
+    rawSourceMetadata: {},
+  };
+}

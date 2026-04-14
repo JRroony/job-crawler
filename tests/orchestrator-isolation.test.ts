@@ -1297,6 +1297,16 @@ describe("crawl orchestration", () => {
       "San Francisco, CA",
       "Seattle",
     ]);
+    expect(storedJobs[0]?.rawSourceMetadata).toMatchObject({
+      crawlLocationMatch: expect.objectContaining({
+        originalQueryLocation: "United States",
+        normalizedQueryLocation: "united states",
+        queryExpandedTermsUsed: expect.arrayContaining(["united states", "usa", "us"]),
+        rawJobLocation: expect.any(String),
+        normalizedJobLocation: expect.any(String),
+        explanation: expect.any(String),
+      }),
+    });
     expectNoDirectJobFetches(fetchImpl);
   });
 

@@ -3,8 +3,8 @@ import "server-only";
 import {
   inferExperienceLevel,
   normalizeComparableText,
-  runWithConcurrency,
 } from "@/lib/server/crawler/helpers";
+import { buildCanonicalAshbyJobUrl, parseAshbyUrl } from "@/lib/server/discovery/ashby-url";
 import {
   type AshbyDiscoveredSource,
   isAshbySource,
@@ -19,11 +19,10 @@ import {
   deepCollect,
   extractWindowAppData,
   extractNextData,
-  finalizeProviderResult,
   firstString,
-  unsupportedProviderResult,
 } from "@/lib/server/providers/shared";
-import { defineProvider } from "@/lib/server/providers/types";
+import { type ProviderExecutionContext } from "@/lib/server/providers/types";
+import { createAdapterProvider } from "@/lib/server/providers/adapter";
 
 type AshbyCandidate = {
   id?: string;
@@ -97,8 +96,15 @@ export function normalizeAshbyCandidate(input: {
     explicitExperienceReasons: explicitExperienceLevel
       ? [`Ashby metadata explicitly indicates ${explicitExperienceLevel.replace("_", " ")}.`]
       : undefined,
+    explicitEmploymentType: input.candidate.employmentType,
+    explicitSeniority: input.candidate.seniority,
     structuredExperienceHints,
     descriptionExperienceHints,
+    descriptionSnippet:
+      input.candidate.summary ??
+      input.candidate.descriptionPlain ??
+      input.candidate.jobDescription ??
+      input.candidate.descriptionHtml,
   });
 }
 
@@ -153,91 +159,118 @@ export async function extractAshbyJobFromDetailUrl(input: {
 }
 
 export function createAshbyProvider() {
-  return defineProvider({
+  return createAdapterProvider({
     provider: "ashby",
     supportsSource: isAshbySource,
-    async crawlSources(context, sources) {
-      if (sources.length === 0) {
-        return unsupportedProviderResult(
-          "ashby",
-          "No discovered Ashby sources are available.",
-          sources.length,
-        );
-      }
-
-      const warnings: string[] = [];
-      const discoveredAt = context.now.toISOString();
-
-      const boards = await runWithConcurrency(
-        sources,
-        async (source) => {
-          const boardUrl = resolveAshbyBoardUrl(source);
-          const companyToken = resolveAshbyToken(source);
-
-          if (!boardUrl) {
-            warnings.push(
-              `Ashby source ${describeAshbySource(source)} is missing a usable board URL.`,
-            );
-            return {
-              fetchedCount: 0,
-              jobs: [],
-            };
-          }
-
-          const result = await safeFetchText(boardUrl, {
-            fetchImpl: context.fetchImpl,
-            method: "GET",
-            headers: {
-              Accept: "text/html,application/xhtml+xml",
-            },
-            cache: "no-store",
-          });
-
-          if (!result.ok) {
-            warnings.push(formatAshbyFetchWarning(source, result));
-            return {
-              fetchedCount: 0,
-              jobs: [],
-            };
-          }
-
-          const extracted = extractAshbyCandidates(
-            result.data ?? "",
-            companyToken ?? buildProviderCompanyToken(source.companyHint) ?? "ashby",
-          );
-          const jobs = extracted.map((candidate) =>
-            normalizeAshbyCandidate({
-              companyToken:
-                companyToken ??
-                buildProviderCompanyToken(source.companyHint) ??
-                "ashby",
-              boardUrl,
-              companyName: source.companyHint,
-              discoveredAt,
-              candidate,
-            }),
-          );
-
-          return {
-            fetchedCount: extracted.length,
-            jobs,
-          };
-        },
-        2,
-      );
-
-      const fetchedCount = boards.reduce((total, board) => total + board.fetchedCount, 0);
-      const jobs = boards.flatMap((board) => board.jobs);
-
-      return finalizeProviderResult({
-        provider: "ashby",
-        jobs,
-        sourceCount: sources.length,
-        fetchedCount,
-        warnings,
-      });
+    unsupportedMessage: "No discovered Ashby sources are available.",
+    concurrency: 2,
+    async crawlSource(context, source) {
+      return crawlAshbySource(context, source);
     },
   });
+}
+
+async function crawlAshbySource(
+  context: ProviderExecutionContext,
+  source: AshbyDiscoveredSource,
+) {
+  const warnings: string[] = [];
+  const dropReasons: string[] = [];
+  const discoveredAt = context.now.toISOString();
+  const boardUrl = resolveAshbyBoardUrl(source);
+  const companyToken = resolveAshbyToken(source);
+  const normalizedCompanyToken =
+    companyToken ?? buildProviderCompanyToken(source.companyHint) ?? "ashby";
+
+  if (!boardUrl) {
+    warnings.push(
+      `Ashby source ${describeAshbySource(source)} is missing a usable board URL.`,
+    );
+    dropReasons.push("missing_board_url");
+    return {
+      fetchedCount: 0,
+      fetchCount: 0,
+      jobs: [],
+      warnings,
+      parseFailureCount: 1,
+      dropReasons,
+    };
+  }
+
+  const result = await safeFetchText(boardUrl, {
+    fetchImpl: context.fetchImpl,
+    method: "GET",
+    headers: {
+      Accept: "text/html,application/xhtml+xml",
+    },
+    cache: "no-store",
+  });
+
+  if (!result.ok) {
+    warnings.push(formatAshbyFetchWarning(source, result));
+    dropReasons.push("board_fetch_failed");
+  }
+
+  const extracted = result.ok
+    ? extractAshbyCandidates(result.data ?? "", normalizedCompanyToken)
+    : [];
+  const jobs = extracted.map((candidate) =>
+    normalizeAshbyCandidate({
+      companyToken: normalizedCompanyToken,
+      boardUrl,
+      companyName: source.companyHint,
+      discoveredAt,
+      candidate,
+    }),
+  );
+
+  const detailFallbackJob =
+    jobs.length === 0 && companyToken && source.jobId
+      ? await extractAshbyJobFromDetailUrl({
+          detailUrl:
+            parseAshbyUrl(source.url)?.canonicalJobUrl ??
+            buildCanonicalAshbyJobUrl(companyToken, source.jobId),
+          companyToken,
+          companyHint: source.companyHint,
+          discoveredAt,
+          fetchImpl: context.fetchImpl,
+        })
+      : undefined;
+
+  if (extracted.length === 0 && !detailFallbackJob) {
+    dropReasons.push(source.jobId ? "detail_fallback_failed" : "empty_board_payload");
+  }
+
+  const normalizedJobs = detailFallbackJob ? [detailFallbackJob] : jobs;
+
+  console.info("[ashby:crawl-source]", {
+    companyToken,
+    boardUrl,
+    detailJobId: source.jobId,
+    fetchedCount: extracted.length,
+    normalizedCount: normalizedJobs.length,
+    usedDetailFallback: Boolean(detailFallbackJob),
+    dropReasons,
+  });
+
+  if (normalizedJobs.length > 0) {
+    await context.onBatch?.({
+      provider: "ashby",
+      jobs: normalizedJobs,
+      sourceCount: 1,
+      fetchedCount: extracted.length || (detailFallbackJob ? 1 : 0),
+    });
+  }
+
+  return {
+    fetchedCount: extracted.length || (detailFallbackJob ? 1 : 0),
+    fetchCount: 1 + (detailFallbackJob ? 1 : 0),
+    jobs: normalizedJobs,
+    warnings,
+    parseSuccessCount: normalizedJobs.length,
+    parseFailureCount: source.jobId && !detailFallbackJob && jobs.length === 0 ? 1 : 0,
+    dropReasons,
+  };
 }
 
 function extractAshbyCandidates(html: string, companyToken: string): AshbyCandidate[] {

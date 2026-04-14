@@ -288,15 +288,16 @@ function inferStructuredUsParts(value: string, isRemote: boolean) {
       return false;
     }
 
-    const normalized = normalizeLocationText(part);
+    const normalized = normalizeLocationText(stripLeadingWorkplaceDescriptor(part));
     return Boolean(normalized) &&
       normalized !== "remote" &&
+      normalized !== "hybrid" &&
       !resolveUsState(part) &&
       !isUnitedStatesValue(part);
   });
 
   return {
-    city: !isRemote && cityPart ? cityPart.trim() : undefined,
+    city: !isRemote && cityPart ? stripLeadingWorkplaceDescriptor(cityPart) : undefined,
     state,
     stateCode,
   };
@@ -416,6 +417,13 @@ function splitLocationParts(value: string) {
     .split(/[,/|]| - /g)
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function stripLeadingWorkplaceDescriptor(value: string) {
+  return value
+    .replace(/^(?:remote|hybrid|onsite|on site)\s+(?:in|within)\s+/i, "")
+    .replace(/^(?:remote|hybrid|onsite|on site)\s+/i, "")
+    .trim();
 }
 
 function firstString(

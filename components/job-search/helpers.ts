@@ -1,5 +1,6 @@
 "use client";
 
+import { buildStableJobRenderIdentity } from "@/lib/job-identity";
 import type {
   ActiveCrawlerPlatform,
   ExperienceLevel,
@@ -223,8 +224,9 @@ export function filterJobsForDisplay(
 export function getJobTags(job: JobListing) {
   const tags: string[] = [];
 
-  if (isRemoteJob(job)) {
-    tags.push("Remote");
+  const workplaceLabel = getWorkplaceLabel(job);
+  if (workplaceLabel) {
+    tags.push(workplaceLabel);
   }
 
   if (isVisaFriendlyJob(job)) {
@@ -243,6 +245,22 @@ export function getJobTags(job: JobListing) {
   return tags;
 }
 
+export function getWorkplaceLabel(job: JobListing) {
+  if (job.remoteType === "hybrid") {
+    return "Hybrid";
+  }
+
+  if (job.remoteType === "remote") {
+    return "Remote";
+  }
+
+  if (job.remoteType === "onsite") {
+    return undefined;
+  }
+
+  return isRemoteJob(job) ? "Remote" : undefined;
+}
+
 export function getExperienceLabel(job: JobListing) {
   const level =
     job.experienceLevel ??
@@ -253,11 +271,27 @@ export function getExperienceLabel(job: JobListing) {
 }
 
 export function isRemoteJob(job: JobListing) {
+  if (job.remoteType === "remote" || job.remoteType === "hybrid") {
+    return true;
+  }
+
+  if (job.remoteType === "onsite") {
+    return false;
+  }
+
   const searchable = buildSearchableJobText(job);
   return /\b(remote|work from home|distributed)\b/i.test(searchable);
 }
 
 export function isVisaFriendlyJob(job: JobListing) {
+  if (job.sponsorshipHint === "supported") {
+    return true;
+  }
+
+  if (job.sponsorshipHint === "not_supported") {
+    return false;
+  }
+
   const searchable = buildSearchableJobText(job);
 
   if (
@@ -275,7 +309,7 @@ export function isVisaFriendlyJob(job: JobListing) {
 }
 
 export function isNewJob(job: JobListing) {
-  const postedAt = toTimestamp(job.postedAt);
+  const postedAt = toTimestamp(job.postingDate ?? job.postedAt);
   if (!postedAt) {
     return false;
   }
@@ -291,12 +325,12 @@ export function matchesPostedDateFilter(
     return true;
   }
 
-  const postedAt = toTimestamp(job.postedAt);
-  if (!postedAt) {
+  const normalizedPostedAt = toTimestamp(job.postingDate ?? job.postedAt);
+  if (!normalizedPostedAt) {
     return false;
   }
 
-  const diffMs = Date.now() - postedAt;
+  const diffMs = Date.now() - normalizedPostedAt;
   const windowMs =
     postedDate === "24h"
       ? 24 * 60 * 60 * 1000
@@ -323,7 +357,7 @@ export function buildStableJobRenderKeys(jobs: JobListing[]) {
   const seen = new Map<string, number>();
 
   return jobs.map((job) => {
-    const baseKey = resolveStableJobIdentity(job);
+    const baseKey = buildStableJobRenderIdentity(job);
     const occurrence = seen.get(baseKey) ?? 0;
     seen.set(baseKey, occurrence + 1);
 
@@ -331,28 +365,13 @@ export function buildStableJobRenderKeys(jobs: JobListing[]) {
   });
 }
 
-function resolveStableJobIdentity(job: JobListing) {
-  return (
-    job._id ||
-    job.contentFingerprint ||
-    [
-      job.sourcePlatform,
-      job.sourceJobId,
-      job.applyUrl,
-      job.titleNormalized,
-      job.companyNormalized,
-      job.locationNormalized,
-    ]
-      .filter(Boolean)
-      .join("|")
-  );
-}
-
 function buildSearchableJobText(job: JobListing) {
   return [
     job.title,
     job.company,
+    job.locationRaw,
     job.locationText,
+    job.descriptionSnippet,
     safeStringify(job.rawSourceMetadata),
   ]
     .filter(Boolean)

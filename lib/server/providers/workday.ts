@@ -27,16 +27,15 @@ import {
   companyFromJsonLd,
   deepCollect,
   extractNextData,
-  finalizeProviderResult,
   firstString,
   locationFromJsonLd,
   resolveUrl,
-  unsupportedProviderResult,
 } from "@/lib/server/providers/shared";
 import {
-  defineProvider,
   type NormalizedJobSeed,
+  type ProviderExecutionContext,
 } from "@/lib/server/providers/types";
+import { createAdapterProvider } from "@/lib/server/providers/adapter";
 
 type WorkdayRecord = Record<string, unknown>;
 
@@ -137,8 +136,11 @@ export function normalizeWorkdayJob(input: {
     explicitCountry: firstString(input.candidate, ["country", "countryName", "countryRegion"]),
     explicitState: firstString(input.candidate, ["state", "stateName", "region"]),
     explicitCity: firstString(input.candidate, ["city", "locality"]),
+    explicitEmploymentType: firstString(input.candidate, ["employmentType", "jobType", "timeType"]),
+    explicitSeniority: firstString(input.candidate, ["seniority", "careerLevel"]),
     structuredExperienceHints,
     descriptionExperienceHints,
+    descriptionSnippet: firstString(input.candidate, [...workdayDescriptionKeys]),
   });
 }
 
@@ -221,76 +223,102 @@ export async function extractWorkdayJobFromDetailUrl(input: {
 }
 
 export function createWorkdayProvider() {
-  return defineProvider({
+  return createAdapterProvider({
     provider: "workday",
     supportsSource: isWorkdaySource,
-    async crawlSources(context, sources) {
-      if (sources.length === 0) {
-        return unsupportedProviderResult(
-          "workday",
-          "No discovered Workday sources are available.",
-          sources.length,
-        );
-      }
-
-      const warnings: string[] = [];
-      const discoveredAt = context.now.toISOString();
-
-      const sites = await runWithConcurrency(
-        sources,
-        async (source) => {
-          const apiAttempt = await fetchWorkdaySourceFromApi(source, context.fetchImpl);
-          const jobsFromApi = apiAttempt.jobs.map((candidate) =>
-            normalizeWorkdayJob({
-              source,
-              discoveredAt,
-              candidate,
-            }),
-          );
-
-          const fallback =
-            apiAttempt.jobs.length === 0
-              ? await fetchWorkdaySourceFromHtml(source, context.fetchImpl, discoveredAt)
-              : {
-                  fetchedCount: 0,
-                  jobs: [] as NormalizedJobSeed[],
-                  warning: undefined,
-                };
-          const jobsFromHtml = fallback.jobs;
-
-          const normalizedJobs = dedupeWorkdaySeeds([
-            ...jobsFromApi,
-            ...jobsFromHtml,
-          ]);
-
-          if (apiAttempt.warning) {
-            warnings.push(apiAttempt.warning);
-          }
-
-          if (fallback.warning) {
-            warnings.push(fallback.warning);
-          }
-
-          return {
-            fetchedCount: apiAttempt.fetchedCount + fallback.fetchedCount,
-            jobs: normalizedJobs,
-          };
-        },
-        2,
-      );
-
-      const fetchedCount = sites.reduce((total, site) => total + site.fetchedCount, 0);
-      const jobs = sites.flatMap((site) => site.jobs);
-
-      return finalizeProviderResult({
-        provider: "workday",
-        jobs,
-        sourceCount: sources.length,
-        fetchedCount,
-        warnings,
-      });
+    unsupportedMessage: "No discovered Workday sources are available.",
+    concurrency: 2,
+    async crawlSource(context, source) {
+      return crawlWorkdaySource(context, source);
     },
   });
+}
+
+async function crawlWorkdaySource(
+  context: ProviderExecutionContext,
+  source: WorkdayDiscoveredSource,
+) {
+  const warnings: string[] = [];
+  const dropReasons: string[] = [];
+  const discoveredAt = context.now.toISOString();
+
+  const apiAttempt = await fetchWorkdaySourceFromApi(source, context.fetchImpl);
+  const jobsFromApi = apiAttempt.jobs.map((candidate) =>
+    normalizeWorkdayJob({
+      source,
+      discoveredAt,
+      candidate,
+    }),
+  );
+
+  const fallback =
+    apiAttempt.jobs.length === 0
+      ? await fetchWorkdaySourceFromHtml(source, context.fetchImpl, discoveredAt)
+      : {
+          fetchedCount: 0,
+          jobs: [] as NormalizedJobSeed[],
+          warning: undefined,
+        };
+
+  const detailFallbackJob =
+    jobsFromApi.length === 0 && fallback.jobs.length === 0 && isDetailLikeWorkdaySource(source)
+      ? await extractWorkdayJobFromDetailUrl({
+          detailUrl: source.url,
+          source,
+          discoveredAt,
+          fetchImpl: context.fetchImpl,
+        })
+      : undefined;
+
+  if (apiAttempt.warning) {
+    warnings.push(apiAttempt.warning);
+    dropReasons.push("api_fetch_failed");
+  }
+
+  if (fallback.warning) {
+    warnings.push(fallback.warning);
+    dropReasons.push("html_fallback_failed");
+  }
+
+  if (jobsFromApi.length === 0 && fallback.jobs.length === 0 && !detailFallbackJob) {
+    dropReasons.push(isDetailLikeWorkdaySource(source) ? "detail_fallback_failed" : "empty_source_payload");
+  }
+
+  const normalizedJobs = dedupeWorkdaySeeds([
+    ...jobsFromApi,
+    ...fallback.jobs,
+    ...(detailFallbackJob ? [detailFallbackJob] : []),
+  ]);
+
+  console.info("[workday:crawl-source]", {
+    token: source.token,
+    url: source.url,
+    detailJobId: source.jobId,
+    fetchedCount: apiAttempt.fetchedCount + fallback.fetchedCount,
+    normalizedCount: normalizedJobs.length,
+    usedDetailFallback: Boolean(detailFallbackJob),
+    dropReasons,
+  });
+
+  if (normalizedJobs.length > 0) {
+    await context.onBatch?.({
+      provider: "workday",
+      jobs: normalizedJobs,
+      sourceCount: 1,
+      fetchedCount: apiAttempt.fetchedCount + fallback.fetchedCount + (detailFallbackJob ? 1 : 0),
+    });
+  }
+
+  return {
+    fetchedCount: apiAttempt.fetchedCount + fallback.fetchedCount + (detailFallbackJob ? 1 : 0),
+    fetchCount: 1 + (fallback.fetchedCount > 0 || fallback.warning ? 1 : 0) + (detailFallbackJob ? 1 : 0),
+    jobs: normalizedJobs,
+    warnings,
+    parseSuccessCount: normalizedJobs.length,
+    parseFailureCount:
+      (jobsFromApi.length === 0 && fallback.jobs.length === 0 && !detailFallbackJob ? 1 : 0),
+    dropReasons,
+  };
 }
 
 async function fetchWorkdaySourceFromApi(
@@ -389,6 +417,11 @@ async function fetchWorkdaySourceFromHtml(
     ]),
     warning: undefined,
   };
+}
+
+function isDetailLikeWorkdaySource(source: WorkdayDiscoveredSource) {
+  const parsed = parseWorkdayUrl(source.url);
+  return Boolean(source.jobId || parsed?.kind === "job");
 }
 
 function extractWorkdayListCandidates(data: unknown) {

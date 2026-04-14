@@ -5,6 +5,7 @@ import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import { createAshbyProvider } from "@/lib/server/providers/ashby";
 import { createCompanyPageProvider } from "@/lib/server/providers/company-page";
 import { createGreenhouseProvider } from "@/lib/server/providers/greenhouse";
+import { createLeverProvider } from "@/lib/server/providers/lever";
 import { createWorkdayProvider } from "@/lib/server/providers/workday";
 import type { CrawlProvider, ProviderExecutionContext } from "@/lib/server/providers/types";
 import type { CompanyPageSourceConfig } from "@/lib/types";
@@ -21,6 +22,15 @@ function greenhouseSource(token: string) {
 function ashbySource(token: string) {
   return classifySourceCandidate({
     url: `https://jobs.ashbyhq.com/${token}`,
+    token,
+    confidence: "high",
+    discoveryMethod: "configured_env",
+  });
+}
+
+function leverSource(token: string, jobId?: string) {
+  return classifySourceCandidate({
+    url: jobId ? `https://jobs.lever.co/${token}/${jobId}` : `https://jobs.lever.co/${token}`,
     token,
     confidence: "high",
     discoveryMethod: "configured_env",
@@ -107,6 +117,13 @@ describe("provider crawl status and live parsing", () => {
       city: "San Francisco",
       sourcePlatform: "greenhouse",
       sourceUrl: "https://boards.greenhouse.io/openai/jobs/backend-role",
+    });
+    expect(result.diagnostics).toMatchObject({
+      provider: "greenhouse",
+      discoveryCount: 1,
+      fetchCount: 1,
+      parseSuccessCount: 1,
+      parseFailureCount: 0,
     });
   });
 
@@ -307,6 +324,132 @@ describe("provider crawl status and live parsing", () => {
       sourcePlatform: "ashby",
       sourceUrl: "https://jobs.ashbyhq.com/notion/role-1",
     });
+    expect(result.diagnostics).toMatchObject({
+      provider: "ashby",
+      discoveryCount: 1,
+      fetchCount: 1,
+      parseSuccessCount: 1,
+      parseFailureCount: 0,
+    });
+  });
+
+  it("crawls Lever postings into normalized jobs and preserves hosted URLs", async () => {
+    const provider = createLeverProvider();
+    const fetchImpl = vi.fn(async () => {
+      return new Response(
+        JSON.stringify([
+          {
+            id: "role-1",
+            text: "Senior Backend Engineer",
+            hostedUrl: "https://jobs.lever.co/figma/role-1",
+            applyUrl: "https://jobs.lever.co/figma/role-1/apply",
+            createdAt: 1773100800000,
+            workplaceType: "Hybrid",
+            categories: {
+              location: "Seattle, WA",
+              commitment: "Full-time",
+              department: "Engineering",
+            },
+          },
+        ]),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Backend Engineer",
+        country: "United States",
+      },
+      sources: [leverSource("figma")],
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.fetchedCount).toBe(1);
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0]).toMatchObject({
+      title: "Senior Backend Engineer",
+      country: "United States",
+      state: "Washington",
+      city: "Seattle",
+      sourcePlatform: "lever",
+      sourceUrl: "https://jobs.lever.co/figma/role-1",
+      applyUrl: "https://jobs.lever.co/figma/role-1/apply",
+    });
+    expect(result.diagnostics).toMatchObject({
+      provider: "lever",
+      discoveryCount: 1,
+      fetchCount: 1,
+      parseSuccessCount: 1,
+      parseFailureCount: 0,
+    });
+  });
+
+  it("uses detail fallback for a Lever detail source when the board list is empty", async () => {
+    const provider = createLeverProvider();
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url === "https://api.lever.co/v0/postings/figma?mode=json") {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        });
+      }
+
+      if (url === "https://api.lever.co/v0/postings/figma/role-1?mode=json") {
+        return new Response(
+          JSON.stringify({
+            id: "role-1",
+            text: "Product Analyst",
+            hostedUrl: "https://jobs.lever.co/figma/role-1",
+            createdAt: 1773100800000,
+            categories: {
+              location: "Remote US",
+              commitment: "Full-time",
+            },
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+
+      return new Response("", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Product Analyst",
+        country: "United States",
+      },
+      sources: [leverSource("figma", "role-1")],
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0]).toMatchObject({
+      title: "Product Analyst",
+      locationText: "Remote US",
+      sourceUrl: "https://jobs.lever.co/figma/role-1",
+    });
+    expect(result.diagnostics?.dropReasonCounts).toEqual(
+      expect.objectContaining({}),
+    );
   });
 
   it("crawls a Workday source through its JSON endpoint into normalized jobs", async () => {
@@ -359,6 +502,13 @@ describe("provider crawl status and live parsing", () => {
       sourcePlatform: "workday",
       sourceUrl:
         "https://acme.wd1.myworkdayjobs.com/en-US/Careers/job/Seattle-WA/Senior-Data-Engineer_R12345",
+    });
+    expect(result.diagnostics).toMatchObject({
+      provider: "workday",
+      discoveryCount: 1,
+      fetchCount: 1,
+      parseSuccessCount: 1,
+      parseFailureCount: 0,
     });
   });
 

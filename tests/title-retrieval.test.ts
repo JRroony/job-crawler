@@ -72,6 +72,8 @@ describe("title retrieval query expansion", () => {
         "platform engineer",
         "mobile engineer",
         "java developer",
+        "member of technical staff",
+        "mts",
         "api developer",
         "server engineer",
         "service engineer",
@@ -296,6 +298,47 @@ describe("title retrieval scoring", () => {
       matches: true,
       tier: "synonym",
     });
+  });
+
+  it.each([
+    "Member of Technical Staff",
+    "MTS",
+  ])("keeps %s as a closely related software-engineering sibling", (title) => {
+    expect(
+      getTitleMatchResult(title, "Software Engineer", {
+        mode: "balanced",
+      }),
+    ).toMatchObject({
+      matches: true,
+      tier: "adjacent_concept",
+    });
+  });
+
+  it("surfaces match diagnostics with normalized query data and expansion aliases", () => {
+    const result = getTitleMatchResult("Member of Technical Staff", "Software Engineer");
+
+    expect(result.matches).toBe(true);
+    expect(result.queryDiagnostics).toMatchObject({
+      original: "Software Engineer",
+      normalized: "software engineer",
+    });
+    expect(result.queryDiagnostics.aliasesUsed).toEqual(
+      expect.arrayContaining([
+        "software engineer",
+        "software development engineer",
+        "backend engineer",
+        "member of technical staff",
+        "mts",
+      ]),
+    );
+    expect(result.jobDiagnostics).toMatchObject({
+      original: "Member of Technical Staff",
+      normalized: "member of technical staff",
+      canonical: "member of technical staff",
+    });
+    expect(result.jobDiagnostics.aliasesUsed).toEqual(
+      expect.arrayContaining(["member of technical staff"]),
+    );
   });
 
   it.each([

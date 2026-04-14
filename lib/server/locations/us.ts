@@ -752,7 +752,10 @@ function inferCityFromText(cleaned: string, normalized: string, stateName?: stri
     working = working.slice(0, -(` ${normalizedStateCode}`).length).trim();
   }
 
-  working = removeNormalizedTerm(working, "remote");
+  working = stripLeadingWorkplaceDescriptor(removeNormalizedTerm(working, "remote"));
+  working = stripLeadingWorkplaceDescriptor(removeNormalizedTerm(working, "hybrid"));
+  working = stripLeadingWorkplaceDescriptor(removeNormalizedTerm(working, "onsite"));
+  working = stripLeadingWorkplaceDescriptor(removeNormalizedTerm(working, "on site"));
   if (!working) {
     return undefined;
   }
@@ -763,12 +766,19 @@ function inferCityFromText(cleaned: string, normalized: string, stateName?: stri
     .filter(Boolean);
 
   const directCityPart = parts.find((part) => {
-    const normalizedPart = normalizeLocationText(part);
-    return Boolean(normalizedPart) && !resolveUsState(normalizedPart) && !matchesUnitedStatesAlias(normalizedPart) && normalizedPart !== "remote";
+    const normalizedPart = normalizeLocationText(stripLeadingWorkplaceDescriptor(part));
+    return Boolean(normalizedPart) &&
+      !resolveUsState(normalizedPart) &&
+      !matchesUnitedStatesAlias(normalizedPart) &&
+      normalizedPart !== "remote" &&
+      normalizedPart !== "hybrid";
   });
 
-  if (directCityPart && normalizeLocationText(directCityPart) === working) {
-    return directCityPart;
+  if (directCityPart) {
+    const cleanedDirectCityPart = stripLeadingWorkplaceDescriptor(directCityPart);
+    if (normalizeLocationText(cleanedDirectCityPart) === working) {
+      return cleanedDirectCityPart;
+    }
   }
 
   return titleCaseNormalizedText(working);
@@ -887,6 +897,13 @@ function removeNormalizedTerm(haystack: string, term: string) {
   return haystack
     .replace(new RegExp(`(^| )${escapeRegExp(term)}(?= |$)`, "g"), " ")
     .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stripLeadingWorkplaceDescriptor(value: string) {
+  return value
+    .replace(/^(?:remote|hybrid|onsite|on site)\s+(?:in|within)\s+/i, "")
+    .replace(/^(?:remote|hybrid|onsite|on site)\s+/i, "")
     .trim();
 }
 

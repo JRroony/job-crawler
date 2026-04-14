@@ -1,23 +1,29 @@
 import "server-only";
 
-import { dedupeJobs, dedupeStoredJobs } from "@/lib/server/crawler/dedupe";
+import { buildCanonicalJobIdentity } from "@/lib/job-identity";
+import {
+  dedupeJobsWithDiagnostics,
+  dedupeStoredJobs,
+} from "@/lib/server/crawler/dedupe";
 import {
   buildContentFingerprint,
   buildSourceLookupKey,
   createId,
   evaluateSearchFilters,
+  type ExperienceFilterResult,
   isValidationStale,
   normalizeComparableText,
   resolveJobExperienceClassification,
   runWithConcurrency,
 } from "@/lib/server/crawler/helpers";
 import { parseGreenhouseUrl } from "@/lib/server/discovery/greenhouse-url";
+import type { LocationMatchResult } from "@/lib/server/location-resolution";
 import {
   toStoredValidation,
   validateJobLink,
   type LinkValidationDraft,
 } from "@/lib/server/crawler/link-validation";
-import { sortJobs } from "@/lib/server/crawler/sort";
+import { sortJobsForPersistence, sortJobsWithDiagnostics } from "@/lib/server/crawler/sort";
 import { getEnv } from "@/lib/server/env";
 import type { JobCrawlerRepository, PersistableJob } from "@/lib/server/db/repository";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
@@ -62,6 +68,8 @@ type ExecuteCrawlPipelineInput = {
   deepExperienceInference?: boolean;
   linkValidationMode?: CrawlLinkValidationMode;
   inlineValidationTopN?: number;
+  providerTimeoutMs?: number;
+  progressUpdateIntervalMs?: number;
 };
 
 export async function executeCrawlPipeline(
@@ -82,6 +90,11 @@ export async function executeCrawlPipeline(
     input.inlineValidationTopN,
     normalizedFilters.crawlMode,
   );
+  const env = getEnv();
+  const providerTimeoutMs =
+    input.providerTimeoutMs ?? env.CRAWL_PROVIDER_TIMEOUT_MS;
+  const progressUpdateIntervalMs =
+    input.progressUpdateIntervalMs ?? env.CRAWL_PROGRESS_UPDATE_INTERVAL_MS;
   const crawlRun =
     input.crawlRun ??
     (await input.repository.createCrawlRun(search._id, input.now.toISOString(), {
@@ -115,11 +128,19 @@ export async function executeCrawlPipeline(
       provider: CrawlSourceResult["provider"];
       duration: number;
       sourceCount: number;
+      timedOut: boolean;
     }> = [];
     let totalFetchedJobs = 0;
     let totalMatchedJobs = 0;
     let firstVisibleResultAtMs: number | undefined;
     let mutationQueue = Promise.resolve();
+    const mutationErrors: unknown[] = [];
+    let progressUpdateCount = 0;
+    let persistenceBatchCount = 0;
+    let pendingProgressStage: CrawlRunStage | undefined;
+    let pendingProgressNow: string | undefined;
+    let lastProgressFlushAtMs = 0;
+    let progressFlushPromise: Promise<void> | null = null;
 
     const queueMutation = <T,>(task: () => Promise<T>) => {
       const run = mutationQueue.then(task, task);
@@ -139,6 +160,16 @@ export async function executeCrawlPipeline(
       stage: CrawlRunStage,
       now = new Date().toISOString(),
     ) => {
+      progressUpdateCount += 1;
+      syncPerformanceDiagnostics({
+        diagnostics,
+        stageTimingsMs,
+        providerDurationsMs,
+        crawlStartedMs,
+        firstVisibleResultAtMs,
+        progressUpdateCount,
+        persistenceBatchCount,
+      });
       diagnostics.jobsAfterDedupe = savedJobIds.size;
       diagnostics.dedupedOut = Math.max(0, diagnostics.jobsBeforeDedupe - diagnostics.jobsAfterDedupe);
 
@@ -155,6 +186,61 @@ export async function executeCrawlPipeline(
       await input.repository.updateSearchLatestRun(search._id, crawlRun._id, "running", now);
     };
 
+    const flushProgressUpdate = async (force = false) => {
+      if (!pendingProgressStage || !pendingProgressNow) {
+        return;
+      }
+
+      const nowMs = Date.now();
+      if (!force && nowMs - lastProgressFlushAtMs < progressUpdateIntervalMs) {
+        return;
+      }
+
+      const stage = pendingProgressStage;
+      const now = pendingProgressNow;
+      pendingProgressStage = undefined;
+      pendingProgressNow = undefined;
+      lastProgressFlushAtMs = nowMs;
+      await updateRunProgress(stage, now);
+    };
+
+    const scheduleProgressUpdate = (
+      stage: CrawlRunStage,
+      now = new Date().toISOString(),
+      options: { immediate?: boolean } = {},
+    ) => {
+      pendingProgressStage = stage;
+      pendingProgressNow = now;
+
+      if (options.immediate) {
+        progressFlushPromise = queueMutation(() => flushProgressUpdate(true))
+          .then(
+            () => undefined,
+            (error) => {
+              mutationErrors.push(error);
+            },
+          )
+          .finally(() => {
+            progressFlushPromise = null;
+          });
+        return;
+      }
+
+      const nowMs = Date.now();
+      if (progressFlushPromise || nowMs - lastProgressFlushAtMs < progressUpdateIntervalMs) {
+        return;
+      }
+
+      progressFlushPromise = queueMutation(() => flushProgressUpdate()).then(
+        () => undefined,
+        (error) => {
+          mutationErrors.push(error);
+        },
+      ).finally(() => {
+        progressFlushPromise = null;
+      });
+    };
+
     const persistSeedBatch = async (payload: {
       batchLabel: string;
       provider?: CrawlSourceResult["provider"];
@@ -169,6 +255,7 @@ export async function executeCrawlPipeline(
       accumulateProviderTotals?: boolean;
     }) => {
       const filteringStartedMs = Date.now();
+      persistenceBatchCount += 1;
       const filteredSeeds = filterSeedsForSearch(payload.seeds, normalizedFilters, {
         deepExperienceInference: input.deepExperienceInference ?? false,
       });
@@ -177,12 +264,24 @@ export async function executeCrawlPipeline(
       diagnostics.excludedByTitle += filteredSeeds.excludedByTitle;
       diagnostics.excludedByLocation += filteredSeeds.excludedByLocation;
       diagnostics.excludedByExperience += filteredSeeds.excludedByExperience;
+      diagnostics.filterDecisionTraces.push(...filteredSeeds.filterDecisionTraces);
+      Object.entries(filteredSeeds.dropReasonCounts).forEach(([reason, count]) => {
+        diagnostics.dropReasonCounts[reason] = (diagnostics.dropReasonCounts[reason] ?? 0) + count;
+      });
       totalMatchedJobs += filteredSeeds.jobs.length;
 
       const dedupeStartedMs = Date.now();
       const hydratedJobs = hydrateJobs(filteredSeeds.jobs, input.now);
       diagnostics.jobsBeforeDedupe += hydratedJobs.length;
-      const dedupedJobs = sortJobs(dedupeJobs(hydratedJobs), normalizedFilters.title);
+      const dedupeResult = dedupeJobsWithDiagnostics(
+        hydratedJobs,
+        (job) => getPipelineTraceId(job),
+      );
+      diagnostics.dedupeDecisionTraces.push(
+        ...buildDedupeTraceRecords(dedupeResult.dropped, hydratedJobs),
+      );
+      dedupeResult.dropped.forEach((trace) => incrementDropReasonCount(diagnostics, trace.dropReason));
+      const dedupedJobs = sortJobsForPersistence(dedupeResult.jobs, normalizedFilters.title);
       stageTimingsMs.dedupe += Date.now() - dedupeStartedMs;
 
       const persistenceStartedMs = Date.now();
@@ -258,7 +357,9 @@ export async function executeCrawlPipeline(
         errorMessage: payload.errorMessage,
       });
 
-      await updateRunProgress("crawling", payload.finishedAt);
+      scheduleProgressUpdate("crawling", payload.finishedAt, {
+        immediate: newVisibleJobCount > 0 || payload.status !== "running",
+      });
     };
 
     const initializedSourceResults = selectedProviders.map((provider) =>
@@ -315,30 +416,36 @@ export async function executeCrawlPipeline(
       }
 
       try {
-        const result = await provider.crawlSources(
-          {
-            fetchImpl: input.fetchImpl,
-            now: input.now,
-            filters: normalizedFilters,
-            onBatch: async (batch) => {
-              emittedLiveBatch = true;
-              totalFetchedJobs += batch.fetchedCount;
-              await queueMutation(() =>
-                persistSeedBatch({
-                  batchLabel: `${batch.provider}:batch`,
-                  provider: batch.provider,
-                  seeds: batch.jobs,
-                  fetchedCount: batch.fetchedCount,
-                  sourceCount: batch.sourceCount ?? sourcesForProvider.length,
-                  status: "running",
-                  startedAt,
-                  finishedAt: new Date().toISOString(),
-                  accumulateProviderTotals: true,
-                }),
-              );
+        const result = await runProviderWithTimeout(
+          provider.crawlSources(
+            {
+              fetchImpl: input.fetchImpl,
+              now: input.now,
+              filters: normalizedFilters,
+              onBatch: async (batch) => {
+                emittedLiveBatch = true;
+                totalFetchedJobs += batch.fetchedCount;
+                void queueMutation(() =>
+                  persistSeedBatch({
+                    batchLabel: `${batch.provider}:batch`,
+                    provider: batch.provider,
+                    seeds: batch.jobs,
+                    fetchedCount: batch.fetchedCount,
+                    sourceCount: batch.sourceCount ?? sourcesForProvider.length,
+                    status: "running",
+                    startedAt,
+                    finishedAt: new Date().toISOString(),
+                    accumulateProviderTotals: true,
+                  }),
+                ).catch((error) => {
+                  mutationErrors.push(error);
+                });
+              },
             },
-          },
-          sourcesForProvider,
+            sourcesForProvider,
+          ),
+          provider.provider,
+          providerTimeoutMs,
         );
 
         const finishedAt = new Date().toISOString();
@@ -347,6 +454,7 @@ export async function executeCrawlPipeline(
           provider: result.provider,
           duration: durationMs,
           sourceCount: result.sourceCount ?? sourcesForProvider.length,
+          timedOut: false,
         });
 
         if (result.status === "failed" || result.status === "partial") {
@@ -394,10 +502,12 @@ export async function executeCrawlPipeline(
       } catch (reason) {
         const finishedAt = new Date().toISOString();
         const durationMs = Date.now() - startedMs;
+        const timedOut = isTimeoutError(reason);
         providerDurationsMs.push({
           provider: provider.provider,
           duration: durationMs,
           sourceCount: sourcesForProvider.length,
+          timedOut,
         });
 
         await queueMutation(async () => {
@@ -491,10 +601,14 @@ export async function executeCrawlPipeline(
       }
 
       if (providerRouting.every((entry) => entry.sourceCount === 0)) {
+        console.info("[crawl:provider-routing]", {
+          searchId: search._id,
+          reason: "No sources matched any provider, skipping provider execution stage."
+        });
         return;
       }
 
-      await updateRunProgress("crawling");
+      scheduleProgressUpdate("crawling", new Date().toISOString(), { immediate: true });
 
       await Promise.all(
         selectedProviders.map((provider, index) =>
@@ -516,7 +630,7 @@ export async function executeCrawlPipeline(
         fetchImpl: input.fetchImpl,
       });
       stageTimingsMs.discovery += Date.now() - baselineDiscoveryStartedMs;
-      await processDiscoveryStage({
+      const baselineProcessingPromise = processDiscoveryStage({
         label: baselineStage.label,
         sources: baselineStage.sources,
         jobs: baselineStage.jobs ?? [],
@@ -535,6 +649,7 @@ export async function executeCrawlPipeline(
         },
       );
       stageTimingsMs.discovery += Date.now() - supplementalDiscoveryStartedMs;
+      await baselineProcessingPromise;
       await processDiscoveryStage({
         label: supplementalStage.label,
         sources: supplementalStage.sources,
@@ -587,6 +702,9 @@ export async function executeCrawlPipeline(
       (total, entry) => total + entry.duration,
       0,
     );
+    if (mutationErrors.length > 0) {
+      throw mutationErrors[0];
+    }
     if (discoveredSourceIds.size === 0) {
       console.warn("[crawl:provider-routing]", {
         searchId: search._id,
@@ -603,6 +721,7 @@ export async function executeCrawlPipeline(
     if (validationStrategy.mode === "deferred") {
       diagnostics.validationDeferred = savedJobs.length;
     } else if (savedJobs.length > 0) {
+      await flushProgressUpdate(true);
       await updateRunProgress("validating");
       const validationStartedMs = Date.now();
       const {
@@ -637,6 +756,7 @@ export async function executeCrawlPipeline(
       await updateRunProgress("validating");
     }
 
+    await flushProgressUpdate(true);
     await updateRunProgress("finalizing");
 
     const sourceResults = buildSortedSourceResults();
@@ -667,13 +787,23 @@ export async function executeCrawlPipeline(
       },
       crawlRun: finalizedRun,
       sourceResults,
-      jobs: sortJobs(
-        dedupeStoredJobs(savedJobs).map(applyResolvedExperienceLevel),
+      jobs: sortJobsWithDiagnostics(
+        savedJobs.map(applyResolvedExperienceLevel),
         normalizedFilters.title,
+        input.now,
       ),
       diagnostics: finalizedRun.diagnostics,
     });
     stageTimingsMs.responseAssembly = Date.now() - responseAssemblyStartedMs;
+    syncPerformanceDiagnostics({
+      diagnostics,
+      stageTimingsMs,
+      providerDurationsMs,
+      crawlStartedMs,
+      firstVisibleResultAtMs,
+      progressUpdateCount,
+      persistenceBatchCount,
+    });
 
     console.info("[crawl:summary]", {
       searchId: search._id,
@@ -684,10 +814,33 @@ export async function executeCrawlPipeline(
       jobsAfterDedupe: diagnostics.jobsAfterDedupe,
       savedCount: savedJobIds.size,
       providerDurationsMs,
-      timeToFirstVisibleResultMs:
-        typeof firstVisibleResultAtMs === "number"
-          ? firstVisibleResultAtMs - crawlStartedMs
-          : undefined,
+      timeToFirstVisibleResultMs: diagnostics.performance?.timeToFirstVisibleResultMs,
+    });
+    console.info("[crawl:ranking-sample]", {
+      searchId: search._id,
+      titleQuery: normalizedFilters.title,
+      topJobs: response.jobs.slice(0, 5).map((job) => {
+        const ranking =
+          job.rawSourceMetadata.crawlRanking &&
+          typeof job.rawSourceMetadata.crawlRanking === "object"
+            ? (job.rawSourceMetadata.crawlRanking as Record<string, unknown>)
+            : undefined;
+
+        return {
+          title: job.title,
+          company: job.company,
+          postingDate: job.postingDate ?? job.postedAt,
+          discoveredAt: job.discoveredAt,
+          crawledAt: job.crawledAt,
+          relevanceScore:
+            typeof ranking?.relevanceScore === "number" ? ranking.relevanceScore : undefined,
+          relevanceTier:
+            typeof ranking?.relevanceTier === "string" ? ranking.relevanceTier : undefined,
+          dateScore: typeof ranking?.dateScore === "number" ? ranking.dateScore : undefined,
+          dateSource: typeof ranking?.dateSource === "string" ? ranking.dateSource : undefined,
+          finalScore: typeof ranking?.finalScore === "number" ? ranking.finalScore : undefined,
+        };
+      }),
     });
     console.info("[crawl:timings]", {
       searchId: search._id,
@@ -698,7 +851,7 @@ export async function executeCrawlPipeline(
       persistenceMs: stageTimingsMs.persistence,
       validationMs: stageTimingsMs.validation,
       responseAssemblyMs: stageTimingsMs.responseAssembly,
-      totalMs: Date.now() - crawlStartedMs,
+      totalMs: diagnostics.performance?.stageTimingsMs?.total ?? Date.now() - crawlStartedMs,
     });
 
     return response;
@@ -805,27 +958,93 @@ function filterSeedsForSearch(
   let excludedByTitle = 0;
   let excludedByLocation = 0;
   let excludedByExperience = 0;
+  const filterDecisionTraces: CrawlDiagnostics["filterDecisionTraces"] = [];
+  const dropReasonCounts: Record<string, number> = {};
 
   for (const seed of seeds) {
     const evaluation = evaluateSearchFilters(seed, filters, {
       includeExperience: true,
     });
+    const trace = buildFilterDecisionTrace(seed, evaluation, filters);
+    filterDecisionTraces.push(trace);
+
+    if (evaluation.matches && evaluation.locationMatch) {
+      console.info("[crawl:location-filter]", {
+        traceId: trace.traceId,
+        queryLocation: evaluation.locationMatch.queryDiagnostics.original,
+        rawLocation: evaluation.locationMatch.jobDiagnostics.raw,
+        matched: evaluation.locationMatch.matches,
+        explanation: evaluation.locationMatch.explanation,
+        matchedTerms: evaluation.locationMatch.matchedTerms,
+        queryDiagnostics: evaluation.locationMatch.queryDiagnostics,
+        jobDiagnostics: evaluation.locationMatch.jobDiagnostics,
+      });
+    }
 
     if (evaluation.matches) {
-      matchedSeeds.push(withTitleMatchMetadata(seed, evaluation.titleMatch));
+      console.info("[crawl:title-filter]", {
+        traceId: trace.traceId,
+        queryTitle: filters.title,
+        jobTitle: seed.title,
+        matched: true,
+        tier: evaluation.titleMatch.tier,
+        score: evaluation.titleMatch.score,
+        explanation: evaluation.titleMatch.explanation,
+        queryDiagnostics: evaluation.titleMatch.queryDiagnostics,
+        jobDiagnostics: evaluation.titleMatch.jobDiagnostics,
+      });
+      console.info("[crawl:filter-trace]", trace);
+      matchedSeeds.push(
+        withFilterMatchMetadata(
+          seed,
+          trace.traceId,
+          evaluation.titleMatch,
+          evaluation.locationMatch,
+          evaluation.experienceMatch,
+        ),
+      );
       continue;
     }
 
     if (evaluation.reason === "title") {
+      console.info("[crawl:title-filter]", {
+        queryTitle: filters.title,
+        jobTitle: seed.title,
+        matched: false,
+        reason: evaluation.reason,
+        traceId: trace.traceId,
+        tier: evaluation.titleMatch?.tier,
+        score: evaluation.titleMatch?.score,
+        explanation: evaluation.titleMatch?.explanation,
+        queryDiagnostics: evaluation.titleMatch?.queryDiagnostics,
+        jobDiagnostics: evaluation.titleMatch?.jobDiagnostics,
+      });
+      incrementCount(dropReasonCounts, trace.dropReason ?? "filter:title_mismatch");
+      console.info("[crawl:filter-trace]", trace);
       excludedByTitle += 1;
       continue;
     }
 
     if (evaluation.reason === "location") {
+      console.info("[crawl:location-filter]", {
+        queryLocation: evaluation.locationMatch?.queryDiagnostics.original,
+        rawLocation: evaluation.locationMatch?.jobDiagnostics.raw ?? seed.locationText,
+        matched: false,
+        reason: evaluation.reason,
+        traceId: trace.traceId,
+        explanation: evaluation.locationMatch?.explanation,
+        matchedTerms: evaluation.locationMatch?.matchedTerms,
+        queryDiagnostics: evaluation.locationMatch?.queryDiagnostics,
+        jobDiagnostics: evaluation.locationMatch?.jobDiagnostics,
+      });
+      incrementCount(dropReasonCounts, trace.dropReason ?? "filter:location_mismatch");
+      console.info("[crawl:filter-trace]", trace);
       excludedByLocation += 1;
       continue;
     }
 
+    incrementCount(dropReasonCounts, trace.dropReason ?? "filter:experience_mismatch");
+    console.info("[crawl:filter-trace]", trace);
     excludedByExperience += 1;
   }
 
@@ -834,15 +1053,30 @@ function filterSeedsForSearch(
     excludedByTitle,
     excludedByLocation,
     excludedByExperience,
+    filterDecisionTraces,
+    dropReasonCounts,
   };
 }
 
-function withTitleMatchMetadata(seed: NormalizedJobSeed, titleMatch: TitleMatchResult) {
+function withFilterMatchMetadata(
+  seed: NormalizedJobSeed,
+  traceId: string,
+  titleMatch: TitleMatchResult,
+  locationMatch?: LocationMatchResult,
+  experienceMatch?: ExperienceFilterResult,
+) {
   return {
     ...seed,
     rawSourceMetadata: {
       ...seed.rawSourceMetadata,
+      crawlTraceId: traceId,
       crawlTitleMatch: {
+        originalQueryTitle: titleMatch.queryDiagnostics.original,
+        normalizedQueryTitle: titleMatch.queryDiagnostics.normalized,
+        queryAliasesUsed: titleMatch.queryDiagnostics.aliasesUsed,
+        originalJobTitle: titleMatch.jobDiagnostics.original,
+        normalizedJobTitle: titleMatch.jobDiagnostics.normalized,
+        jobAliasesUsed: titleMatch.jobDiagnostics.aliasesUsed,
         tier: titleMatch.tier,
         score: titleMatch.score,
         canonicalQueryTitle: titleMatch.canonicalQueryTitle,
@@ -851,6 +1085,45 @@ function withTitleMatchMetadata(seed: NormalizedJobSeed, titleMatch: TitleMatchR
         matchedTerms: titleMatch.matchedTerms,
         penalties: titleMatch.penalties,
       },
+      ...(locationMatch
+        ? {
+            crawlLocationMatch: {
+              originalQueryLocation: locationMatch.queryDiagnostics.original,
+              normalizedQueryLocation: locationMatch.queryDiagnostics.normalized,
+              queryExpandedTermsUsed: locationMatch.queryDiagnostics.expandedTerms,
+              queryScopesApplied: locationMatch.queryDiagnostics.scopesApplied,
+              queryWorkplaceMode: locationMatch.queryDiagnostics.workplaceMode,
+              rawJobLocation: locationMatch.jobDiagnostics.raw,
+              normalizedJobLocation: locationMatch.jobDiagnostics.normalized,
+              jobLocationAliasesUsed: locationMatch.jobDiagnostics.aliasesUsed,
+              jobWorkplaceMode: locationMatch.jobDiagnostics.workplaceMode,
+              matchedTerms: locationMatch.matchedTerms,
+              explanation: locationMatch.explanation,
+              country: locationMatch.jobDiagnostics.country,
+              state: locationMatch.jobDiagnostics.state,
+              stateCode: locationMatch.jobDiagnostics.stateCode,
+              city: locationMatch.jobDiagnostics.city,
+              isRemote: locationMatch.jobDiagnostics.isRemote,
+              isUnitedStates: locationMatch.jobDiagnostics.isUnitedStates,
+            },
+          }
+        : {}),
+      ...(experienceMatch
+        ? {
+            crawlExperienceMatch: {
+              selectedLevels: experienceMatch.selectedLevels,
+              mode: experienceMatch.mode,
+              includeUnspecified: experienceMatch.includeUnspecified,
+              matchedLevel: experienceMatch.matchedLevel,
+              explanation: experienceMatch.explanation,
+              confidence: experienceMatch.classification.confidence,
+              source: experienceMatch.classification.source,
+              reasons: experienceMatch.classification.reasons,
+              explicitLevel: experienceMatch.classification.explicitLevel,
+              inferredLevel: experienceMatch.classification.inferredLevel,
+            },
+          }
+        : {}),
       ...(seed.resolvedLocation
         ? {
             crawlResolvedLocation: {
@@ -866,6 +1139,314 @@ function withTitleMatchMetadata(seed: NormalizedJobSeed, titleMatch: TitleMatchR
         : {}),
     },
   };
+}
+
+function buildFilterDecisionTrace(
+  seed: NormalizedJobSeed,
+  evaluation: ReturnType<typeof evaluateSearchFilters>,
+  filters: SearchDocument["filters"],
+): CrawlDiagnostics["filterDecisionTraces"][number] {
+  const traceId = getPipelineTraceId(seed);
+  const locationDiagnostics = evaluation.locationMatch?.jobDiagnostics ?? {
+    raw: seed.locationText,
+    normalized: normalizeComparableText(
+      `${seed.city ?? ""} ${seed.state ?? ""} ${seed.country ?? ""} ${seed.locationText}`,
+    ),
+    country: seed.resolvedLocation?.country ?? seed.country,
+    state: seed.resolvedLocation?.state ?? seed.state,
+    stateCode: seed.resolvedLocation?.stateCode,
+    city: seed.resolvedLocation?.city ?? seed.city,
+    workplaceMode: "unknown" as const,
+    isRemote: seed.resolvedLocation?.isRemote ?? false,
+    isUnitedStates: seed.resolvedLocation?.isUnitedStates ?? false,
+    aliasesUsed: [],
+  };
+  const experienceClassification =
+    evaluation.experienceMatch?.classification ?? resolveJobExperienceClassification(seed);
+  const experienceLevel =
+    experienceClassification.explicitLevel ?? experienceClassification.inferredLevel;
+  const experienceMode = filters.experienceMatchMode ?? "balanced";
+  const includeUnspecified =
+    filters.includeUnspecifiedExperience === true || experienceMode === "broad";
+
+  if (evaluation.matches) {
+    return {
+      traceId,
+      sourcePlatform: seed.sourcePlatform,
+      sourceJobId: seed.sourceJobId,
+      sourceUrl: seed.sourceUrl,
+      applyUrl: seed.applyUrl,
+      canonicalUrl: seed.canonicalUrl,
+      company: seed.company,
+      title: seed.title,
+      locationText: seed.locationText,
+      filterStage: filters.experienceLevels?.length
+        ? "experience"
+        : evaluation.locationMatch
+          ? "location"
+          : "title",
+      outcome: "passed",
+      dropReason: undefined,
+      titleDiagnostics: {
+        original: evaluation.titleMatch.jobDiagnostics.original,
+        normalized: evaluation.titleMatch.jobDiagnostics.normalized,
+        canonical: evaluation.titleMatch.canonicalJobTitle,
+        family: evaluation.titleMatch.jobFamily,
+        tier: evaluation.titleMatch.tier,
+        score: evaluation.titleMatch.score,
+        threshold: evaluation.titleMatch.threshold,
+        explanation: evaluation.titleMatch.explanation,
+        matchedTerms: evaluation.titleMatch.matchedTerms,
+        penalties: evaluation.titleMatch.penalties,
+        passed: true,
+      },
+      locationDiagnostics: {
+        raw: locationDiagnostics.raw,
+        normalized: locationDiagnostics.normalized,
+        country: locationDiagnostics.country,
+        state: locationDiagnostics.state,
+        stateCode: locationDiagnostics.stateCode,
+        city: locationDiagnostics.city,
+        isRemote: locationDiagnostics.isRemote,
+        isUnitedStates: locationDiagnostics.isUnitedStates,
+        explanation: evaluation.locationMatch?.explanation,
+        matchedTerms: evaluation.locationMatch?.matchedTerms ?? [],
+        passed: true,
+      },
+      experienceDiagnostics: {
+        level: evaluation.experienceMatch?.matchedLevel ?? experienceLevel,
+        finalSeniority:
+          experienceClassification.diagnostics?.finalSeniority ??
+          (experienceLevel ?? "unknown"),
+        normalizedTitle: experienceClassification.diagnostics?.normalizedTitle ?? "",
+        source: experienceClassification.source,
+        confidence: experienceClassification.confidence,
+        selectedLevels: evaluation.experienceMatch?.selectedLevels ?? (filters.experienceLevels ?? []),
+        mode: evaluation.experienceMatch?.mode ?? experienceMode,
+        includeUnspecified:
+          evaluation.experienceMatch?.includeUnspecified ?? includeUnspecified,
+        explanation: evaluation.experienceMatch?.explanation ?? "Experience filtering passed.",
+        passed: true,
+        reasons: experienceClassification.reasons,
+        matchedSignals: experienceClassification.diagnostics?.matchedSignals ?? [],
+      },
+    };
+  }
+
+  const filterStage = evaluation.reason;
+  const dropReason =
+    filterStage === "title"
+      ? buildTitleDropReason(evaluation.titleMatch)
+      : filterStage === "location"
+        ? buildLocationDropReason(evaluation.locationMatch)
+        : buildExperienceDropReason(evaluation.experienceMatch);
+
+  return {
+    traceId,
+    sourcePlatform: seed.sourcePlatform,
+    sourceJobId: seed.sourceJobId,
+    sourceUrl: seed.sourceUrl,
+    applyUrl: seed.applyUrl,
+    canonicalUrl: seed.canonicalUrl,
+    company: seed.company,
+    title: seed.title,
+    locationText: seed.locationText,
+    filterStage,
+    outcome: "dropped",
+    dropReason,
+    titleDiagnostics: {
+      original: evaluation.titleMatch?.jobDiagnostics.original ?? seed.title,
+      normalized:
+        evaluation.titleMatch?.jobDiagnostics.normalized ??
+        normalizeComparableText(seed.title),
+      canonical: evaluation.titleMatch?.canonicalJobTitle,
+      family: evaluation.titleMatch?.jobFamily,
+      tier: evaluation.titleMatch?.tier,
+      score: evaluation.titleMatch?.score,
+      threshold: evaluation.titleMatch?.threshold,
+      explanation: evaluation.titleMatch?.explanation,
+      matchedTerms: evaluation.titleMatch?.matchedTerms ?? [],
+      penalties: evaluation.titleMatch?.penalties ?? [],
+      passed: filterStage !== "title",
+    },
+    locationDiagnostics: {
+      raw: locationDiagnostics.raw,
+      normalized: locationDiagnostics.normalized,
+      country: locationDiagnostics.country,
+      state: locationDiagnostics.state,
+      stateCode: locationDiagnostics.stateCode,
+      city: locationDiagnostics.city,
+      isRemote: locationDiagnostics.isRemote,
+      isUnitedStates: locationDiagnostics.isUnitedStates,
+      explanation: evaluation.locationMatch?.explanation,
+      matchedTerms: evaluation.locationMatch?.matchedTerms ?? [],
+      passed: filterStage !== "location",
+    },
+    experienceDiagnostics: {
+      level: experienceLevel,
+      finalSeniority:
+        experienceClassification.diagnostics?.finalSeniority ??
+        (experienceLevel ?? "unknown"),
+      normalizedTitle: experienceClassification.diagnostics?.normalizedTitle ?? "",
+      source: experienceClassification.source,
+      confidence: experienceClassification.confidence,
+      selectedLevels: evaluation.experienceMatch?.selectedLevels ?? (filters.experienceLevels ?? []),
+      mode: evaluation.experienceMatch?.mode ?? experienceMode,
+      includeUnspecified:
+        evaluation.experienceMatch?.includeUnspecified ?? includeUnspecified,
+      explanation:
+        evaluation.experienceMatch?.explanation ??
+        "Experience filtering did not run because an earlier stage dropped the job.",
+      passed: filterStage !== "experience",
+      reasons: experienceClassification.reasons,
+      matchedSignals: experienceClassification.diagnostics?.matchedSignals ?? [],
+    },
+  };
+}
+
+function buildTitleDropReason(titleMatch?: TitleMatchResult) {
+  if (!titleMatch) {
+    return "filter:title_missing_match";
+  }
+
+  if (titleMatch.penalties.some((penalty) => penalty.includes("conflicting role families"))) {
+    return "filter:title_family_conflict";
+  }
+
+  return titleMatch.tier === "none"
+    ? "filter:title_below_threshold"
+    : `filter:title_${titleMatch.tier}`;
+}
+
+function buildLocationDropReason(locationMatch?: LocationMatchResult) {
+  if (!locationMatch) {
+    return "filter:location_missing_match";
+  }
+
+  if (locationMatch.explanation.includes("United States")) {
+    return "filter:location_not_in_requested_country";
+  }
+
+  if (locationMatch.explanation.includes("resolved state")) {
+    return "filter:location_state_mismatch";
+  }
+
+  if (locationMatch.explanation.includes("resolved city")) {
+    return "filter:location_city_mismatch";
+  }
+
+  if (locationMatch.explanation.includes("requires a")) {
+    return "filter:location_workplace_mismatch";
+  }
+
+  return "filter:location_mismatch";
+}
+
+function buildExperienceDropReason(experienceMatch?: ExperienceFilterResult) {
+  if (!experienceMatch) {
+    return "filter:experience_mismatch";
+  }
+
+  if (experienceMatch.classification.isUnspecified) {
+    return "filter:experience_unspecified";
+  }
+
+  return "filter:experience_level_mismatch";
+}
+
+function getPipelineTraceId(
+  seedOrJob: Pick<
+    NormalizedJobSeed,
+    "sourcePlatform" | "sourceJobId" | "canonicalUrl" | "applyUrl" | "sourceUrl"
+  >,
+) {
+  return [
+    seedOrJob.sourcePlatform,
+    seedOrJob.sourceJobId,
+    seedOrJob.canonicalUrl ?? seedOrJob.applyUrl ?? seedOrJob.sourceUrl,
+  ].join(":");
+}
+
+function incrementCount(counts: Record<string, number>, key: string) {
+  counts[key] = (counts[key] ?? 0) + 1;
+}
+
+function incrementDropReasonCount(diagnostics: CrawlDiagnostics, reason: string) {
+  diagnostics.dropReasonCounts[reason] = (diagnostics.dropReasonCounts[reason] ?? 0) + 1;
+}
+
+function buildDedupeTraceRecords(
+  dropped: Array<{
+    traceId: string;
+    keptTraceId: string;
+    matchedKeys: string[];
+    dropReason: string;
+  }>,
+  hydratedJobs: PersistableJob[],
+): CrawlDiagnostics["dedupeDecisionTraces"] {
+  const jobsByTraceId = new Map(
+    hydratedJobs.map((job) => [getPipelineTraceId(job), job] as const),
+  );
+  const droppedByTraceId = new Map(dropped.map((trace) => [trace.traceId, trace] as const));
+  const survivorTraceIds = new Set(dropped.map((trace) => trace.keptTraceId));
+
+  return hydratedJobs.map((job) => {
+    const traceId = getPipelineTraceId(job);
+    const droppedTrace = droppedByTraceId.get(traceId);
+    const identity = buildCanonicalJobIdentity(job);
+
+    if (droppedTrace) {
+      return {
+        traceId,
+        keptTraceId: droppedTrace.keptTraceId,
+        originalIdentifiers: {
+          databaseId: identity.databaseId,
+          ...identity.originalIdentifiers,
+        },
+        normalizedIdentity: identity.normalizedIdentity,
+        sourcePlatform: job.sourcePlatform,
+        sourceJobId: job.sourceJobId,
+        sourceUrl: job.sourceUrl,
+        canonicalUrl: job.canonicalUrl,
+        applyUrl: job.applyUrl,
+        title: job.title,
+        company: job.company,
+        locationText: job.locationText,
+        outcome: "deduped" as const,
+        dropReason: droppedTrace.dropReason,
+        decisionReason: `merged into ${droppedTrace.keptTraceId} via ${droppedTrace.dropReason}`,
+        matchedKeys: droppedTrace.matchedKeys,
+      };
+    }
+
+    if (!jobsByTraceId.has(traceId)) {
+      throw new Error(`Missing hydrated job for dedupe trace ${traceId}.`);
+    }
+
+    return {
+      traceId,
+      keptTraceId: traceId,
+      originalIdentifiers: {
+        databaseId: identity.databaseId,
+        ...identity.originalIdentifiers,
+      },
+      normalizedIdentity: identity.normalizedIdentity,
+      sourcePlatform: job.sourcePlatform,
+      sourceJobId: job.sourceJobId,
+      sourceUrl: job.sourceUrl,
+      canonicalUrl: job.canonicalUrl,
+      applyUrl: job.applyUrl,
+      title: job.title,
+      company: job.company,
+      locationText: job.locationText,
+      outcome: "kept" as const,
+      dropReason: undefined,
+      decisionReason: survivorTraceIds.has(traceId)
+        ? "preserved as the strongest candidate in a duplicate group"
+        : "preserved as a unique canonical identity",
+      matchedKeys: [],
+    };
+  });
 }
 
 function hydrateJobs(
@@ -925,31 +1506,61 @@ async function applyInlineValidationStrategy(
 
 function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): PersistableJob {
   const resolvedLocation = seed.resolvedLocation;
-  const locationNormalized = normalizeComparableText(
-    `${resolvedLocation?.city ?? seed.city ?? ""} ${resolvedLocation?.state ?? seed.state ?? ""} ${resolvedLocation?.country ?? seed.country ?? ""} ${seed.locationText}`,
-  );
+  const locationRaw = seed.locationRaw ?? seed.locationText;
+  const locationNormalized =
+    seed.normalizedLocation ??
+    normalizeComparableText(
+      `${resolvedLocation?.city ?? seed.city ?? ""} ${resolvedLocation?.state ?? seed.state ?? ""} ${resolvedLocation?.country ?? seed.country ?? ""} ${locationRaw}`,
+    );
   const experienceClassification = resolveJobExperienceClassification(seed);
   const discoveredAt = seed.discoveredAt || now.toISOString();
+  const postingDate = seed.postingDate ?? seed.postedAt;
+  const normalizedCompany = seed.normalizedCompany ?? normalizeComparableText(seed.company);
+  const normalizedTitle = seed.normalizedTitle ?? normalizeComparableText(seed.title);
+  const seniority =
+    seed.seniority ??
+    experienceClassification.explicitLevel ??
+    experienceClassification.inferredLevel;
+  const dedupeFingerprint =
+    seed.dedupeFingerprint ??
+    buildContentFingerprint({
+      company: seed.company,
+      title: seed.title,
+      location: locationNormalized,
+    });
 
   return {
     title: seed.title,
     company: seed.company,
+    normalizedCompany,
+    normalizedTitle,
     country: resolvedLocation?.country ?? seed.country,
     state: resolvedLocation?.state ?? seed.state,
     city: resolvedLocation?.city ?? seed.city,
+    locationRaw,
+    normalizedLocation: locationNormalized,
     locationText: seed.locationText,
     resolvedLocation,
+    remoteType: seed.remoteType ?? (resolvedLocation?.isRemote ? "remote" : "unknown"),
+    employmentType: seed.employmentType,
+    seniority,
     experienceLevel:
       experienceClassification.explicitLevel ??
       experienceClassification.inferredLevel,
     experienceClassification,
     sourcePlatform: seed.sourcePlatform,
+    sourceCompanySlug: seed.sourceCompanySlug,
     sourceJobId: seed.sourceJobId,
     sourceUrl: seed.sourceUrl,
     applyUrl: seed.applyUrl,
     canonicalUrl: seed.canonicalUrl,
-    postedAt: seed.postedAt,
+    postingDate,
+    postedAt: postingDate,
     discoveredAt,
+    crawledAt: seed.crawledAt ?? discoveredAt,
+    descriptionSnippet: seed.descriptionSnippet,
+    salaryInfo: seed.salaryInfo,
+    sponsorshipHint: seed.sponsorshipHint ?? "unknown",
     linkStatus: "unknown",
     rawSourceMetadata: seed.rawSourceMetadata,
     sourceProvenance: [
@@ -964,14 +1575,11 @@ function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): PersistableJo
       },
     ],
     sourceLookupKeys: buildSeedSourceLookupKeys(seed),
-    companyNormalized: normalizeComparableText(seed.company),
-    titleNormalized: normalizeComparableText(seed.title),
+    dedupeFingerprint,
+    companyNormalized: normalizedCompany,
+    titleNormalized: normalizedTitle,
     locationNormalized,
-    contentFingerprint: buildContentFingerprint({
-      company: seed.company,
-      title: seed.title,
-      location: locationNormalized,
-    }),
+    contentFingerprint: dedupeFingerprint,
   };
 }
 
@@ -1141,6 +1749,8 @@ function resolveValidationJobIds(
   const byContentFingerprint = new Map<string, string>();
 
   savedJobs.forEach((job) => {
+    const identity = buildCanonicalJobIdentity(job);
+
     if (job.canonicalUrl) {
       byCanonicalUrl.set(job.canonicalUrl, job._id);
     }
@@ -1150,10 +1760,12 @@ function resolveValidationJobIds(
     }
 
     byApplyUrl.set(job.applyUrl, job._id);
-    byContentFingerprint.set(job.contentFingerprint, job._id);
-    job.sourceLookupKeys.forEach((lookupKey) => {
+    identity.normalizedIdentity.platformJobKeys.forEach((lookupKey) => {
       bySourceLookupKey.set(lookupKey, job._id);
     });
+    if (!identity.hasStrongIdentity) {
+      byContentFingerprint.set(identity.normalizedIdentity.fallbackFingerprint, job._id);
+    }
   });
 
   return inlineValidations.map(({ jobIndex }) => {
@@ -1162,12 +1774,18 @@ function resolveValidationJobIds(
       return undefined;
     }
 
+    const identity = buildCanonicalJobIdentity(job);
+
     return (
       (job.canonicalUrl ? byCanonicalUrl.get(job.canonicalUrl) : undefined) ??
       (job.resolvedUrl ? byResolvedUrl.get(job.resolvedUrl) : undefined) ??
       byApplyUrl.get(job.applyUrl) ??
-      job.sourceLookupKeys.map((lookupKey) => bySourceLookupKey.get(lookupKey)).find(Boolean) ??
-      byContentFingerprint.get(job.contentFingerprint)
+      identity.normalizedIdentity.platformJobKeys
+        .map((lookupKey) => bySourceLookupKey.get(lookupKey))
+        .find(Boolean) ??
+      (!identity.hasStrongIdentity
+        ? byContentFingerprint.get(identity.normalizedIdentity.fallbackFingerprint)
+        : undefined)
     );
   });
 }
@@ -1222,8 +1840,98 @@ function createEmptyDiagnostics(
     excludedByExperience: 0,
     dedupedOut: 0,
     validationDeferred: 0,
+    performance: {
+      timeToFirstVisibleResultMs: undefined,
+      stageTimingsMs: {
+        discovery: 0,
+        providerExecution: 0,
+        filtering: 0,
+        dedupe: 0,
+        persistence: 0,
+        validation: 0,
+        responseAssembly: 0,
+        total: 0,
+      },
+      providerTimingsMs: [],
+      progressUpdateCount: 0,
+      persistenceBatchCount: 0,
+    },
+    dropReasonCounts: {},
+    filterDecisionTraces: [],
+    dedupeDecisionTraces: [],
     ...overrides,
   };
+}
+
+function syncPerformanceDiagnostics(input: {
+  diagnostics: CrawlDiagnostics;
+  stageTimingsMs: {
+    discovery: number;
+    providerExecution: number;
+    filtering: number;
+    dedupe: number;
+    persistence: number;
+    validation: number;
+    responseAssembly: number;
+  };
+  providerDurationsMs: Array<{
+    provider: CrawlSourceResult["provider"];
+    duration: number;
+    sourceCount: number;
+    timedOut: boolean;
+  }>;
+  crawlStartedMs: number;
+  firstVisibleResultAtMs?: number;
+  progressUpdateCount: number;
+  persistenceBatchCount: number;
+}) {
+  input.diagnostics.performance = {
+    timeToFirstVisibleResultMs:
+      typeof input.firstVisibleResultAtMs === "number"
+        ? input.firstVisibleResultAtMs - input.crawlStartedMs
+        : undefined,
+    stageTimingsMs: {
+      ...input.stageTimingsMs,
+      total: Date.now() - input.crawlStartedMs,
+    },
+    providerTimingsMs: input.providerDurationsMs.map((entry) => ({
+      provider: entry.provider,
+      duration: entry.duration,
+      sourceCount: entry.sourceCount,
+      timedOut: entry.timedOut,
+    })),
+    progressUpdateCount: input.progressUpdateCount,
+    persistenceBatchCount: input.persistenceBatchCount,
+  };
+}
+
+async function runProviderWithTimeout<P>(
+  task: Promise<P>,
+  provider: CrawlSourceResult["provider"],
+  timeoutMs: number,
+) {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      reject(
+        new Error(
+          `Provider ${provider} exceeded the ${timeoutMs}ms crawl budget and was failed fast.`,
+        ),
+      );
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([task, timeoutPromise]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+function isTimeoutError(error: unknown) {
+  return error instanceof Error && error.message.includes("crawl budget");
 }
 
 function buildProviderSummary(

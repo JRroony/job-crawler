@@ -853,4 +853,422 @@ describe("pipeline title retrieval", () => {
 
     await runPromise;
   });
+
+  it("persists fast-provider results while a slower provider is still running", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T15:10:00.000Z");
+
+    const fastProvider = createStubProvider("greenhouse", async (context, sources) => {
+      await context.onBatch?.({
+        provider: "greenhouse",
+        sourceCount: sources.length,
+        fetchedCount: 1,
+        jobs: [
+          {
+            title: "Software Engineer",
+            company: "Acme",
+            locationText: "Remote, United States",
+            sourcePlatform: "greenhouse",
+            sourceJobId: "fast-1",
+            sourceUrl: "https://example.com/jobs/fast-1",
+            applyUrl: "https://example.com/jobs/fast-1/apply",
+            canonicalUrl: "https://example.com/jobs/fast-1",
+            discoveredAt: now.toISOString(),
+            rawSourceMetadata: {},
+          },
+        ],
+      });
+
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: sources.length,
+        fetchedCount: 1,
+        matchedCount: 1,
+        warningCount: 0,
+        jobs: [],
+      };
+    });
+
+    const slowProvider = createStubProvider("lever", async () => {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      return {
+        provider: "lever",
+        status: "success",
+        sourceCount: 1,
+        fetchedCount: 1,
+        matchedCount: 1,
+        warningCount: 0,
+        jobs: [
+          {
+            title: "Backend Engineer",
+            company: "Acme",
+            locationText: "Remote, United States",
+            sourcePlatform: "lever",
+            sourceJobId: "slow-1",
+            sourceUrl: "https://example.com/jobs/slow-1",
+            applyUrl: "https://example.com/jobs/slow-1/apply",
+            canonicalUrl: "https://example.com/jobs/slow-1",
+            discoveredAt: now.toISOString(),
+            rawSourceMetadata: {},
+          },
+        ],
+      };
+    });
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+          classifySourceCandidate({
+            url: "https://jobs.lever.co/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+
+    const runPromise = runSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse", "lever"],
+      },
+      {
+        repository,
+        providers: [fastProvider, slowProvider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+        providerTimeoutMs: 500,
+        progressUpdateIntervalMs: 5,
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const [search] = await repository.listRecentSearches(1);
+    const crawlRun = await repository.getCrawlRun(search.latestCrawlRunId as string);
+    const midJobs = await repository.getJobsByCrawlRun(crawlRun?._id as string);
+
+    expect(crawlRun?.status).toBe("running");
+    expect(midJobs.map((job) => job.title)).toEqual(["Software Engineer"]);
+
+    const result = await runPromise;
+
+    expect(result.jobs.map((job) => job.title)).toEqual([
+      "Software Engineer",
+      "Backend Engineer",
+    ]);
+    expect(result.diagnostics.performance.timeToFirstVisibleResultMs).toBeLessThan(250);
+  });
+
+  it("fails slow providers fast without blocking useful results from other providers", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T15:20:00.000Z");
+
+    const fastProvider = createStubProvider("greenhouse", async () => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: 1,
+      fetchedCount: 1,
+      matchedCount: 1,
+      warningCount: 0,
+      jobs: [
+        {
+          title: "Software Engineer",
+          company: "Acme",
+          locationText: "Remote, United States",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "fast-timeout-1",
+          sourceUrl: "https://example.com/jobs/fast-timeout-1",
+          applyUrl: "https://example.com/jobs/fast-timeout-1/apply",
+          canonicalUrl: "https://example.com/jobs/fast-timeout-1",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+      ],
+    }));
+
+    const slowProvider = createStubProvider("lever", async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return {
+        provider: "lever",
+        status: "success",
+        sourceCount: 1,
+        fetchedCount: 0,
+        matchedCount: 0,
+        warningCount: 0,
+        jobs: [],
+      };
+    });
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+          classifySourceCandidate({
+            url: "https://jobs.lever.co/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+
+    const startedAt = Date.now();
+    const result = await runSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse", "lever"],
+      },
+      {
+        repository,
+        providers: [fastProvider, slowProvider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+        providerTimeoutMs: 40,
+        progressUpdateIntervalMs: 5,
+      },
+    );
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(elapsedMs).toBeLessThan(140);
+    expect(result.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
+    expect(result.crawlRun.status).toBe("partial");
+    expect(result.diagnostics.providerFailures).toBe(1);
+    expect(
+      result.sourceResults.find((sourceResult) => sourceResult.provider === "lever"),
+    ).toMatchObject({
+      status: "failed",
+      errorMessage: expect.stringContaining("crawl budget"),
+    });
+    expect(result.diagnostics.performance.providerTimingsMs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          provider: "lever",
+          timedOut: true,
+        }),
+      ]),
+    );
+  });
+
+  it.each([
+    {
+      query: "Software Engineer",
+      expected: [
+        "Software Development Engineer",
+        "Backend Engineer",
+        "Full Stack Engineer",
+        "Frontend Engineer",
+        "Java Developer",
+        "Platform Engineer",
+        "Application Engineer",
+        "Member of Technical Staff",
+      ],
+      excluded: ["Sales Engineer", "Recruiter"],
+    },
+    {
+      query: "Data Analyst",
+      expected: [
+        "Business Intelligence Analyst",
+        "Reporting Analyst",
+        "Insights Analyst",
+        "Business Analyst",
+      ],
+      excluded: ["Data Engineer", "Sales Analyst"],
+    },
+    {
+      query: "Business Analyst",
+      expected: [
+        "Business Systems Analyst",
+        "Systems Analyst",
+        "Process Analyst",
+        "Operations Analyst",
+      ],
+      excluded: ["Data Engineer", "Product Manager"],
+    },
+    {
+      query: "Product Manager",
+      expected: [
+        "Technical Product Manager",
+        "Growth Product Manager",
+        "Associate Product Manager",
+        "Product Owner",
+      ],
+      excluded: ["Technical Program Manager", "Engineering Manager"],
+    },
+  ])("retrieves related titles for %s without over-including weak matches", async ({ query, expected, excluded }) => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T15:30:00.000Z");
+
+    const jobs = [
+      ...expected,
+      ...excluded,
+    ].map((title, index) => ({
+      title,
+      company: "Acme",
+      country: "United States",
+      locationText: "Remote, United States",
+      sourcePlatform: "greenhouse" as const,
+      sourceJobId: `${query}-${index}`,
+      sourceUrl: `https://example.com/jobs/${query}-${index}`,
+      applyUrl: `https://example.com/jobs/${query}-${index}/apply`,
+      canonicalUrl: `https://example.com/jobs/${query}-${index}`,
+      discoveredAt: now.toISOString(),
+      rawSourceMetadata: {},
+    }));
+
+    const provider = createStubProvider("greenhouse", async () => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: 1,
+      fetchedCount: jobs.length,
+      matchedCount: jobs.length,
+      warningCount: 0,
+      jobs,
+    }));
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+
+    const result = await runSearchFromFilters(
+      {
+        title: query,
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    expect(result.jobs.map((job) => job.title)).toEqual(expect.arrayContaining(expected));
+    expect(result.jobs.map((job) => job.title)).not.toEqual(expect.arrayContaining(excluded));
+    expect(result.jobs[0]?.rawSourceMetadata).toMatchObject({
+      crawlTitleMatch: expect.objectContaining({
+        originalQueryTitle: query,
+        normalizedQueryTitle: expect.any(String),
+        queryAliasesUsed: expect.any(Array),
+        explanation: expect.any(String),
+      }),
+    });
+  });
+
+  it("keeps non-senior product manager roles when experience filtering is active", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T16:00:00.000Z");
+
+    const provider = createStubProvider("greenhouse", async () => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: 1,
+      fetchedCount: 2,
+      matchedCount: 2,
+      warningCount: 0,
+      jobs: [
+        {
+          title: "Product Manager",
+          company: "Acme",
+          locationText: "Remote, United States",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "product-manager",
+          sourceUrl: "https://example.com/jobs/product-manager",
+          applyUrl: "https://example.com/jobs/product-manager/apply",
+          canonicalUrl: "https://example.com/jobs/product-manager",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Senior Product Manager",
+          company: "Acme",
+          locationText: "Remote, United States",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "senior-product-manager",
+          sourceUrl: "https://example.com/jobs/senior-product-manager",
+          applyUrl: "https://example.com/jobs/senior-product-manager/apply",
+          canonicalUrl: "https://example.com/jobs/senior-product-manager",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+      ],
+    }));
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+
+    const result = await runSearchFromFilters(
+      {
+        title: "Product Manager",
+        country: "United States",
+        experienceLevel: "mid",
+        includeUnspecifiedExperience: true,
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    expect(result.jobs.map((job) => job.title)).toEqual(["Product Manager"]);
+    expect(result.diagnostics.excludedByExperience).toBe(1);
+    expect(result.diagnostics.filterDecisionTraces).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceJobId: "product-manager",
+          outcome: "passed",
+          experienceDiagnostics: expect.objectContaining({
+            passed: true,
+          }),
+        }),
+        expect.objectContaining({
+          sourceJobId: "senior-product-manager",
+          outcome: "dropped",
+          dropReason: "filter:experience_level_mismatch",
+        }),
+      ]),
+    );
+  });
 });

@@ -302,6 +302,61 @@ describe("crawl diagnostics", () => {
       dedupedOut: 1,
       validationDeferred: 1,
     });
+    expect(result.diagnostics.dropReasonCounts).toMatchObject({
+      "filter:title_below_threshold": 1,
+      "filter:location_not_in_requested_country": 1,
+      "filter:experience_level_mismatch": 1,
+      "dedupe:canonical_url": 1,
+    });
+    expect(result.diagnostics.filterDecisionTraces).toHaveLength(5);
+    expect(result.diagnostics.filterDecisionTraces).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceJobId: "title-miss",
+          filterStage: "title",
+          outcome: "dropped",
+          dropReason: "filter:title_below_threshold",
+          titleDiagnostics: expect.objectContaining({
+            passed: false,
+          }),
+        }),
+        expect.objectContaining({
+          sourceJobId: "location-miss",
+          filterStage: "location",
+          outcome: "dropped",
+          dropReason: "filter:location_not_in_requested_country",
+          locationDiagnostics: expect.objectContaining({
+            passed: false,
+            isUnitedStates: false,
+          }),
+        }),
+        expect.objectContaining({
+          sourceJobId: "experience-miss",
+          filterStage: "experience",
+          outcome: "dropped",
+          dropReason: "filter:experience_level_mismatch",
+          experienceDiagnostics: expect.objectContaining({
+            passed: false,
+          }),
+        }),
+      ]),
+    );
+    expect(result.diagnostics.dedupeDecisionTraces).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceJobId: "matched-a",
+          outcome: "deduped",
+          dropReason: "dedupe:canonical_url",
+          decisionReason: expect.stringContaining("dedupe:canonical_url"),
+          originalIdentifiers: expect.objectContaining({
+            sourceJobId: "matched-a",
+          }),
+          normalizedIdentity: expect.objectContaining({
+            company: "acme",
+          }),
+        }),
+      ]),
+    );
     expect(result.crawlRun.diagnostics).toMatchObject(result.diagnostics);
     expect(result.sourceResults[0]).toMatchObject({
       provider: "greenhouse",

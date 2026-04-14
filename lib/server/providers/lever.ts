@@ -3,11 +3,11 @@ import "server-only";
 import {
   inferExperienceLevel,
   normalizeComparableText,
-  runWithConcurrency,
 } from "@/lib/server/crawler/helpers";
 import {
   buildCanonicalLeverApiUrl,
   buildCanonicalLeverJobUrl,
+  parseLeverUrl,
 } from "@/lib/server/discovery/lever-url";
 import {
   type LeverDiscoveredSource,
@@ -21,13 +21,12 @@ import {
   buildSeed,
   coercePostedAt,
   defaultCompanyName,
-  finalizeProviderResult,
-  unsupportedProviderResult,
 } from "@/lib/server/providers/shared";
 import {
-  defineProvider,
   type NormalizedJobSeed,
+  type ProviderExecutionContext,
 } from "@/lib/server/providers/types";
+import { createAdapterProvider } from "@/lib/server/providers/adapter";
 
 type LeverPosting = {
   id?: string;
@@ -104,8 +103,10 @@ export function normalizeLeverJob(input: {
     explicitExperienceReasons: explicitExperienceLevel
       ? [`Lever commitment or workplace metadata explicitly indicates ${explicitExperienceLevel.replace("_", " ")}.`]
       : undefined,
+    explicitEmploymentType: input.job.categories?.commitment,
     structuredExperienceHints,
     descriptionExperienceHints,
+    descriptionSnippet: input.job.descriptionPlain ?? input.job.description,
   });
 }
 
@@ -143,89 +144,113 @@ export async function extractLeverJobFromDetailUrl(input: {
 }
 
 export function createLeverProvider() {
-  return defineProvider({
+  return createAdapterProvider({
     provider: "lever",
     supportsSource: isLeverSource,
-    async crawlSources(context, sources) {
-      if (sources.length === 0) {
-        return unsupportedProviderResult(
-          "lever",
-          "No discovered Lever sources are available.",
-          sources.length,
-        );
-      }
-
-      const warnings: string[] = [];
-      const discoveredAt = context.now.toISOString();
-
-      const sites = await runWithConcurrency(
-        sources,
-        async (source) => {
-          const apiUrl = resolveLeverApiUrl(source);
-          const siteToken = resolveLeverToken(source);
-          const hostedUrl = resolveLeverHostedUrl(source);
-
-          if (!apiUrl) {
-            warnings.push(
-              `Lever source ${describeLeverSource(source)} is missing a usable token or public JSON endpoint.`,
-            );
-            return {
-              fetchedCount: 0,
-              jobs: [],
-            };
-          }
-
-          const result = await safeFetchJson<LeverPosting[]>(apiUrl, {
-            fetchImpl: context.fetchImpl,
-            method: "GET",
-            headers: {
-              Accept: "application/json",
-            },
-            cache: "no-store",
-          });
-
-          if (!result.ok) {
-            warnings.push(formatLeverFetchWarning(source, result));
-            return {
-              fetchedCount: 0,
-              jobs: [],
-            };
-          }
-
-          const payload = result.data ?? [];
-          const jobs = payload.map((job) =>
-            normalizeLeverJob({
-              siteToken:
-                siteToken ??
-                buildProviderCompanyToken(source.companyHint) ??
-                "lever",
-              hostedUrl,
-              companyName: source.companyHint,
-              discoveredAt,
-              job,
-            }),
-          );
-
-          return {
-            fetchedCount: payload.length,
-            jobs,
-          };
-        },
-        3,
-      );
-
-      const fetchedCount = sites.reduce((total, site) => total + site.fetchedCount, 0);
-      const jobs = sites.flatMap((site) => site.jobs);
-
-      return finalizeProviderResult({
-        provider: "lever",
-        jobs,
-        sourceCount: sources.length,
-        fetchedCount,
-        warnings,
-      });
+    unsupportedMessage: "No discovered Lever sources are available.",
+    concurrency: 3,
+    async crawlSource(context, source) {
+      return crawlLeverSource(context, source);
     },
   });
+}
+
+async function crawlLeverSource(
+  context: ProviderExecutionContext,
+  source: LeverDiscoveredSource,
+) {
+  const warnings: string[] = [];
+  const dropReasons: string[] = [];
+  const discoveredAt = context.now.toISOString();
+  const apiUrl = resolveLeverApiUrl(source);
+  const siteToken = resolveLeverToken(source);
+  const hostedUrl = resolveLeverHostedUrl(source);
+  const normalizedSiteToken =
+    siteToken ?? buildProviderCompanyToken(source.companyHint) ?? "lever";
+
+  let payload: LeverPosting[] = [];
+  if (apiUrl) {
+    const result = await safeFetchJson<LeverPosting[]>(apiUrl, {
+      fetchImpl: context.fetchImpl,
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    });
+
+    if (!result.ok) {
+      warnings.push(formatLeverFetchWarning(source, result));
+      dropReasons.push("list_fetch_failed");
+    } else {
+      payload = result.data ?? [];
+    }
+  } else {
+    warnings.push(
+      `Lever source ${describeLeverSource(source)} is missing a usable token or public JSON endpoint.`,
+    );
+    dropReasons.push("missing_api_url");
+  }
+
+  const jobs = payload.map((job) =>
+    normalizeLeverJob({
+      siteToken: normalizedSiteToken,
+      hostedUrl,
+      companyName: source.companyHint,
+      discoveredAt,
+      job,
+    }),
+  );
+
+  const detailFallbackJob =
+    jobs.length === 0 && source.jobId && siteToken
+      ? await extractLeverJobFromDetailUrl({
+          detailUrl:
+            parseLeverUrl(source.url)?.canonicalJobUrl ??
+            buildCanonicalLeverJobUrl(siteToken, source.jobId),
+          siteToken,
+          jobId: source.jobId,
+          companyHint: source.companyHint,
+          discoveredAt,
+          fetchImpl: context.fetchImpl,
+        })
+      : undefined;
+
+  if (payload.length === 0 && !detailFallbackJob) {
+    dropReasons.push(source.jobId ? "detail_fallback_failed" : "empty_list_payload");
+  }
+
+  const normalizedJobs = detailFallbackJob ? [detailFallbackJob] : jobs;
+
+  console.info("[lever:crawl-source]", {
+    siteToken,
+    apiUrl,
+    hostedUrl,
+    detailJobId: source.jobId,
+    fetchedCount: payload.length,
+    normalizedCount: normalizedJobs.length,
+    usedDetailFallback: Boolean(detailFallbackJob),
+    dropReasons,
+  });
+
+  if (normalizedJobs.length > 0) {
+    await context.onBatch?.({
+      provider: "lever",
+      jobs: normalizedJobs,
+      sourceCount: 1,
+      fetchedCount: payload.length || (detailFallbackJob ? 1 : 0),
+    });
+  }
+
+  return {
+    fetchedCount: payload.length || (detailFallbackJob ? 1 : 0),
+    fetchCount: (apiUrl ? 1 : 0) + (detailFallbackJob ? 1 : 0),
+    jobs: normalizedJobs,
+    warnings,
+    parseSuccessCount: normalizedJobs.length,
+    parseFailureCount: source.jobId && !detailFallbackJob && jobs.length === 0 ? 1 : 0,
+    dropReasons,
+  };
 }
 
 function resolveLeverExplicitExperienceLevel(job: LeverPosting) {

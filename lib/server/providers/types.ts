@@ -7,11 +7,15 @@ import type {
   WorkdayDiscoveredSource,
 } from "@/lib/server/discovery/types";
 import type {
+  EmploymentType,
   ExperienceClassification,
   ExperienceLevel,
   ProviderPlatform,
+  RemoteType,
   ResolvedLocation,
+  SalaryInfo,
   SearchFilters,
+  SponsorshipHint,
 } from "@/lib/types";
 
 export type FetchLike = typeof fetch;
@@ -19,20 +23,34 @@ export type FetchLike = typeof fetch;
 export type NormalizedJobSeed = {
   title: string;
   company: string;
+  normalizedCompany?: string;
+  normalizedTitle?: string;
   country?: string;
   state?: string;
   city?: string;
+  locationRaw?: string;
+  normalizedLocation?: string;
   locationText: string;
   resolvedLocation?: ResolvedLocation;
+  remoteType?: RemoteType;
+  employmentType?: EmploymentType;
+  seniority?: ExperienceLevel;
   experienceLevel?: ExperienceLevel;
   experienceClassification?: ExperienceClassification;
   sourcePlatform: ProviderPlatform;
+  sourceCompanySlug?: string;
   sourceJobId: string;
   sourceUrl: string;
   applyUrl: string;
   canonicalUrl?: string;
+  postingDate?: string;
   postedAt?: string;
   discoveredAt: string;
+  crawledAt?: string;
+  descriptionSnippet?: string;
+  salaryInfo?: SalaryInfo;
+  sponsorshipHint?: SponsorshipHint;
+  dedupeFingerprint?: string;
   rawSourceMetadata: Record<string, unknown>;
 };
 
@@ -64,6 +82,7 @@ export type ProviderResult<P extends ProviderPlatform = ProviderPlatform> = {
   matchedCount: number;
   warningCount?: number;
   errorMessage?: string;
+  diagnostics?: ProviderDiagnostics<P>;
 };
 
 export type ProviderBatchProgress<P extends ProviderPlatform = ProviderPlatform> = {
@@ -71,6 +90,16 @@ export type ProviderBatchProgress<P extends ProviderPlatform = ProviderPlatform>
   jobs: NormalizedJobSeed[];
   sourceCount?: number;
   fetchedCount: number;
+};
+
+export type ProviderDiagnostics<P extends ProviderPlatform = ProviderPlatform> = {
+  provider: P;
+  discoveryCount: number;
+  fetchCount: number;
+  parseSuccessCount: number;
+  parseFailureCount: number;
+  dropReasonCounts: Record<string, number>;
+  sampleDropReasons: string[];
 };
 
 export type SourceDrivenProvider<

@@ -9,11 +9,11 @@ type StateTone = "neutral" | "amber" | "red";
 
 export function MessageBanner(props: { message: string }) {
   return (
-    <div className="rounded-[24px] border border-red-200/80 bg-red-50/85 px-4 py-4">
+    <div className="rounded-[18px] border border-red-200/80 bg-red-50/90 px-4 py-3">
       <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-red-700">
         Search issue
       </div>
-      <div className="mt-2 text-sm leading-6 text-red-800">{props.message}</div>
+      <div className="mt-1 text-sm leading-6 text-red-800">{props.message}</div>
     </div>
   );
 }
@@ -31,13 +31,13 @@ export function StatePanel(props: {
   return (
     <section
       className={cn(
-        "rounded-[28px] border p-8 shadow-[0_18px_48px_rgba(15,23,42,0.05)]",
+        "rounded-[22px] border p-6 shadow-[0_18px_48px_rgba(15,23,42,0.05)]",
         tone === "neutral" && "border-ink/8 bg-white",
         tone === "amber" && "border-amber-200/80 bg-amber-50/80",
         tone === "red" && "border-red-200/80 bg-red-50/85",
       )}
     >
-      <div className="mx-auto max-w-4xl text-center">
+      <div className="mx-auto max-w-4xl">
         <div
           className={cn(
             "inline-flex rounded-full px-3 py-1 font-mono text-[11px] uppercase tracking-[0.18em]",
@@ -48,8 +48,8 @@ export function StatePanel(props: {
         >
           Search state
         </div>
-        <h2 className="mt-4 text-2xl font-semibold text-ink">{props.title}</h2>
-        <p className="mx-auto mt-3 max-w-3xl text-base leading-7 text-slate">
+        <h2 className="mt-3 text-2xl font-semibold text-ink">{props.title}</h2>
+        <p className="mt-2 max-w-3xl text-sm leading-7 text-slate">
           {props.description}
         </p>
       </div>
@@ -68,7 +68,7 @@ export function StatePanel(props: {
       ) : null}
 
       {props.actionLabel && props.onAction ? (
-        <div className="mt-6 text-center">
+        <div className="mt-5">
           <button
             type="button"
             onClick={props.onAction}
@@ -91,7 +91,7 @@ export function NoticeBanner(props: {
   return (
     <section
       className={cn(
-        "rounded-[28px] border px-5 py-4",
+        "rounded-[18px] border px-4 py-3",
         props.tone === "amber"
           ? "border-amber-200/80 bg-amber-50/85"
           : "border-tide/20 bg-[rgba(63,114,175,0.07)]",
@@ -111,7 +111,7 @@ export function NoticeBanner(props: {
           </div>
           <div
             className={cn(
-              "mt-3 text-base font-semibold",
+              "mt-2 text-base font-semibold",
               props.tone === "amber" ? "text-amber-900" : "text-tide",
             )}
           >
@@ -129,7 +129,7 @@ export function NoticeBanner(props: {
       </div>
 
       {props.highlights?.length ? (
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
           {props.highlights.map((highlight, index) => (
             <div
               key={`notice-highlight-${index}`}
@@ -157,14 +157,14 @@ export function LoadingPanel(props: {
   const hasVisibleResults = (props.foundCount ?? 0) > 0;
 
   return (
-    <section className="rounded-[28px] border border-ink/8 bg-white p-8 shadow-[0_18px_48px_rgba(15,23,42,0.05)]">
+    <section className="rounded-[20px] border border-ink/8 bg-white p-5 shadow-[0_18px_48px_rgba(15,23,42,0.05)]">
       <div className="font-mono text-xs uppercase tracking-[0.24em] text-ember">
         Search in progress
       </div>
-      <h2 className="mt-3 text-2xl font-semibold text-ink">
+      <h2 className="mt-2 text-xl font-semibold text-ink">
         {hasVisibleResults ? "Showing partial results while the crawl continues" : "Gathering fresh job results"}
       </h2>
-      <p className="mt-3 max-w-3xl text-sm leading-6 text-slate">
+      <p className="mt-2 max-w-3xl text-sm leading-6 text-slate">
         {stageLabel}
         {(props.foundCount ?? 0) > 0
           ? ` ${props.foundCount} saved job${props.foundCount === 1 ? "" : "s"} are already available to review.`
@@ -181,7 +181,7 @@ export function LoadingPanel(props: {
           {props.foundCount ?? 0} saved
         </span>
       </div>
-      <div className="mt-5 grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
+      <div className="mt-4 grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
         <div className="space-y-3">
           {(activeProviders.length > 0 ? activeProviders : providerSummary).slice(0, 4).map((provider) => (
             <div

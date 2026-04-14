@@ -56,8 +56,10 @@ const roleHeadWords = new Set([
   "developer",
   "engineer",
   "manager",
+  "owner",
   "recruiter",
   "scientist",
+  "staff",
   "specialist",
   "sourcer",
   "tester",
@@ -73,8 +75,12 @@ export function normalizeTitleText(value?: string) {
     .replace(/\bfront[\s-]*end\b/g, "frontend")
     .replace(/\bback[\s-]*end\b/g, "backend")
     .replace(/\bfull[\s-]*stack\b/g, "full stack")
+    .replace(/\bfullstack\b/g, "full stack")
     .replace(/\bpre[\s-]*sales\b/g, "pre sales")
     .replace(/\bsite reliability engineer\b/g, "sre")
+    .replace(/\bmember(?:\s+of)?\s+technical\s+staff\b/g, "member of technical staff")
+    .replace(/\bprod(?:uct)?\s+mgr\b/g, "product manager")
+    .replace(/\btech(?:nical)?\s+pm\b/g, "technical product manager")
     .replace(/\bquality assurance\b/g, "quality assurance")
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")

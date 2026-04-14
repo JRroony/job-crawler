@@ -428,10 +428,13 @@ export function JobCrawlerApp({
   const resultsLocation = activeResult
     ? buildLocationInputValue(activeResult.search.filters) || "All locations"
     : buildLocationInputValue(buildLiveFilters()) || "All locations";
+  const activeSearchBadges = activeResult
+    ? buildFilterBadges(activeResult.search.filters).slice(0, 4)
+    : [];
 
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top,#fdfbf6_0%,#f4f1ea_42%,#efeae1_100%)] text-ink">
-      <div className="mx-auto max-w-[1420px] px-4 py-5 sm:px-6 lg:px-8">
+    <main className="min-h-screen bg-[radial-gradient(circle_at_top,#ffffff_0%,#f4f7fb_40%,#edf2f7_100%)] text-ink">
+      <div className="mx-auto max-w-[1360px] px-4 py-5 sm:px-6 lg:px-8">
         <div className="space-y-3">
           <SearchBar
             keyword={keywordInput}
@@ -500,8 +503,8 @@ export function JobCrawlerApp({
 
           {viewState === "idle" ? (
             <StatePanel
-              title="Start with a job search"
-              description="Enter a role and location, then refine the results with platform, experience, remote, visa, and posted-date filters."
+              title="Search by role and location"
+              description="Start with a target job title, add a location, and narrow the result list only when you need to."
               tone="neutral"
             />
           ) : null}
@@ -538,8 +541,8 @@ export function JobCrawlerApp({
 
           {activeResult && activeResult.jobs.length > 0 ? (
             <>
-              <section className="rounded-[24px] border border-ink/10 bg-white/90 px-5 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <section className="rounded-[20px] border border-ink/10 bg-white/94 px-5 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                   <div>
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
                       Active search
@@ -550,24 +553,44 @@ export function JobCrawlerApp({
                     <p className="mt-1 text-sm text-slate">
                       {resultsLocation} • updated {formatRelativeMoment(activeResult.search.updatedAt)}
                     </p>
+                    {activeSearchBadges.length > 0 ? (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {activeSearchBadges.map((badge, index) => (
+                          <span
+                            key={`active-search-badge-${index}`}
+                            className="rounded-full border border-ink/10 bg-mist/35 px-3 py-1.5 text-xs text-slate"
+                          >
+                            {badge}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
-                  <div className="flex flex-wrap gap-2 text-sm font-medium text-slate">
-                    <span className="rounded-full border border-ink/10 bg-mist/40 px-3 py-1.5">
-                      {visibleJobs.length === activeResult.jobs.length
-                        ? `${visibleJobs.length} jobs`
-                        : `${visibleJobs.length} of ${activeResult.jobs.length} shown`}
-                    </span>
-                    <span className="rounded-full border border-ink/10 bg-mist/40 px-3 py-1.5">
-                      {activeResult.search.filters.platforms?.length
-                        ? activeResult.search.filters.platforms.join(", ")
-                        : "All active sources"}
-                    </span>
+                  <div className="grid gap-3 sm:grid-cols-2 lg:min-w-[320px]">
+                    <div className="rounded-[18px] border border-ink/8 bg-mist/30 px-4 py-3">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate/60">
+                        Visible results
+                      </div>
+                      <div className="mt-1 text-base font-semibold text-ink">
+                        {visibleJobs.length === activeResult.jobs.length
+                          ? `${visibleJobs.length} jobs`
+                          : `${visibleJobs.length} of ${activeResult.jobs.length}`}
+                      </div>
+                    </div>
+                    <div className="rounded-[18px] border border-ink/8 bg-mist/30 px-4 py-3">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate/60">
+                        Source scope
+                      </div>
+                      <div className="mt-1 text-base font-semibold text-ink">
+                        {describePlatformScope(activeResult.search.filters.platforms)}
+                      </div>
+                    </div>
                   </div>
                 </div>
               </section>
 
               {resultNotice ? (
-                <section className="rounded-[20px] border border-ink/10 bg-white/85 px-5 py-4 shadow-sm">
+                <section className="rounded-[18px] border border-ink/10 bg-white/92 px-5 py-4 shadow-sm">
                   <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
                     <div>
                       <div className="text-sm font-semibold text-ink">{resultNotice.title}</div>

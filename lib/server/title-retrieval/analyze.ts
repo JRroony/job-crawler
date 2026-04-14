@@ -32,8 +32,10 @@ const roleGroupByHeadWord = new Map<string, TitleRoleGroup>([
   ["engineer", "engineering"],
   ["analyst", "analysis"],
   ["manager", "management"],
+  ["owner", "management"],
   ["recruiter", "recruiting"],
   ["sourcer", "recruiting"],
+  ["staff", "engineering"],
   ["writer", "writing"],
   ["specialist", "operations"],
   ["coordinator", "operations"],
@@ -80,11 +82,18 @@ const fallbackFamilyScoresByHeadWord: Partial<
     program_management: 90,
     operations: 80,
   },
+  owner: {
+    product: 95,
+  },
   recruiter: {
     recruiting: 170,
   },
   sourcer: {
     recruiting: 170,
+  },
+  staff: {
+    software_engineering: 115,
+    support: 55,
   },
   specialist: {
     operations: 75,
@@ -320,6 +329,22 @@ function scoreConceptSignals(
   const containsAlias = (concept.aliases ?? []).some((alias) =>
     normalizedTitle.includes(normalizeTitleText(alias)),
   );
+  const synonymTokenMatches = (concept.tokenSynonyms ?? []).reduce((total, synonymGroup) => {
+    const normalizedGroup = Array.from(
+      new Set(synonymGroup.map((phrase) => normalizeTitleText(phrase)).filter(Boolean)),
+    );
+    if (normalizedGroup.length === 0) {
+      return total;
+    }
+
+    const hasTitleSignal = normalizedGroup.some((phrase) => normalizedTitle.includes(phrase));
+    const hasQuerySignal = normalizedGroup.some((phrase) =>
+      meaningfulTokens.includes(phrase) ||
+      phrase.split(" ").every((token) => meaningfulTokens.includes(token)),
+    );
+
+    return hasTitleSignal || hasQuerySignal ? total + 1 : total;
+  }, 0);
   const querySignalsCovered =
     meaningfulTokens.length > 0 &&
     meaningfulTokens.every((token) => signalTokens.includes(token));
@@ -333,7 +358,9 @@ function scoreConceptSignals(
     (headWord === "developer" && canonicalHeadWord === "engineer") ||
     (headWord === "engineer" && canonicalHeadWord === "developer") ||
     (headWord === "architect" && canonicalHeadWord === "engineer") ||
-    (headWord === "tester" && canonicalHeadWord === "engineer");
+    (headWord === "tester" && canonicalHeadWord === "engineer") ||
+    (headWord === "staff" && canonicalHeadWord === "engineer") ||
+    (headWord === "owner" && canonicalHeadWord === "manager");
   const negativeConflict = (concept.negativeKeywords ?? []).some((keyword) =>
     normalizedTitle.includes(normalizeTitleText(keyword)),
   );
@@ -341,6 +368,7 @@ function scoreConceptSignals(
   return (
     (containsCanonical ? 420 : 0) +
     (containsAlias ? 280 : 0) +
+    synonymTokenMatches * 65 +
     sharedTokenCount * 90 +
     sharedPhraseCount * 55 +
     (querySignalsCovered ? 70 : 0) +
@@ -358,6 +386,7 @@ function buildConceptSignalTokens(
   const phrases = [
     concept.canonicalTitle,
     ...(concept.aliases ?? []),
+    ...(concept.tokenSynonyms ?? []).flat(),
     ...(concept.broadDiscoveryQueries ?? []),
   ];
 
@@ -399,6 +428,7 @@ function buildConceptSignalPhrases(
   const phrases = [
     concept.canonicalTitle,
     ...(concept.aliases ?? []),
+    ...(concept.tokenSynonyms ?? []).flat(),
     ...(concept.broadDiscoveryQueries ?? []),
   ];
 
@@ -491,7 +521,7 @@ function computeFamilyHeadCompatibilityAdjustment(
   }
 
   if (family === "product") {
-    return headWord === "manager" ? 0 : -85;
+    return headWord === "manager" || headWord === "owner" ? 0 : -85;
   }
 
   if (family === "program_management") {
@@ -539,7 +569,8 @@ function computeFamilyHeadCompatibilityAdjustment(
   if (family === "software_engineering") {
     return headWord === "engineer" ||
       headWord === "developer" ||
-      headWord === "architect"
+      headWord === "architect" ||
+      headWord === "staff"
       ? 0
       : -95;
   }

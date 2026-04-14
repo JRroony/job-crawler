@@ -1,13 +1,25 @@
 import "server-only";
 
-import type { ExperienceClassification } from "@/lib/types";
-import type { NormalizedJobSeed, ProviderResult } from "@/lib/server/providers/types";
+import type {
+  EmploymentType,
+  ExperienceClassification,
+  ExperienceLevel,
+  RemoteType,
+  SalaryInfo,
+  SponsorshipHint,
+} from "@/lib/types";
+import type {
+  NormalizedJobSeed,
+  ProviderDiagnostics,
+  ProviderResult,
+} from "@/lib/server/providers/types";
 import { resolveJobLocation } from "@/lib/server/location-resolution";
 
 import {
   buildLocationText,
   canonicalizeUrl,
   classifyExperience,
+  normalizeComparableText,
   parseLocationText,
   slugToLabel,
 } from "@/lib/server/crawler/helpers";
@@ -49,9 +61,15 @@ export function buildSeed(input: {
   explicitExperienceLevel?: NormalizedJobSeed["experienceLevel"];
   explicitExperienceSource?: ExperienceClassification["source"];
   explicitExperienceReasons?: string[];
+  explicitEmploymentType?: EmploymentType | string;
+  explicitSeniority?: ExperienceLevel | string;
   structuredExperienceHints?: Array<string | undefined>;
   descriptionExperienceHints?: Array<string | undefined>;
   pageFetchExperienceHints?: Array<string | undefined>;
+  descriptionSnippet?: string;
+  salaryInfo?: SalaryInfo;
+  sponsorshipHint?: SponsorshipHint;
+  crawledAt?: string;
 }) {
   const locationText = input.locationText?.trim() || "Location unavailable";
   const parsedLocation = parseLocationText(locationText);
@@ -69,6 +87,7 @@ export function buildSeed(input: {
     experienceClassification.explicitLevel ?? experienceClassification.inferredLevel;
   const explicitCountry = normalizeCountry(input.explicitCountry);
   const explicitState = normalizeState(input.explicitState);
+  const company = defaultCompanyName(input.companyToken, input.company);
   const resolvedLocation = resolveJobLocation({
     country: explicitCountry ?? parsedLocation.country,
     state: explicitState ?? parsedLocation.state,
@@ -76,18 +95,55 @@ export function buildSeed(input: {
     locationText,
     rawSourceMetadata: input.rawSourceMetadata,
   });
+  const remoteType = inferRemoteType(locationText, resolvedLocation, input.rawSourceMetadata);
+  const employmentType = normalizeEmploymentType(input.explicitEmploymentType);
+  const seniority = normalizeSeniority(input.explicitSeniority) ?? experienceLevel;
+  const postingDate = input.postedAt;
+  const crawledAt = input.crawledAt ?? input.discoveredAt;
+  const descriptionSnippet =
+    normalizeDescriptionSnippet(input.descriptionSnippet) ??
+    buildDescriptionSnippet([
+      ...(input.descriptionExperienceHints ?? []),
+      ...(input.pageFetchExperienceHints ?? []),
+    ]);
+  const salaryInfo =
+    input.salaryInfo ??
+    extractSalaryInfo(input.rawSourceMetadata, [
+      ...(input.descriptionExperienceHints ?? []),
+      ...(input.pageFetchExperienceHints ?? []),
+    ]);
+  const sponsorshipHint =
+    input.sponsorshipHint ?? inferSponsorshipHint([
+      ...(input.descriptionExperienceHints ?? []),
+      ...(input.pageFetchExperienceHints ?? []),
+      safeJson(input.rawSourceMetadata),
+    ]);
 
   return {
     title: input.title.trim(),
-    company: defaultCompanyName(input.companyToken, input.company),
+    company,
+    normalizedCompany: normalizeComparableText(company),
+    normalizedTitle: normalizeComparableText(input.title.trim()),
     country: resolvedLocation.country ?? explicitCountry ?? parsedLocation.country,
     state: resolvedLocation.state ?? explicitState ?? parsedLocation.state,
     city: resolvedLocation.city ?? input.explicitCity ?? parsedLocation.city,
+    locationRaw: locationText,
+    normalizedLocation: normalizeComparableText(
+      buildLocationText([
+        resolvedLocation.city ?? input.explicitCity ?? parsedLocation.city,
+        resolvedLocation.state ?? explicitState ?? parsedLocation.state,
+        resolvedLocation.country ?? explicitCountry ?? parsedLocation.country,
+      ]) || locationText,
+    ),
     locationText,
     resolvedLocation,
+    remoteType,
+    employmentType,
+    seniority,
     experienceLevel,
     experienceClassification,
     sourcePlatform: input.sourcePlatform,
+    sourceCompanySlug: normalizeSourceCompanySlug(input.companyToken),
     sourceJobId: input.sourceJobId,
     sourceUrl: input.sourceUrl,
     applyUrl: input.applyUrl ?? input.sourceUrl,
@@ -95,10 +151,347 @@ export function buildSeed(input: {
       canonicalizeUrl(input.canonicalUrl ?? "") ??
       canonicalizeUrl(input.sourceUrl) ??
       canonicalizeUrl(input.applyUrl ?? input.sourceUrl),
-    postedAt: input.postedAt,
+    postingDate,
+    postedAt: postingDate,
     discoveredAt: input.discoveredAt,
+    crawledAt,
+    descriptionSnippet,
+    ...(salaryInfo ? { salaryInfo } : {}),
+    sponsorshipHint,
     rawSourceMetadata: input.rawSourceMetadata,
   };
+}
+
+function normalizeSourceCompanySlug(value: string) {
+  const normalized = normalizeComparableText(value);
+  return normalized ? normalized.replace(/\s+/g, "-") : undefined;
+}
+
+function inferRemoteType(
+  locationText: string,
+  resolvedLocation: NormalizedJobSeed["resolvedLocation"],
+  rawSourceMetadata: Record<string, unknown>,
+): RemoteType {
+  const searchable = [locationText, safeJson(rawSourceMetadata)].filter(Boolean).join(" ");
+
+  if (/\bhybrid\b/i.test(searchable)) {
+    return "hybrid";
+  }
+
+  if (resolvedLocation?.isRemote || /\b(remote|work from home|distributed)\b/i.test(searchable)) {
+    return "remote";
+  }
+
+  if (locationText.trim()) {
+    return "onsite";
+  }
+
+  return "unknown";
+}
+
+function normalizeEmploymentType(value?: EmploymentType | string) {
+  const normalized = normalizeComparableText(value ?? "");
+
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (/\bfull ?time\b/.test(normalized)) {
+    return "full_time" as const;
+  }
+
+  if (/\bpart ?time\b/.test(normalized)) {
+    return "part_time" as const;
+  }
+
+  if (/\b(contract|contractor|consultant)\b/.test(normalized)) {
+    return "contract" as const;
+  }
+
+  if (/\btemporary|temp\b/.test(normalized)) {
+    return "temporary" as const;
+  }
+
+  if (/\b(intern|internship)\b/.test(normalized)) {
+    return "internship" as const;
+  }
+
+  if (/\b(apprentice|apprenticeship)\b/.test(normalized)) {
+    return "apprenticeship" as const;
+  }
+
+  if (/\bseasonal\b/.test(normalized)) {
+    return "seasonal" as const;
+  }
+
+  if (/\b(freelance|freelancer)\b/.test(normalized)) {
+    return "freelance" as const;
+  }
+
+  return "unknown" as const;
+}
+
+function normalizeSeniority(value?: ExperienceLevel | string) {
+  const normalized = normalizeComparableText(value ?? "");
+
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (/\bintern/.test(normalized)) {
+    return "intern" as const;
+  }
+
+  if (/\b(new grad|graduate|entry level|early career)\b/.test(normalized)) {
+    return "new_grad" as const;
+  }
+
+  if (/\b(junior|jr)\b/.test(normalized)) {
+    return "junior" as const;
+  }
+
+  if (/\b(mid|ii|level 2)\b/.test(normalized)) {
+    return "mid" as const;
+  }
+
+  if (/\b(senior|sr|iii|level 3)\b/.test(normalized)) {
+    return "senior" as const;
+  }
+
+  if (/\b(lead|manager|director|head)\b/.test(normalized)) {
+    return "lead" as const;
+  }
+
+  if (/\b(staff|mts|smts|iv|level 4)\b/.test(normalized)) {
+    return "staff" as const;
+  }
+
+  if (/\b(principal|distinguished|fellow|pmts|lmts|v|level 5)\b/.test(normalized)) {
+    return "principal" as const;
+  }
+
+  return undefined;
+}
+
+function normalizeDescriptionSnippet(value?: string) {
+  return buildDescriptionSnippet([value]);
+}
+
+function buildDescriptionSnippet(values: Array<string | undefined>) {
+  for (const value of values) {
+    const normalized = value
+      ?.replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!normalized) {
+      continue;
+    }
+
+    return normalized.length <= 280 ? normalized : `${normalized.slice(0, 277).trimEnd()}...`;
+  }
+
+  return undefined;
+}
+
+function inferSponsorshipHint(values: Array<string | undefined>): SponsorshipHint {
+  const searchable = values.filter(Boolean).join(" ");
+
+  if (!searchable.trim()) {
+    return "unknown";
+  }
+
+  if (
+    /\b(no|not|without|unable to|cannot)\s+(offer |provide |support )?(visa|immigration|sponsorship)\b/i.test(
+      searchable,
+    ) ||
+    /\b(visa|immigration) sponsorship is not available\b/i.test(searchable)
+  ) {
+    return "not_supported";
+  }
+
+  if (
+    /\b(visa sponsorship|immigration support|h-1b|h1b|will sponsor|can sponsor|sponsorship available|open to visa)\b/i.test(
+      searchable,
+    )
+  ) {
+    return "supported";
+  }
+
+  return "unknown";
+}
+
+function extractSalaryInfo(
+  rawSourceMetadata: Record<string, unknown>,
+  freeTextValues: Array<string | undefined>,
+) {
+  const baseSalary = extractBaseSalary(rawSourceMetadata);
+  if (baseSalary) {
+    return baseSalary;
+  }
+
+  for (const value of freeTextValues) {
+    const parsed = parseSalaryText(value);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
+function extractBaseSalary(rawSourceMetadata: Record<string, unknown>): SalaryInfo | undefined {
+  const baseSalary = deepFindRecord(rawSourceMetadata, "baseSalary");
+  if (!baseSalary) {
+    return undefined;
+  }
+
+  const currency = readNestedString(baseSalary, ["currency", "currencyCode"]);
+  const rawText = readNestedString(baseSalary, ["value", "text"]) ?? readNestedString(baseSalary, ["text"]);
+  const valueRecord = readNestedRecord(baseSalary, ["value"]);
+  const minAmount = readNestedNumber(valueRecord ?? baseSalary, ["minValue", "minvalue", "value"]);
+  const maxAmount = readNestedNumber(valueRecord ?? baseSalary, ["maxValue", "maxvalue", "value"]);
+  const interval = normalizeSalaryInterval(
+    readNestedString(valueRecord ?? baseSalary, ["unitText", "interval"]),
+  );
+
+  if (
+    typeof minAmount === "undefined" &&
+    typeof maxAmount === "undefined" &&
+    !currency &&
+    !rawText
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(typeof minAmount === "number" ? { minAmount } : {}),
+    ...(typeof maxAmount === "number" ? { maxAmount } : {}),
+    ...(currency ? { currency } : {}),
+    ...(rawText ? { rawText } : {}),
+    interval,
+  };
+}
+
+function parseSalaryText(value?: string): SalaryInfo | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const match = value.match(
+    /\$?\s?(\d[\d,]*(?:\.\d+)?)\s*(?:-|to)\s*\$?\s?(\d[\d,]*(?:\.\d+)?)\s*(per|\/)\s*(hour|day|week|month|year|yr)?/i,
+  );
+  if (match) {
+    return {
+      minAmount: Number(match[1].replace(/,/g, "")),
+      maxAmount: Number(match[2].replace(/,/g, "")),
+      interval: normalizeSalaryInterval(match[4]),
+      rawText: value.trim(),
+    };
+  }
+
+  return undefined;
+}
+
+function normalizeSalaryInterval(value?: string): SalaryInfo["interval"] {
+  const normalized = normalizeComparableText(value ?? "");
+
+  if (/hour/.test(normalized)) {
+    return "hour";
+  }
+
+  if (/day/.test(normalized)) {
+    return "day";
+  }
+
+  if (/week/.test(normalized)) {
+    return "week";
+  }
+
+  if (/month/.test(normalized)) {
+    return "month";
+  }
+
+  if (/(year|yr|annual)/.test(normalized)) {
+    return "year";
+  }
+
+  return "unknown";
+}
+
+function deepFindRecord(value: unknown, targetKey: string): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const found = deepFindRecord(entry, targetKey);
+      if (found) {
+        return found;
+      }
+    }
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const direct = record[targetKey];
+  if (direct && typeof direct === "object" && !Array.isArray(direct)) {
+    return direct as Record<string, unknown>;
+  }
+
+  for (const entry of Object.values(record)) {
+    const found = deepFindRecord(entry, targetKey);
+    if (found) {
+      return found;
+    }
+  }
+
+  return undefined;
+}
+
+function readNestedRecord(
+  record: Record<string, unknown>,
+  keys: string[],
+): Record<string, unknown> | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+  }
+
+  return undefined;
+}
+
+function readNestedString(record: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return undefined;
+}
+
+function readNestedNumber(record: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+function safeJson(value: unknown) {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return "";
+  }
 }
 
 function normalizeCountry(value?: string) {
@@ -125,6 +518,7 @@ export function finalizeProviderResult<P extends ProviderResult["provider"]>(inp
   sourceCount: number;
   fetchedCount: number;
   warnings: string[];
+  diagnostics?: ProviderDiagnostics<P>;
 }): ProviderResult<P> {
   const hasWarnings = input.warnings.length > 0;
 
@@ -137,6 +531,7 @@ export function finalizeProviderResult<P extends ProviderResult["provider"]>(inp
     matchedCount: input.jobs.length,
     warningCount: input.warnings.length,
     errorMessage: hasWarnings ? input.warnings.join(" ") : undefined,
+    diagnostics: input.diagnostics,
   } satisfies ProviderResult<P>;
 }
 

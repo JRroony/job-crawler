@@ -25,9 +25,10 @@ import {
   unsupportedProviderResult,
 } from "@/lib/server/providers/shared";
 import {
-  defineProvider,
   type NormalizedJobSeed,
+  type ProviderExecutionContext,
 } from "@/lib/server/providers/types";
+import { createAdapterProvider } from "@/lib/server/providers/adapter";
 import {
   analyzeTitle,
   buildTitleQueryVariants,
@@ -118,6 +119,7 @@ export function normalizeGreenhouseJob(input: {
     discoveredAt: input.discoveredAt,
     structuredExperienceHints,
     descriptionExperienceHints: [descriptionExperienceHint],
+    descriptionSnippet: descriptionExperienceHint,
   });
 }
 
@@ -160,218 +162,163 @@ export async function extractGreenhouseJobFromDetailUrl(input: {
 }
 
 export function createGreenhouseProvider() {
-  return defineProvider({
+  return createAdapterProvider({
     provider: "greenhouse",
     supportsSource: isGreenhouseSource,
-    async crawlSources(context, sources) {
-      if (sources.length === 0) {
-        return unsupportedProviderResult(
-          "greenhouse",
-          "No discovered Greenhouse sources are available.",
-          sources.length,
-        );
-      }
-
-      const warnings: string[] = [];
-      const discoveredAt = context.now.toISOString();
-      const crawlStrategy = resolveGreenhouseCrawlStrategy(context.filters.crawlMode);
-      const titlePreselector = buildGreenhouseRawTitlePreselector(
-        context.filters.title,
-        crawlStrategy.maxTitleVariants,
-      );
-      const providerStartedMs = Date.now();
-      const uniqueBoardSources = dedupeGreenhouseSources(sources);
-      let cacheHits = 0;
-      let cacheMisses = 0;
-      let inflightCacheHits = 0;
-
-      const boards = await runWithConcurrency(
-        uniqueBoardSources,
-        async (source) => {
-          const sourceStartedMs = Date.now();
-          const apiUrl = resolveGreenhouseApiUrl(source);
-          const companyToken = resolveGreenhouseToken(source);
-          const boardUrl = resolveGreenhouseBoardUrl(source);
-          const sourceDescriptor = {
-            token: companyToken,
-            boardUrl,
-            apiUrl,
-          };
-
-          if (!apiUrl) {
-            warnings.push(
-              `Greenhouse source ${describeGreenhouseSource(source)} is missing a usable board token or URL.`,
-            );
-            console.warn("[greenhouse:crawl-source]", {
-              ...sourceDescriptor,
-              status: "missing_api_url",
-              timingMs: {
-                total: Date.now() - sourceStartedMs,
-              },
-            });
-            return {
-              fetchedCount: 0,
-              preselectedCount: 0,
-              jobs: [],
-              fetchMs: 0,
-              preselectionMs: 0,
-              normalizationMs: 0,
-            };
-          }
-
-          const fetchStartedMs = Date.now();
-          const boardFetch = await fetchGreenhouseBoard(apiUrl, {
-            fetchImpl: context.fetchImpl,
-            timeoutMs: crawlStrategy.timeoutMs,
-            retries: crawlStrategy.retries,
-          });
-          const result = boardFetch.result;
-          const fetchMs = Date.now() - fetchStartedMs;
-
-          if (boardFetch.cacheState === "hit") {
-            cacheHits += 1;
-          } else if (boardFetch.cacheState === "inflight_hit") {
-            inflightCacheHits += 1;
-          } else {
-            cacheMisses += 1;
-          }
-
-          if (!result.ok) {
-            warnings.push(formatGreenhouseFetchWarning(source, result));
-            console.warn("[greenhouse:crawl-source]", {
-              ...sourceDescriptor,
-              status: "fetch_failed",
-              cacheState: boardFetch.cacheState,
-              errorType: result.errorType,
-              statusCode: result.statusCode,
-              message: result.message,
-              timingMs: {
-                fetch: fetchMs,
-                total: Date.now() - sourceStartedMs,
-              },
-            });
-            return {
-              fetchedCount: 0,
-              preselectedCount: 0,
-              jobs: [],
-              fetchMs,
-              preselectionMs: 0,
-              normalizationMs: 0,
-            };
-          }
-
-          const rawJobs = result.data?.jobs ?? [];
-          const preselectionStartedMs = Date.now();
-          const preselectedRawJobs = rawJobs.filter((job) =>
-            titlePreselector.matches(readGreenhouseText(job.title)),
-          );
-          const preselectionMs = Date.now() - preselectionStartedMs;
-          const shouldFallbackToSmallBoard =
-            preselectedRawJobs.length === 0 &&
-            rawJobs.length > 0 &&
-            rawJobs.length <= greenhouseSmallBoardFallbackThreshold;
-          const normalizationInput = shouldFallbackToSmallBoard ? rawJobs : preselectedRawJobs;
-
-          const normalizationStartedMs = Date.now();
-          const jobs = normalizationInput.map((job) =>
-            normalizeGreenhouseJob({
-              companyToken:
-                companyToken ??
-                buildProviderCompanyToken(source.companyHint) ??
-                "greenhouse",
-              boardUrl,
-              companyName: source.companyHint,
-              discoveredAt,
-              job,
-            }),
-          );
-          const normalizationMs = Date.now() - normalizationStartedMs;
-
-          console.info("[greenhouse:crawl-source]", {
-            ...sourceDescriptor,
-            status: "success",
-            cacheState: boardFetch.cacheState,
-            fetchedCount: rawJobs.length,
-            preselectedCount: preselectedRawJobs.length,
-            normalizationInputCount: normalizationInput.length,
-            normalizedCount: jobs.length,
-            preselectionSkippedCount: Math.max(0, rawJobs.length - preselectedRawJobs.length),
-            usedSmallBoardFallback: shouldFallbackToSmallBoard,
-            timingMs: {
-              fetch: fetchMs,
-              preselection: preselectionMs,
-              normalization: normalizationMs,
-              total: Date.now() - sourceStartedMs,
-            },
-          });
-
-          await context.onBatch?.({
-            provider: "greenhouse",
-            jobs,
-            sourceCount: 1,
-            fetchedCount: rawJobs.length,
-          });
-
-          return {
-            fetchedCount: rawJobs.length,
-            preselectedCount: preselectedRawJobs.length,
-            jobs,
-            fetchMs,
-            preselectionMs,
-            normalizationMs,
-          };
-        },
-        crawlStrategy.concurrency,
-      );
-
-      const fetchedCount = boards.reduce((total, board) => total + board.fetchedCount, 0);
-      const preselectedCount = boards.reduce(
-        (total, board) => total + (board.preselectedCount ?? 0),
-        0,
-      );
-      const jobs = boards.flatMap((board) => board.jobs);
-      const fetchMs = boards.reduce((total, board) => total + (board.fetchMs ?? 0), 0);
-      const preselectionMs = boards.reduce(
-        (total, board) => total + (board.preselectionMs ?? 0),
-        0,
-      );
-      const normalizationMs = boards.reduce(
-        (total, board) => total + (board.normalizationMs ?? 0),
-        0,
-      );
-
-      console.info("[greenhouse:crawl-summary]", {
-        inputSourceCount: sources.length,
-        boardCount: uniqueBoardSources.length,
-        fetchCount: cacheMisses,
-        cacheHits,
-        cacheMisses,
-        inflightCacheHits,
-        fetchedCount,
-        preselectedCount,
-        normalizedCount: jobs.length,
-        preselectionSkippedCount: Math.max(0, fetchedCount - preselectedCount),
-        warningCount: warnings.length,
-        concurrency: crawlStrategy.concurrency,
-        titleVariantCount: titlePreselector.variantCount,
-        sampleTitleVariants: titlePreselector.sampleVariants,
-        timingMs: {
-          fetch: fetchMs,
-          preselection: preselectionMs,
-          normalization: normalizationMs,
-          total: Date.now() - providerStartedMs,
-        },
-      });
-
-      return finalizeProviderResult({
-        provider: "greenhouse",
-        jobs,
-        sourceCount: uniqueBoardSources.length,
-        fetchedCount,
-        warnings,
-      });
+    unsupportedMessage: "No discovered Greenhouse sources are available.",
+    concurrency: (context) => resolveGreenhouseCrawlStrategy(context.filters.crawlMode).concurrency,
+    dedupeSources: dedupeGreenhouseSources,
+    async crawlSource(context, source) {
+      return crawlGreenhouseSource(context, source);
     },
   });
+}
+
+async function crawlGreenhouseSource(
+  context: ProviderExecutionContext,
+  source: GreenhouseDiscoveredSource,
+) {
+  const warnings: string[] = [];
+  const dropReasons: string[] = [];
+  const discoveredAt = context.now.toISOString();
+  const crawlStrategy = resolveGreenhouseCrawlStrategy(context.filters.crawlMode);
+  const titlePreselector = buildGreenhouseRawTitlePreselector(
+    context.filters.title,
+    crawlStrategy.maxTitleVariants,
+  );
+  const sourceStartedMs = Date.now();
+  const apiUrl = resolveGreenhouseApiUrl(source);
+  const companyToken = resolveGreenhouseToken(source);
+  const boardUrl = resolveGreenhouseBoardUrl(source);
+  const sourceDescriptor = {
+    token: companyToken,
+    boardUrl,
+    apiUrl,
+    detailJobId: source.jobId,
+  };
+
+  if (!apiUrl) {
+    const warning = `Greenhouse source ${describeGreenhouseSource(source)} is missing a usable board token or URL.`;
+    warnings.push(warning);
+    dropReasons.push("missing_api_url");
+    console.warn("[greenhouse:crawl-source]", {
+      ...sourceDescriptor,
+      status: "missing_api_url",
+      timingMs: { total: Date.now() - sourceStartedMs },
+    });
+    return {
+      fetchedCount: 0,
+      fetchCount: 0,
+      jobs: [],
+      warnings,
+      parseFailureCount: 1,
+      dropReasons,
+    };
+  }
+
+  const fetchStartedMs = Date.now();
+  const boardFetch = await fetchGreenhouseBoard(apiUrl, {
+    fetchImpl: context.fetchImpl,
+    timeoutMs: crawlStrategy.timeoutMs,
+    retries: crawlStrategy.retries,
+  });
+  const result = boardFetch.result;
+  const fetchMs = Date.now() - fetchStartedMs;
+
+  if (!result.ok) {
+    warnings.push(formatGreenhouseFetchWarning(source, result));
+    dropReasons.push("board_fetch_failed");
+  }
+
+  const rawJobs = result.ok ? result.data?.jobs ?? [] : [];
+  const preselectionStartedMs = Date.now();
+  const preselectedRawJobs = rawJobs.filter((job) =>
+    titlePreselector.matches(readGreenhouseText(job.title)),
+  );
+  const preselectionMs = Date.now() - preselectionStartedMs;
+  const shouldFallbackToSmallBoard =
+    preselectedRawJobs.length === 0 &&
+    rawJobs.length > 0 &&
+    rawJobs.length <= greenhouseSmallBoardFallbackThreshold;
+  const normalizedCompanyToken =
+    companyToken ?? buildProviderCompanyToken(source.companyHint) ?? "greenhouse";
+  const normalizationInput = shouldFallbackToSmallBoard ? rawJobs : preselectedRawJobs;
+  const normalizationStartedMs = Date.now();
+  const jobs = normalizationInput.map((job) =>
+    normalizeGreenhouseJob({
+      companyToken: normalizedCompanyToken,
+      boardUrl,
+      companyName: source.companyHint,
+      discoveredAt,
+      job,
+    }),
+  );
+  const normalizationMs = Date.now() - normalizationStartedMs;
+
+  const detailFallbackJob =
+    jobs.length === 0 && source.jobId && companyToken
+      ? await extractGreenhouseJobFromDetailUrl({
+          detailUrl:
+            parseGreenhouseUrl(source.url)?.canonicalJobUrl ??
+            `https://job-boards.greenhouse.io/${companyToken}/jobs/${source.jobId}`,
+          boardSlug: companyToken,
+          jobId: source.jobId,
+          companyHint: source.companyHint,
+          discoveredAt,
+          fetchImpl: context.fetchImpl,
+        })
+      : undefined;
+
+  if (source.jobId && !detailFallbackJob && jobs.length === 0) {
+    dropReasons.push("detail_fallback_failed");
+  } else if (rawJobs.length === 0 && !source.jobId) {
+    dropReasons.push("empty_board_payload");
+  } else if (rawJobs.length > 0 && preselectedRawJobs.length === 0 && !shouldFallbackToSmallBoard) {
+    dropReasons.push("title_preselection_filtered");
+  }
+
+  const normalizedJobs = detailFallbackJob ? [detailFallbackJob] : jobs;
+
+  console.info("[greenhouse:crawl-source]", {
+    ...sourceDescriptor,
+    status: normalizedJobs.length > 0 ? "success" : "empty",
+    cacheState: boardFetch.cacheState,
+    fetchedCount: rawJobs.length,
+    preselectedCount: preselectedRawJobs.length,
+    normalizationInputCount: normalizationInput.length,
+    normalizedCount: normalizedJobs.length,
+    preselectionSkippedCount: Math.max(0, rawJobs.length - preselectedRawJobs.length),
+    usedSmallBoardFallback: shouldFallbackToSmallBoard,
+    usedDetailFallback: Boolean(detailFallbackJob),
+    dropReasons,
+    timingMs: {
+      fetch: fetchMs,
+      preselection: preselectionMs,
+      normalization: normalizationMs,
+      total: Date.now() - sourceStartedMs,
+    },
+  });
+
+  if (normalizedJobs.length > 0) {
+    await context.onBatch?.({
+      provider: "greenhouse",
+      jobs: normalizedJobs,
+      sourceCount: 1,
+      fetchedCount: rawJobs.length || (detailFallbackJob ? 1 : 0),
+    });
+  }
+
+  return {
+    fetchedCount: rawJobs.length || (detailFallbackJob ? 1 : 0),
+    fetchCount: 1 + (detailFallbackJob ? 1 : 0),
+    jobs: normalizedJobs,
+    warnings,
+    parseSuccessCount: normalizedJobs.length,
+    parseFailureCount:
+      Math.max(0, normalizationInput.length - jobs.length) +
+      (source.jobId && !detailFallbackJob && jobs.length === 0 ? 1 : 0),
+    dropReasons,
+  };
 }
 
 function buildGreenhouseRawTitlePreselector(

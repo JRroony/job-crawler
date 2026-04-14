@@ -320,8 +320,11 @@ function normalizeStructuredHtmlJob(
     explicitExperienceReasons: resolveStructuredExplicitExperienceLevel(record)
       ? ["Structured company-page metadata explicitly indicates the experience level."]
       : undefined,
+    explicitEmploymentType: firstString(record, ["employmentType"]),
+    explicitSeniority: firstString(record, ["level", "experienceLevel", "seniority", "careerLevel"]),
     structuredExperienceHints: collectStructuredExperienceHints(record),
     descriptionExperienceHints: [description],
+    descriptionSnippet: description,
   });
 }
 
@@ -375,6 +378,7 @@ function normalizeAnchorJob(input: {
     },
     discoveredAt: input.discoveredAt,
     descriptionExperienceHints: segments.slice(0, 8),
+    descriptionSnippet: segments.find((segment) => segment !== title && segment !== locationText),
   });
 }
 
@@ -436,8 +440,11 @@ function normalizeCompanyFeedJob(
     explicitExperienceReasons: resolveStructuredExplicitExperienceLevel(record)
       ? ["Structured company feed metadata explicitly indicates the experience level."]
       : undefined,
+    explicitEmploymentType: firstString(record, ["employmentType"]),
+    explicitSeniority: firstString(record, ["level", "experienceLevel", "seniority", "careerLevel"]),
     structuredExperienceHints: collectStructuredExperienceHints(record),
     descriptionExperienceHints: collectDescriptionExperienceHints(record),
+    descriptionSnippet: firstString(record, ["description", "descriptionPlain", "descriptionHtml", "jobDescription", "summary", "overview"]),
   });
 }
 
@@ -477,8 +484,11 @@ function normalizeJsonLdJob(
     explicitExperienceReasons: resolveStructuredExplicitExperienceLevel(record)
       ? ["Structured JSON-LD metadata explicitly indicates the experience level."]
       : undefined,
+    explicitEmploymentType: firstString(record, ["employmentType"]),
+    explicitSeniority: firstString(record, ["level", "experienceLevel", "seniority", "careerLevel"]),
     structuredExperienceHints: collectStructuredExperienceHints(record),
     descriptionExperienceHints: collectDescriptionExperienceHints(record),
+    descriptionSnippet: firstString(record, ["description", "summary"]),
   });
 }
 

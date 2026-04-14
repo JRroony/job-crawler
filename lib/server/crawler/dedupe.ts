@@ -1,7 +1,6 @@
 import "server-only";
 
-import { normalizeComparableText } from "@/lib/server/crawler/helpers";
-import { parseGreenhouseUrl } from "@/lib/server/discovery/greenhouse-url";
+import { buildCanonicalJobIdentity } from "@/lib/job-identity";
 import type { JobListing } from "@/lib/types";
 
 type ComparableJobRecord = Omit<JobListing, "_id" | "crawlRunIds"> &
@@ -11,33 +10,65 @@ type PersistableDedupeCandidate = Omit<JobListing, "_id" | "crawlRunIds">;
 
 type IdentityBucket<T extends ComparableJobRecord> = {
   job: T;
-  keys: string[];
+  strongKeys: string[];
+  weakKeys: string[];
+  traceIds: string[];
+  survivorTraceId: string;
+};
+
+export type DedupeDecisionTrace = {
+  traceId: string;
+  keptTraceId: string;
+  matchedKeys: string[];
+  dropReason: string;
 };
 
 export function dedupeJobs<T extends PersistableDedupeCandidate>(jobs: T[]) {
-  return dedupeComparableJobs(jobs);
+  return dedupeComparableJobs(jobs).jobs;
 }
 
 export function dedupeStoredJobs(jobs: JobListing[]) {
-  return dedupeComparableJobs(jobs);
+  return dedupeComparableJobs(jobs).jobs;
 }
 
-function dedupeComparableJobs<T extends ComparableJobRecord>(jobs: T[]) {
+export function dedupeJobsWithDiagnostics<T extends PersistableDedupeCandidate>(
+  jobs: T[],
+  getTraceId: (job: T) => string,
+) {
+  return dedupeComparableJobs(jobs, getTraceId);
+}
+
+function dedupeComparableJobs<T extends ComparableJobRecord>(
+  jobs: T[],
+  getTraceId?: (job: T) => string,
+) {
   const buckets: Array<IdentityBucket<T> | undefined> = [];
-  const keyToBucketIndex = new Map<string, number>();
+  const strongKeyToBucketIndex = new Map<string, number>();
+  const weakKeyToBucketIndex = new Map<string, number>();
+  const dropDecisions = new Map<string, DedupeDecisionTrace>();
 
   for (const job of jobs) {
-    const jobKeys = buildIdentityKeys(job);
-    const matchedBucketIndexes = collectMatchedBucketIndexes(jobKeys, keyToBucketIndex);
+    const identity = buildCanonicalJobIdentity(job);
+    const activeKeys = identity.hasStrongIdentity ? identity.strongKeys : identity.weakKeys;
+    const matchedBucketIndexes = collectMatchedBucketIndexes(
+      activeKeys,
+      identity.hasStrongIdentity ? strongKeyToBucketIndex : weakKeyToBucketIndex,
+    );
+    const traceId = getTraceId?.(job);
 
     if (matchedBucketIndexes.length === 0) {
       const nextIndex = buckets.length;
-      const keys = Array.from(new Set(jobKeys));
       buckets.push({
         job,
-        keys,
+        strongKeys: identity.strongKeys,
+        weakKeys: identity.weakKeys,
+        traceIds: traceId ? [traceId] : [],
+        survivorTraceId: traceId ?? "",
       });
-      keys.forEach((key) => keyToBucketIndex.set(key, nextIndex));
+      indexBucketKeys(identity.strongKeys, strongKeyToBucketIndex, nextIndex);
+      if (!identity.hasStrongIdentity) {
+        indexBucketKeys(identity.weakKeys, weakKeyToBucketIndex, nextIndex);
+      }
       continue;
     }
 
@@ -48,7 +79,10 @@ function dedupeComparableJobs<T extends ComparableJobRecord>(jobs: T[]) {
     }
 
     let mergedJob = primaryBucket.job;
-    const mergedKeys = new Set<string>([...primaryBucket.keys, ...jobKeys]);
+    const mergedStrongKeys = new Set<string>(primaryBucket.strongKeys);
+    const mergedWeakKeys = new Set<string>(primaryBucket.weakKeys);
+    const mergedTraceIds = new Set<string>(primaryBucket.traceIds);
+    let survivorTraceId = primaryBucket.survivorTraceId;
 
     for (const bucketIndex of matchedBucketIndexes.slice(1)) {
       const candidateBucket = buckets[bucketIndex];
@@ -56,25 +90,110 @@ function dedupeComparableJobs<T extends ComparableJobRecord>(jobs: T[]) {
         continue;
       }
 
+      const mergedIntoCandidate = score(candidateBucket.job) >= score(mergedJob);
+      const keptTraceId = mergedIntoCandidate
+        ? candidateBucket.survivorTraceId
+        : survivorTraceId;
+      const droppedTraceIds = mergedIntoCandidate
+        ? Array.from(mergedTraceIds)
+        : candidateBucket.traceIds;
+      const matchedKeys = intersectKeys(
+        identity.hasStrongIdentity ? primaryBucket.strongKeys : primaryBucket.weakKeys,
+        identity.hasStrongIdentity ? candidateBucket.strongKeys : candidateBucket.weakKeys,
+      );
+      droppedTraceIds.forEach((candidateTraceId) => {
+        if (!candidateTraceId || candidateTraceId === keptTraceId) {
+          return;
+        }
+
+        dropDecisions.set(candidateTraceId, {
+          traceId: candidateTraceId,
+          keptTraceId,
+          matchedKeys,
+          dropReason: classifyMatchedKeys(matchedKeys),
+        });
+      });
+
       mergedJob = mergeCandidates(mergedJob, candidateBucket.job);
-      candidateBucket.keys.forEach((key) => mergedKeys.add(key));
+      candidateBucket.strongKeys.forEach((key) => mergedStrongKeys.add(key));
+      candidateBucket.weakKeys.forEach((key) => mergedWeakKeys.add(key));
+      candidateBucket.traceIds.forEach((candidateTraceId) => mergedTraceIds.add(candidateTraceId));
+      survivorTraceId = keptTraceId;
       buckets[bucketIndex] = undefined;
     }
 
-    mergedJob = mergeCandidates(mergedJob, job);
-    buildIdentityKeys(mergedJob).forEach((key) => mergedKeys.add(key));
+    const newJobWins = score(job) >= score(mergedJob);
+    const keptTraceId = newJobWins && traceId ? traceId : survivorTraceId;
+    const droppedTraceIds = newJobWins ? Array.from(mergedTraceIds) : traceId ? [traceId] : [];
+    const matchedKeys = intersectKeys(
+      identity.hasStrongIdentity ? primaryBucket.strongKeys : primaryBucket.weakKeys,
+      activeKeys,
+    );
+    droppedTraceIds.forEach((candidateTraceId) => {
+      if (!candidateTraceId || candidateTraceId === keptTraceId) {
+        return;
+      }
 
-    const mergedKeyList = Array.from(mergedKeys);
+      dropDecisions.set(candidateTraceId, {
+        traceId: candidateTraceId,
+        keptTraceId,
+        matchedKeys,
+        dropReason: classifyMatchedKeys(matchedKeys),
+      });
+    });
+
+    mergedJob = mergeCandidates(mergedJob, job);
+    const mergedIdentity = buildCanonicalJobIdentity(mergedJob);
+    mergedIdentity.strongKeys.forEach((key) => mergedStrongKeys.add(key));
+    mergedIdentity.weakKeys.forEach((key) => mergedWeakKeys.add(key));
+    if (traceId) {
+      mergedTraceIds.add(traceId);
+    }
+
     buckets[primaryBucketIndex] = {
       job: mergedJob,
-      keys: mergedKeyList,
+      strongKeys: Array.from(mergedStrongKeys),
+      weakKeys: Array.from(mergedWeakKeys),
+      traceIds: Array.from(mergedTraceIds),
+      survivorTraceId: keptTraceId,
     };
-    mergedKeyList.forEach((key) => keyToBucketIndex.set(key, primaryBucketIndex));
+    indexBucketKeys(
+      buckets[primaryBucketIndex]?.strongKeys ?? [],
+      strongKeyToBucketIndex,
+      primaryBucketIndex,
+    );
+    if (!(buckets[primaryBucketIndex]?.strongKeys.length ?? 0)) {
+      indexBucketKeys(
+        buckets[primaryBucketIndex]?.weakKeys ?? [],
+        weakKeyToBucketIndex,
+        primaryBucketIndex,
+      );
+    }
   }
 
-  return buckets
+  const finalBuckets = buckets
     .filter((bucket): bucket is IdentityBucket<T> => Boolean(bucket))
-    .map((bucket) => bucket.job);
+    .map((bucket) => {
+      bucket.traceIds.forEach((traceId) => {
+        if (!traceId || traceId === bucket.survivorTraceId) {
+          return;
+        }
+
+        const existing = dropDecisions.get(traceId);
+        dropDecisions.set(traceId, {
+          traceId,
+          keptTraceId: bucket.survivorTraceId,
+          matchedKeys: existing?.matchedKeys ?? [],
+          dropReason: existing?.dropReason ?? "dedupe_matched",
+        });
+      });
+      return bucket.job;
+    });
+
+  return {
+    jobs: finalBuckets,
+    dropped: Array.from(dropDecisions.values()),
+  };
 }
 
 function collectMatchedBucketIndexes(
@@ -97,93 +216,41 @@ function collectMatchedBucketIndexes(
   return matchedIndexes;
 }
 
-function buildIdentityKeys(job: ComparableJobRecord) {
-  const keys: string[] = [];
-
-  if (job._id) {
-    keys.push(`id:${job._id}`);
-  }
-
-  if (job.canonicalUrl) {
-    keys.push(`canonical:${job.canonicalUrl}`);
-  }
-
-  if (job.resolvedUrl) {
-    keys.push(`resolved:${job.resolvedUrl}`);
-  }
-
-  if (job.applyUrl) {
-    keys.push(`apply:${job.applyUrl}`);
-  }
-
-  job.sourceLookupKeys.forEach((lookupKey) => {
-    if (lookupKey) {
-      keys.push(`lookup:${lookupKey}`);
-    }
-  });
-
-  const fallbackKey = buildFallbackIdentityKey(job);
-  if (fallbackKey) {
-    keys.push(`fallback:${buildScopedFallbackIdentityKey(job, fallbackKey)}`);
-  }
-
-  return keys;
+function indexBucketKeys(keys: string[], keyToBucketIndex: Map<string, number>, bucketIndex: number) {
+  keys.forEach((key) => keyToBucketIndex.set(key, bucketIndex));
 }
 
-function buildFallbackIdentityKey(job: ComparableJobRecord) {
-  if (job.contentFingerprint) {
-    return job.contentFingerprint;
-  }
-
-  const company = job.companyNormalized || normalizeComparableText(job.company);
-  const title = job.titleNormalized || normalizeComparableText(job.title);
-  const location =
-    job.locationNormalized ||
-    normalizeComparableText(
-      `${job.city ?? ""} ${job.state ?? ""} ${job.country ?? ""} ${job.locationText ?? ""}`,
-    );
-
-  if (!company || !title || !location) {
-    return undefined;
-  }
-
-  return `${company}|${title}|${location}`;
+function intersectKeys(left: string[], right: string[]) {
+  const rightSet = new Set(right);
+  return Array.from(new Set(left.filter((key) => rightSet.has(key))));
 }
 
-function buildScopedFallbackIdentityKey(
-  job: ComparableJobRecord,
-  fallbackKey: string,
-) {
-  const greenhouseBoardToken = resolveGreenhouseBoardToken(job);
-  if (!greenhouseBoardToken) {
-    return fallbackKey;
+function classifyMatchedKeys(keys: string[]) {
+  if (keys.some((key) => key.startsWith("canonical:"))) {
+    return "dedupe:canonical_url";
   }
 
-  return `greenhouse:${greenhouseBoardToken}:${fallbackKey}`;
-}
-
-function resolveGreenhouseBoardToken(job: ComparableJobRecord) {
-  const lookupBoardToken = resolveGreenhouseBoardTokenFromLookupKeys(job.sourceLookupKeys);
-  if (lookupBoardToken) {
-    return lookupBoardToken;
+  if (keys.some((key) => key.startsWith("resolved:"))) {
+    return "dedupe:resolved_url";
   }
 
-  return (
-    parseGreenhouseUrl(job.canonicalUrl ?? "")?.boardSlug ??
-    parseGreenhouseUrl(job.sourceUrl)?.boardSlug ??
-    parseGreenhouseUrl(job.applyUrl)?.boardSlug
-  );
-}
-
-function resolveGreenhouseBoardTokenFromLookupKeys(sourceLookupKeys: string[]) {
-  for (const lookupKey of sourceLookupKeys) {
-    const parts = lookupKey.split(":");
-    if (parts.length >= 3 && parts[0] === "greenhouse" && parts[1]) {
-      return parts[1];
-    }
+  if (keys.some((key) => key.startsWith("apply:"))) {
+    return "dedupe:apply_url";
   }
 
-  return undefined;
+  if (keys.some((key) => key.startsWith("source:"))) {
+    return "dedupe:source_url";
+  }
+
+  if (keys.some((key) => key.startsWith("platform_job:"))) {
+    return "dedupe:platform_job";
+  }
+
+  if (keys.some((key) => key.startsWith("fallback:"))) {
+    return "dedupe:content_fingerprint";
+  }
+
+  return "dedupe:matched";
 }
 
 function mergeCandidates<T extends ComparableJobRecord>(left: T, right: T): T {

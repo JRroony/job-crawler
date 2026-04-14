@@ -70,6 +70,10 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
       name: "jobs_apply_url",
     },
     {
+      key: { sourceUrl: 1 },
+      name: "jobs_source_url",
+    },
+    {
       key: { contentFingerprint: 1 },
       name: "jobs_content_fingerprint",
     },

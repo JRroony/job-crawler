@@ -6,6 +6,62 @@ import type { JobListing } from "@/lib/types";
 
 import { FakeDb } from "@/tests/helpers/fake-db";
 
+type PersistableTestJob = Omit<JobListing, "_id" | "crawlRunIds">;
+
+function createPersistableJob(
+  overrides: Partial<PersistableTestJob> = {},
+): PersistableTestJob {
+  return {
+    title: "Software Engineer",
+    company: "Acme",
+    normalizedCompany: "acme",
+    normalizedTitle: "software engineer",
+    country: "United States",
+    state: "California",
+    city: "San Francisco",
+    locationRaw: "San Francisco, California, United States",
+    normalizedLocation: "san francisco california united states",
+    locationText: "San Francisco, California, United States",
+    remoteType: "onsite",
+    seniority: "mid",
+    experienceLevel: "mid",
+    sourcePlatform: "greenhouse",
+    sourceCompanySlug: "acme",
+    sourceJobId: "role-1",
+    sourceUrl: "https://example.com/jobs/1",
+    applyUrl: "https://example.com/jobs/1/apply",
+    resolvedUrl: "https://example.com/jobs/1/apply",
+    canonicalUrl: "https://example.com/jobs/1",
+    postingDate: "2026-03-20T00:00:00.000Z",
+    postedAt: "2026-03-20T00:00:00.000Z",
+    discoveredAt: "2026-03-29T00:00:00.000Z",
+    crawledAt: "2026-03-29T00:00:00.000Z",
+    sponsorshipHint: "unknown",
+    linkStatus: "valid",
+    lastValidatedAt: "2026-03-29T00:00:00.000Z",
+    rawSourceMetadata: {},
+    sourceProvenance: [
+      {
+        sourcePlatform: "greenhouse",
+        sourceJobId: "role-1",
+        sourceUrl: "https://example.com/jobs/1",
+        applyUrl: "https://example.com/jobs/1/apply",
+        resolvedUrl: "https://example.com/jobs/1/apply",
+        canonicalUrl: "https://example.com/jobs/1",
+        discoveredAt: "2026-03-29T00:00:00.000Z",
+        rawSourceMetadata: {},
+      },
+    ],
+    sourceLookupKeys: ["greenhouse:role-1"],
+    dedupeFingerprint: "fingerprint-1",
+    companyNormalized: "acme",
+    titleNormalized: "software engineer",
+    locationNormalized: "san francisco california united states",
+    contentFingerprint: "fingerprint-1",
+    ...overrides,
+  };
+}
+
 describe("JobCrawlerRepository", () => {
   it("creates searches, crawl runs, persists jobs, and reads them back", async () => {
     const db = new FakeDb();
@@ -24,43 +80,7 @@ describe("JobCrawlerRepository", () => {
     );
 
     const [savedJob] = await repository.persistJobs(crawlRun._id, [
-      {
-        title: "Software Engineer",
-        company: "Acme",
-        country: "United States",
-        state: "California",
-        city: "San Francisco",
-        locationText: "San Francisco, California, United States",
-        experienceLevel: "mid",
-        sourcePlatform: "greenhouse",
-        sourceJobId: "role-1",
-        sourceUrl: "https://example.com/jobs/1",
-        applyUrl: "https://example.com/jobs/1/apply",
-        resolvedUrl: "https://example.com/jobs/1/apply",
-        canonicalUrl: "https://example.com/jobs/1",
-        postedAt: "2026-03-20T00:00:00.000Z",
-        discoveredAt: "2026-03-29T00:00:00.000Z",
-        linkStatus: "valid",
-        lastValidatedAt: "2026-03-29T00:00:00.000Z",
-        rawSourceMetadata: {},
-        sourceProvenance: [
-          {
-            sourcePlatform: "greenhouse",
-            sourceJobId: "role-1",
-            sourceUrl: "https://example.com/jobs/1",
-            applyUrl: "https://example.com/jobs/1/apply",
-            resolvedUrl: "https://example.com/jobs/1/apply",
-            canonicalUrl: "https://example.com/jobs/1",
-            discoveredAt: "2026-03-29T00:00:00.000Z",
-            rawSourceMetadata: {},
-          },
-        ],
-        sourceLookupKeys: ["greenhouse:role-1"],
-        companyNormalized: "acme",
-        titleNormalized: "software engineer",
-        locationNormalized: "san francisco california united states",
-        contentFingerprint: "fingerprint-1",
-      },
+      createPersistableJob(),
     ]);
 
     await repository.saveLinkValidation({
@@ -108,63 +128,19 @@ describe("JobCrawlerRepository", () => {
     );
 
     await repository.persistJobs(firstRun._id, [
-      {
-        title: "Software Engineer",
-        company: "Acme",
-        country: "United States",
-        state: "California",
-        city: "San Francisco",
-        locationText: "San Francisco, California, United States",
-        experienceLevel: "mid",
-        sourcePlatform: "greenhouse",
-        sourceJobId: "role-1",
-        sourceUrl: "https://example.com/jobs/1",
-        applyUrl: "https://example.com/jobs/1/apply",
-        canonicalUrl: "https://example.com/jobs/1",
-        postedAt: "2026-03-20T00:00:00.000Z",
-        discoveredAt: "2026-03-29T00:00:00.000Z",
+      createPersistableJob({
+        resolvedUrl: undefined,
         linkStatus: "unknown",
-        lastValidatedAt: "2026-03-29T00:00:00.000Z",
-        rawSourceMetadata: {},
-        sourceProvenance: [
-          {
-            sourcePlatform: "greenhouse",
-            sourceJobId: "role-1",
-            sourceUrl: "https://example.com/jobs/1",
-            applyUrl: "https://example.com/jobs/1/apply",
-            canonicalUrl: "https://example.com/jobs/1",
-            discoveredAt: "2026-03-29T00:00:00.000Z",
-            rawSourceMetadata: {},
-          },
-        ],
-        sourceLookupKeys: ["greenhouse:role-1"],
-        companyNormalized: "acme",
-        titleNormalized: "software engineer",
-        locationNormalized: "san francisco california united states",
-        contentFingerprint: "fingerprint-1",
-      },
+      }),
     ]);
 
     const [mergedJob] = await repository.persistJobs(secondRun._id, [
-      {
-        title: "Software Engineer",
-        company: "Acme",
-        country: "United States",
-        state: "California",
-        city: "San Francisco",
-        locationText: "San Francisco, California, United States",
-        experienceLevel: "mid",
-        sourcePlatform: "greenhouse",
-        sourceJobId: "role-1",
-        sourceUrl: "https://example.com/jobs/1",
-        applyUrl: "https://example.com/jobs/1/apply",
-        resolvedUrl: "https://example.com/jobs/1/apply",
-        canonicalUrl: "https://example.com/jobs/1",
+      createPersistableJob({
         postedAt: "2026-03-21T00:00:00.000Z",
+        postingDate: "2026-03-21T00:00:00.000Z",
         discoveredAt: "2026-03-30T00:00:00.000Z",
-        linkStatus: "valid",
+        crawledAt: "2026-03-30T00:00:00.000Z",
         lastValidatedAt: "2026-03-30T00:00:00.000Z",
-        rawSourceMetadata: {},
         sourceProvenance: [
           {
             sourcePlatform: "greenhouse",
@@ -177,12 +153,7 @@ describe("JobCrawlerRepository", () => {
             rawSourceMetadata: {},
           },
         ],
-        sourceLookupKeys: ["greenhouse:role-1"],
-        companyNormalized: "acme",
-        titleNormalized: "software engineer",
-        locationNormalized: "san francisco california united states",
-        contentFingerprint: "fingerprint-1",
-      },
+      }),
     ]);
 
     const storedJobs = db.snapshot<JobListing>(collectionNames.jobs);
@@ -210,57 +181,18 @@ describe("JobCrawlerRepository", () => {
     );
 
     const savedJobs = await repository.persistJobs(crawlRun._id, [
-      {
-        title: "Software Engineer",
-        company: "Acme",
-        country: "United States",
-        state: "California",
-        city: "San Francisco",
-        locationText: "San Francisco, California, United States",
-        experienceLevel: "mid",
-        sourcePlatform: "greenhouse",
-        sourceJobId: "role-1",
-        sourceUrl: "https://example.com/jobs/1",
-        applyUrl: "https://example.com/jobs/1/apply",
-        canonicalUrl: "https://example.com/jobs/1",
-        postedAt: "2026-03-20T00:00:00.000Z",
-        discoveredAt: "2026-03-29T00:00:00.000Z",
+      createPersistableJob({
+        resolvedUrl: undefined,
         linkStatus: "unknown",
-        rawSourceMetadata: {},
-        sourceProvenance: [
-          {
-            sourcePlatform: "greenhouse",
-            sourceJobId: "role-1",
-            sourceUrl: "https://example.com/jobs/1",
-            applyUrl: "https://example.com/jobs/1/apply",
-            canonicalUrl: "https://example.com/jobs/1",
-            discoveredAt: "2026-03-29T00:00:00.000Z",
-            rawSourceMetadata: {},
-          },
-        ],
-        sourceLookupKeys: ["greenhouse:role-1"],
-        companyNormalized: "acme",
-        titleNormalized: "software engineer",
-        locationNormalized: "san francisco california united states",
-        contentFingerprint: "fingerprint-1",
-      },
-      {
-        title: "Software Engineer",
-        company: "Acme",
-        country: "United States",
-        state: "California",
-        city: "San Francisco",
-        locationText: "San Francisco, California, United States",
-        experienceLevel: "mid",
+        lastValidatedAt: undefined,
+      }),
+      createPersistableJob({
         sourcePlatform: "lever",
         sourceJobId: "role-2",
-        sourceUrl: "https://example.com/jobs/1",
-        applyUrl: "https://example.com/jobs/1/apply",
-        canonicalUrl: "https://example.com/jobs/1",
-        postedAt: "2026-03-20T00:00:00.000Z",
+        sourceLookupKeys: ["lever:role-2"],
+        resolvedUrl: undefined,
         discoveredAt: "2026-03-29T00:01:00.000Z",
-        linkStatus: "valid",
-        rawSourceMetadata: {},
+        crawledAt: "2026-03-29T00:01:00.000Z",
         sourceProvenance: [
           {
             sourcePlatform: "lever",
@@ -272,12 +204,7 @@ describe("JobCrawlerRepository", () => {
             rawSourceMetadata: {},
           },
         ],
-        sourceLookupKeys: ["lever:role-2"],
-        companyNormalized: "acme",
-        titleNormalized: "software engineer",
-        locationNormalized: "san francisco california united states",
-        contentFingerprint: "fingerprint-1",
-      },
+      }),
     ]);
 
     const storedJobs = db.snapshot<JobListing>(collectionNames.jobs);
@@ -287,7 +214,7 @@ describe("JobCrawlerRepository", () => {
     expect(storedJobs).toHaveLength(1);
   });
 
-  it("merges same-title same-location jobs when the normalized fallback fingerprint matches", async () => {
+  it("preserves same-title same-location jobs when their canonical identities differ", async () => {
     const db = new FakeDb();
     const repository = new JobCrawlerRepository(db);
     const search = await repository.createSearch(
@@ -302,22 +229,13 @@ describe("JobCrawlerRepository", () => {
     );
 
     await repository.persistJobs(crawlRun._id, [
-      {
-        title: "Software Engineer",
-        company: "Acme",
-        country: "United States",
-        state: "California",
-        city: "San Francisco",
-        locationText: "San Francisco, California, United States",
-        experienceLevel: "mid",
-        sourcePlatform: "greenhouse",
+      createPersistableJob({
         sourceJobId: "role-a",
         sourceUrl: "https://example.com/jobs/a",
         applyUrl: "https://example.com/jobs/a/apply",
-        postedAt: "2026-03-20T00:00:00.000Z",
-        discoveredAt: "2026-03-29T00:00:00.000Z",
-        linkStatus: "unknown",
-        rawSourceMetadata: {},
+        resolvedUrl: undefined,
+        canonicalUrl: undefined,
+        sourceLookupKeys: ["greenhouse:role-a"],
         sourceProvenance: [
           {
             sourcePlatform: "greenhouse",
@@ -328,28 +246,16 @@ describe("JobCrawlerRepository", () => {
             rawSourceMetadata: {},
           },
         ],
-        sourceLookupKeys: ["greenhouse:role-a"],
-        companyNormalized: "acme",
-        titleNormalized: "software engineer",
-        locationNormalized: "san francisco california united states",
-        contentFingerprint: "fingerprint-1",
-      },
-      {
-        title: "Software Engineer",
-        company: "Acme",
-        country: "United States",
-        state: "California",
-        city: "San Francisco",
-        locationText: "San Francisco, California, United States",
-        experienceLevel: "mid",
-        sourcePlatform: "greenhouse",
+        linkStatus: "unknown",
+        lastValidatedAt: undefined,
+      }),
+      createPersistableJob({
         sourceJobId: "role-b",
         sourceUrl: "https://example.com/jobs/b",
         applyUrl: "https://example.com/jobs/b/apply",
-        postedAt: "2026-03-21T00:00:00.000Z",
-        discoveredAt: "2026-03-29T00:00:00.000Z",
-        linkStatus: "unknown",
-        rawSourceMetadata: {},
+        resolvedUrl: undefined,
+        canonicalUrl: undefined,
+        sourceLookupKeys: ["greenhouse:role-b"],
         sourceProvenance: [
           {
             sourcePlatform: "greenhouse",
@@ -360,16 +266,85 @@ describe("JobCrawlerRepository", () => {
             rawSourceMetadata: {},
           },
         ],
-        sourceLookupKeys: ["greenhouse:role-b"],
-        companyNormalized: "acme",
-        titleNormalized: "software engineer",
-        locationNormalized: "san francisco california united states",
-        contentFingerprint: "fingerprint-1",
-      },
+        postedAt: "2026-03-21T00:00:00.000Z",
+        postingDate: "2026-03-21T00:00:00.000Z",
+        linkStatus: "unknown",
+        lastValidatedAt: undefined,
+      }),
     ]);
 
     const storedJobs = db.snapshot<JobListing>(collectionNames.jobs);
-    expect(storedJobs).toHaveLength(1);
+    expect(storedJobs).toHaveLength(2);
+  });
+
+  it("preserves same company and title when locations differ", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      {
+        title: "Software Engineer",
+      },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const crawlRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+    );
+
+    await repository.persistJobs(crawlRun._id, [
+      createPersistableJob({
+        sourceJobId: "role-sf",
+        sourceUrl: "https://example.com/jobs/sf",
+        applyUrl: "https://example.com/jobs/sf/apply",
+        resolvedUrl: undefined,
+        canonicalUrl: "https://example.com/jobs/sf",
+        sourceLookupKeys: ["greenhouse:role-sf"],
+        sourceProvenance: [
+          {
+            sourcePlatform: "greenhouse",
+            sourceJobId: "role-sf",
+            sourceUrl: "https://example.com/jobs/sf",
+            applyUrl: "https://example.com/jobs/sf/apply",
+            canonicalUrl: "https://example.com/jobs/sf",
+            discoveredAt: "2026-03-29T00:00:00.000Z",
+            rawSourceMetadata: {},
+          },
+        ],
+        dedupeFingerprint: "fingerprint-sf",
+        contentFingerprint: "fingerprint-sf",
+      }),
+      createPersistableJob({
+        state: "New York",
+        city: "New York",
+        locationRaw: "New York, New York, United States",
+        normalizedLocation: "new york new york united states",
+        locationText: "New York, New York, United States",
+        sourceJobId: "role-nyc",
+        sourceUrl: "https://example.com/jobs/nyc",
+        applyUrl: "https://example.com/jobs/nyc/apply",
+        resolvedUrl: undefined,
+        canonicalUrl: "https://example.com/jobs/nyc",
+        sourceLookupKeys: ["greenhouse:role-nyc"],
+        sourceProvenance: [
+          {
+            sourcePlatform: "greenhouse",
+            sourceJobId: "role-nyc",
+            sourceUrl: "https://example.com/jobs/nyc",
+            applyUrl: "https://example.com/jobs/nyc/apply",
+            canonicalUrl: "https://example.com/jobs/nyc",
+            discoveredAt: "2026-03-29T00:00:00.000Z",
+            rawSourceMetadata: {},
+          },
+        ],
+        postedAt: "2026-03-21T00:00:00.000Z",
+        postingDate: "2026-03-21T00:00:00.000Z",
+        dedupeFingerprint: "fingerprint-nyc",
+        contentFingerprint: "fingerprint-nyc",
+      }),
+    ]);
+
+    const storedJobs = db.snapshot<JobListing>(collectionNames.jobs);
+    expect(storedJobs).toHaveLength(2);
   });
 
   it("normalizes legacy saved search filters when they are read back", async () => {
@@ -673,15 +648,24 @@ describe("JobCrawlerRepository", () => {
       _id: "job-null-legacy",
       title: "Software Engineer",
       company: "Acme",
+      normalizedCompany: "acme",
+      normalizedTitle: "software engineer",
       country: "United States",
       state: undefined,
       city: undefined,
+      locationRaw: "San Francisco, CA",
+      normalizedLocation: "san francisco ca united states",
+      remoteType: "onsite",
       resolvedUrl: undefined,
       canonicalUrl: undefined,
+      postingDate: undefined,
       postedAt: undefined,
+      crawledAt: "2026-03-29T00:00:00.000Z",
+      sponsorshipHint: "unknown",
       lastValidatedAt: undefined,
       experienceLevel: undefined,
       experienceClassification: undefined,
+      dedupeFingerprint: "fingerprint-null-legacy",
       rawSourceMetadata: {},
     });
     expect(job?.sourceProvenance).toEqual([
@@ -710,6 +694,9 @@ describe("JobCrawlerRepository", () => {
       db.collection(collectionNames.jobs).indexes.map((index) => index.name),
     ).toContain("jobs_export_by_platform_and_postedAt");
     expect(
+      db.collection(collectionNames.jobs).indexes.map((index) => index.name),
+    ).toContain("jobs_source_url");
+    expect(
       db.collection(collectionNames.crawlRuns).indexes.map((index) => index.name),
     ).toContain("crawlRuns_validationMode_startedAt_desc");
   });
@@ -725,19 +712,15 @@ describe("JobCrawlerRepository", () => {
     const secondRun = await repository.createCrawlRun(search._id, "2026-03-30T00:00:00.000Z");
 
     await repository.persistJobs(firstRun._id, [
-      {
-        title: "Software Engineer",
-        company: "Acme",
-        country: "United States",
+      createPersistableJob({
+        state: undefined,
+        city: undefined,
+        locationRaw: "Remote, United States",
+        normalizedLocation: "remote united states",
         locationText: "Remote, United States",
-        sourcePlatform: "greenhouse",
-        sourceJobId: "role-1",
-        sourceUrl: "https://example.com/jobs/1",
-        applyUrl: "https://example.com/jobs/1/apply",
-        canonicalUrl: "https://example.com/jobs/1",
-        discoveredAt: "2026-03-29T00:00:00.000Z",
-        linkStatus: "unknown",
-        rawSourceMetadata: {},
+        remoteType: "remote",
+        sourceLookupKeys: ["greenhouse:role-1"],
+        resolvedUrl: undefined,
         sourceProvenance: [
           {
             sourcePlatform: "greenhouse",
@@ -749,12 +732,9 @@ describe("JobCrawlerRepository", () => {
             rawSourceMetadata: {},
           },
         ],
-        sourceLookupKeys: ["greenhouse:role-1"],
-        companyNormalized: "acme",
-        titleNormalized: "software engineer",
-        locationNormalized: "remote united states",
-        contentFingerprint: "fingerprint-1",
-      },
+        linkStatus: "unknown",
+        lastValidatedAt: undefined,
+      }),
     ]);
 
     const jobsCollection = db.collection<JobListing>(collectionNames.jobs);
@@ -763,19 +743,16 @@ describe("JobCrawlerRepository", () => {
     jobsCollection.stats.bulkWriteCalls = 0;
 
     await repository.persistJobs(secondRun._id, [
-      {
-        title: "Software Engineer",
-        company: "Acme",
-        country: "United States",
+      createPersistableJob({
+        state: undefined,
+        city: undefined,
+        locationRaw: "Remote, United States",
+        normalizedLocation: "remote united states",
         locationText: "Remote, United States",
-        sourcePlatform: "greenhouse",
-        sourceJobId: "role-1",
-        sourceUrl: "https://example.com/jobs/1",
-        applyUrl: "https://example.com/jobs/1/apply",
-        canonicalUrl: "https://example.com/jobs/1",
+        remoteType: "remote",
+        resolvedUrl: undefined,
         discoveredAt: "2026-03-30T00:00:00.000Z",
-        linkStatus: "valid",
-        rawSourceMetadata: {},
+        crawledAt: "2026-03-30T00:00:00.000Z",
         sourceProvenance: [
           {
             sourcePlatform: "greenhouse",
@@ -787,26 +764,16 @@ describe("JobCrawlerRepository", () => {
             rawSourceMetadata: {},
           },
         ],
-        sourceLookupKeys: ["greenhouse:role-1"],
-        companyNormalized: "acme",
-        titleNormalized: "software engineer",
-        locationNormalized: "remote united states",
-        contentFingerprint: "fingerprint-1",
-      },
-      {
-        title: "Software Engineer",
-        company: "Acme",
-        country: "United States",
+      }),
+      createPersistableJob({
+        state: undefined,
+        city: undefined,
+        locationRaw: "Remote, United States",
+        normalizedLocation: "remote united states",
         locationText: "Remote, United States",
-        sourcePlatform: "greenhouse",
-        sourceJobId: "role-1",
-        sourceUrl: "https://example.com/jobs/1",
-        applyUrl: "https://example.com/jobs/1/apply",
-        resolvedUrl: "https://example.com/jobs/1/apply",
-        canonicalUrl: "https://example.com/jobs/1",
+        remoteType: "remote",
         discoveredAt: "2026-03-30T00:00:01.000Z",
-        linkStatus: "valid",
-        rawSourceMetadata: {},
+        crawledAt: "2026-03-30T00:00:01.000Z",
         sourceProvenance: [
           {
             sourcePlatform: "greenhouse",
@@ -819,12 +786,7 @@ describe("JobCrawlerRepository", () => {
             rawSourceMetadata: {},
           },
         ],
-        sourceLookupKeys: ["greenhouse:role-1"],
-        companyNormalized: "acme",
-        titleNormalized: "software engineer",
-        locationNormalized: "remote united states",
-        contentFingerprint: "fingerprint-1",
-      },
+      }),
     ]);
 
     expect(jobsCollection.stats.bulkWriteCalls).toBe(1);
