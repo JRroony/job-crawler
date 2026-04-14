@@ -24,8 +24,11 @@ const envSchema = z.object({
   PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: z.coerce.number().int().positive().default(96),
   PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: z.coerce.number().int().positive().default(4),
   GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: z.coerce.number().int().positive().default(32),
+  CRAWL_MAX_SOURCES: z.coerce.number().int().positive().default(40),
   CRAWL_PROVIDER_TIMEOUT_MS: z.coerce.number().int().positive().default(9000),
   CRAWL_PROGRESS_UPDATE_INTERVAL_MS: z.coerce.number().int().positive().default(250),
+  CRAWL_GLOBAL_TIMEOUT_MS: z.coerce.number().int().positive().default(60000),
+  CRAWL_TARGET_JOB_COUNT: z.coerce.number().int().positive().default(30),
 });
 
 type ParsedEnv = z.infer<typeof envSchema>;
@@ -72,10 +75,16 @@ export function getEnv() {
         process.env.PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY ?? "4",
       GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES:
         process.env.GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES ?? "32",
+      CRAWL_MAX_SOURCES:
+        process.env.CRAWL_MAX_SOURCES ?? "40",
       CRAWL_PROVIDER_TIMEOUT_MS:
         process.env.CRAWL_PROVIDER_TIMEOUT_MS ?? "9000",
       CRAWL_PROGRESS_UPDATE_INTERVAL_MS:
         process.env.CRAWL_PROGRESS_UPDATE_INTERVAL_MS ?? "250",
+      CRAWL_GLOBAL_TIMEOUT_MS:
+        process.env.CRAWL_GLOBAL_TIMEOUT_MS ?? "60000",
+      CRAWL_TARGET_JOB_COUNT:
+        process.env.CRAWL_TARGET_JOB_COUNT ?? "30",
     });
   }
 

@@ -43,9 +43,15 @@ type SearchablePublicPlatform = Extract<
   "greenhouse" | "lever" | "ashby" | "workday"
 >;
 
+type PublicSearchHostQuery = {
+  query: string;
+  kind: "board" | "detail" | "embed";
+};
+
 type PublicSearchQuery = {
   platform: SearchablePublicPlatform;
   hostQuery: string;
+  hostKind: PublicSearchHostQuery["kind"];
   roleQuery: string;
   roleKind: TitleQueryVariant["kind"];
   rolePriority: number;
@@ -128,15 +134,32 @@ const searchablePlatforms: ActiveCrawlerPlatform[] = [
 
 const searchHostQueries: Record<
   Extract<ActiveCrawlerPlatform, "greenhouse" | "lever" | "ashby" | "workday">,
-  string[]
+  PublicSearchHostQuery[]
 > = {
   greenhouse: [
-    "site:boards.greenhouse.io",
-    "site:job-boards.greenhouse.io",
+    {
+      query: "site:boards.greenhouse.io",
+      kind: "detail",
+    },
+    {
+      query: "site:boards.greenhouse.io/embed/job_board",
+      kind: "embed",
+    },
+    {
+      query: "site:job-boards.greenhouse.io",
+      kind: "detail",
+    },
+    {
+      query: "site:job-boards.greenhouse.io/embed/job_board",
+      kind: "embed",
+    },
   ],
-  lever: ["site:jobs.lever.co"],
-  ashby: ["site:jobs.ashbyhq.com"],
-  workday: ["site:myworkdayjobs.com", "myworkdayjobs"],
+  lever: [{ query: "site:jobs.lever.co", kind: "board" }],
+  ashby: [{ query: "site:jobs.ashbyhq.com", kind: "board" }],
+  workday: [
+    { query: "site:myworkdayjobs.com", kind: "detail" },
+    { query: "myworkdayjobs", kind: "board" },
+  ],
 };
 
 const publicSearchEngines = [
@@ -434,16 +457,17 @@ export function buildPublicSearchQueryPlan(
     const hostCount = searchHostQueries[platform].length;
     const queries = roleQueryVariants.flatMap((roleVariant, roleIndex) =>
       locationOptions.flatMap((locationOption, clauseIndex) =>
-        searchHostQueries[platform].map((hostQuery, hostIndex) => ({
+        searchHostQueries[platform].map((host, hostIndex) => ({
           platform,
-          hostQuery,
+          hostQuery: host.query,
+          hostKind: host.kind,
           roleQuery: roleVariant.query,
           roleKind: roleVariant.kind,
           rolePriority: roleIndex,
           locationClause: locationOption.clause || undefined,
           locationKind: locationOption.kind,
           locationPriority: clauseIndex,
-          query: [hostQuery, roleVariant.query, locationOption.clause].filter(Boolean).join(" "),
+          query: [host.query, roleVariant.query, locationOption.clause].filter(Boolean).join(" "),
           limit: options.maxResultsPerQuery,
           priority:
             roleIndex * locationOptions.length * hostCount +
@@ -1015,7 +1039,10 @@ export function selectQueriesForExecution(plan: PublicSearchQueryPlan) {
 
   pushRoundRobinQueries(
     plan.queries.filter(
-      (query) => query.rolePriority < blankRoleWindow && query.locationKind === "blank",
+      (query) =>
+        query.rolePriority < blankRoleWindow &&
+        query.locationKind === "blank" &&
+        query.hostKind !== "embed",
     ),
     (query) => `${query.platform}:${query.rolePriority}`,
     pushQuery,
@@ -1027,8 +1054,21 @@ export function selectQueriesForExecution(plan: PublicSearchQueryPlan) {
 
   pushRoundRobinQueries(
     plan.queries.filter(
+      (query) => query.locationKind === "blank" && query.hostKind === "embed",
+    ),
+    (query) => `${query.platform}:${query.rolePriority}:embed`,
+    pushQuery,
+  );
+
+  if (selected.length >= plan.maxQueries) {
+    return selected;
+  }
+
+  pushRoundRobinQueries(
+    plan.queries.filter(
       (query) =>
         query.rolePriority === 0 &&
+        query.hostKind !== "embed" &&
         (query.locationKind === "country" || query.locationKind === "remote"),
     ),
     (query) => `${query.platform}:${query.locationKind}:${query.locationPriority}`,
@@ -1039,6 +1079,7 @@ export function selectQueriesForExecution(plan: PublicSearchQueryPlan) {
     plan.queries.filter(
       (query) =>
         query.rolePriority === 0 &&
+        query.hostKind !== "embed" &&
         (query.locationKind === "remote_state" ||
           query.locationKind === "metro" ||
           query.locationKind === "state"),
@@ -1049,7 +1090,10 @@ export function selectQueriesForExecution(plan: PublicSearchQueryPlan) {
 
   pushRoundRobinQueries(
     plan.queries.filter(
-      (query) => query.rolePriority >= blankRoleWindow && query.locationKind === "blank",
+      (query) =>
+        query.rolePriority >= blankRoleWindow &&
+        query.locationKind === "blank" &&
+        query.hostKind !== "embed",
     ),
     (query) => `${query.platform}:${query.rolePriority}`,
     pushQuery,
@@ -1059,6 +1103,7 @@ export function selectQueriesForExecution(plan: PublicSearchQueryPlan) {
     plan.queries.filter(
       (query) =>
         query.rolePriority > 0 &&
+        query.hostKind !== "embed" &&
         (query.locationKind === "country" || query.locationKind === "remote"),
     ),
     (query) => `${query.platform}:${query.rolePriority}:${query.locationKind}`,

@@ -1,5 +1,7 @@
 "use client";
 
+import React from "react";
+
 import { labelForProviderPlatform, labelForProviderStatus } from "@/components/job-crawler/ui-config";
 import type { CrawlResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -150,6 +152,7 @@ export function LoadingPanel(props: {
   fetchedCount?: number;
   matchedCount?: number;
   providerSummary?: CrawlResponse["crawlRun"]["providerSummary"];
+  actionButton?: React.ReactNode;
 }) {
   const stageLabel = describeStage(props.stage);
   const providerSummary = props.providerSummary ?? [];
@@ -181,6 +184,9 @@ export function LoadingPanel(props: {
           {props.foundCount ?? 0} saved
         </span>
       </div>
+      {props.actionButton ? (
+        <div className="mt-4">{props.actionButton}</div>
+      ) : null}
       <div className="mt-4 grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
         <div className="space-y-3">
           {(activeProviders.length > 0 ? activeProviders : providerSummary).slice(0, 4).map((provider) => (

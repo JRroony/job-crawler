@@ -33,9 +33,13 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const payload = sanitizeSearchFiltersInput(await request.json());
+    const requestOwnerKey = request.headers.get("x-job-crawler-client-id")?.trim() || undefined;
     console.info(`${searchRequestLogPrefix} payload:`, payload);
 
-    const { result, queued } = await startSearchFromFilters(payload);
+    const { result, queued } = await startSearchFromFilters(payload, {
+      requestOwnerKey,
+      signal: request.signal,
+    });
     return NextResponse.json(
       {
         ...result,

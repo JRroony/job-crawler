@@ -79,6 +79,14 @@ export type DatabaseAdapter = {
 
 export type PersistableJob = PersistableJobDocument;
 
+type CrawlRunJobEvent = {
+  _id: string;
+  crawlRunId: string;
+  jobId: string;
+  sequence: number;
+  savedAt: string;
+};
+
 let hasWarnedMemoryFallback = false;
 
 export class JobCrawlerRepository {
@@ -297,6 +305,49 @@ export class JobCrawlerRepository {
     return dedupeStoredJobs(documents.map((document) => parseStoredJob(document)));
   }
 
+  async getCrawlRunDeliveryCursor(crawlRunId: string) {
+    const events = await this.crawlRunJobEvents().find({ crawlRunId }).toArray();
+
+    return events
+      .map((event) => parseStoredCrawlRunJobEvent(event).sequence)
+      .reduce((max, sequence) => (sequence > max ? sequence : max), 0);
+  }
+
+  async getJobsByCrawlRunAfterSequence(crawlRunId: string, afterSequence = 0) {
+    const allEvents = (await this.crawlRunJobEvents()
+      .find({ crawlRunId }, { sort: { sequence: 1 } })
+      .toArray())
+      .map((document) => parseStoredCrawlRunJobEvent(document));
+    const nextEvents = allEvents.filter((event) => event.sequence > afterSequence);
+    const cursor = allEvents[allEvents.length - 1]?.sequence ?? 0;
+
+    if (nextEvents.length === 0) {
+      return {
+        cursor,
+        jobs: [] as JobListing[],
+      };
+    }
+
+    const jobDocuments = await this.jobs()
+      .find({ _id: { $in: nextEvents.map((event) => event.jobId) } })
+      .toArray();
+    const jobsById = new Map(
+      jobDocuments.map((document) => {
+        const job = parseStoredJob(document);
+        return [job._id, job] as const;
+      }),
+    );
+
+    return {
+      cursor,
+      jobs: dedupeStoredJobs(
+        nextEvents
+          .map((event) => jobsById.get(event.jobId))
+          .filter((job): job is JobListing => Boolean(job)),
+      ),
+    };
+  }
+
   async getJob(jobId: string) {
     const document = await this.jobs().findOne({ _id: jobId });
     return document ? parseStoredJob(document) : null;
@@ -308,6 +359,7 @@ export class JobCrawlerRepository {
     const existingJobs = await this.findExistingJobsForBatch(sanitizedJobs);
     const inserts: JobListing[] = [];
     const updates = new Map<string, JobListing>();
+    const newToRunJobIds = new Set<string>();
 
     for (const job of sanitizedJobs) {
       const existing = resolveExistingJobForPersistable(existingJobs, job);
@@ -319,6 +371,7 @@ export class JobCrawlerRepository {
         });
         inserts.push(document);
         savedJobsById.set(document._id, document);
+        newToRunJobIds.add(document._id);
         indexJobForBatchLookup(existingJobs, document);
         continue;
       }
@@ -326,6 +379,9 @@ export class JobCrawlerRepository {
       const merged = mergeJobRecords(existing, job, crawlRunId);
       savedJobsById.set(merged._id, merged);
       updates.set(merged._id, merged);
+      if (!existing.crawlRunIds.includes(crawlRunId)) {
+        newToRunJobIds.add(merged._id);
+      }
       indexJobForBatchLookup(existingJobs, merged);
     }
 
@@ -333,6 +389,10 @@ export class JobCrawlerRepository {
       inserts,
       updates: Array.from(updates.values()),
     });
+
+    if (newToRunJobIds.size > 0) {
+      await this.appendCrawlRunJobEvents(crawlRunId, Array.from(newToRunJobIds));
+    }
 
     return dedupeStoredJobs(Array.from(savedJobsById.values()));
   }
@@ -397,8 +457,29 @@ export class JobCrawlerRepository {
     return this.db.collection<CrawlSourceResult>(collectionNames.crawlSourceResults);
   }
 
+  private crawlRunJobEvents() {
+    return this.db.collection<CrawlRunJobEvent>(collectionNames.crawlRunJobEvents);
+  }
+
   private linkValidations() {
     return this.db.collection<LinkValidationResult>(collectionNames.linkValidations);
+  }
+
+  private async appendCrawlRunJobEvents(crawlRunId: string, jobIds: string[]) {
+    const existingEvents = await this.crawlRunJobEvents().find({ crawlRunId }).toArray();
+    const latestSequence = existingEvents.length;
+    const savedAt = new Date().toISOString();
+
+    await persistBatchMutations(this.crawlRunJobEvents(), {
+      inserts: jobIds.map((jobId, index) => ({
+        _id: createId(),
+        crawlRunId,
+        jobId,
+        sequence: latestSequence + index + 1,
+        savedAt,
+      })),
+      updates: [],
+    });
   }
 }
 
@@ -626,11 +707,11 @@ async function fetchJobsByField(
   return collection.find({ [field]: { $in: values } }).toArray();
 }
 
-async function persistBatchMutations(
-  collection: CollectionAdapter<JobListing>,
+async function persistBatchMutations<TDocument extends { _id: string }>(
+  collection: CollectionAdapter<TDocument>,
   operations: {
-    inserts: JobListing[];
-    updates: JobListing[];
+    inserts: TDocument[];
+    updates: TDocument[];
   },
 ) {
   const bulkOperations = [
@@ -736,6 +817,18 @@ function parseStoredCrawlSourceResult(document: Record<string, unknown>) {
     ...normalizedDocument,
     errorMessage: normalizeOptionalDocumentString(normalizedDocument.errorMessage),
   });
+}
+
+function parseStoredCrawlRunJobEvent(document: Record<string, unknown>): CrawlRunJobEvent {
+  const normalizedDocument = normalizeLegacyStoredRecord(document);
+
+  return {
+    _id: String(normalizedDocument._id),
+    crawlRunId: String(normalizedDocument.crawlRunId),
+    jobId: String(normalizedDocument.jobId),
+    sequence: Number(normalizedDocument.sequence),
+    savedAt: String(normalizedDocument.savedAt),
+  };
 }
 
 function parseStoredJob(document: Record<string, unknown>) {

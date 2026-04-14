@@ -170,4 +170,17 @@ describe("location resolution", () => {
       isUnitedStates: true,
     });
   });
+
+  it("keeps noisy multi-part Greenhouse city and state strings in the United States without a literal country token", () => {
+    expect(
+      resolveJobLocation({
+        locationText: "Seattle, WA; Austin, TX (Hybrid eligible)",
+      }),
+    ).toMatchObject({
+      country: "United States",
+      city: "Seattle",
+      state: "Washington",
+      isUnitedStates: true,
+    });
+  });
 });

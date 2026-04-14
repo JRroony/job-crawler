@@ -325,15 +325,19 @@ function buildGreenhouseRawTitlePreselector(
   title: string,
   maxTitleVariants: number,
 ) {
-  const normalizedQueryTitle = normalizeTitleText(title);
   const queryAnalysis = analyzeTitle(title);
+  const queryVariants = buildTitleQueryVariants(title, { maxQueries: maxTitleVariants });
   const normalizedPhrases = Array.from(
     new Set(
-      buildTitleQueryVariants(title, { maxQueries: maxTitleVariants })
+      queryVariants
         .map((variant) => normalizeTitleText(variant.query))
         .filter((value) => value.length > 0),
     ),
   ).sort((left, right) => right.length - left.length || left.localeCompare(right));
+  const scoredVariants = queryVariants
+    .map((variant) => variant.query)
+    .filter(Boolean)
+    .slice(0, Math.min(maxTitleVariants, 12));
   const modifierTokens = queryAnalysis.modifierTokens.filter(Boolean);
   const headWord = queryAnalysis.headWord;
   const discoveryMatchMode = queryAnalysis.family === "software_engineering" ? "broad" : "balanced";
@@ -355,10 +359,12 @@ function buildGreenhouseRawTitlePreselector(
         return true;
       }
 
-      const balancedMatch = getTitleMatchResult(rawTitle ?? normalizedTitle, normalizedQueryTitle, {
-        mode: discoveryMatchMode,
-      });
-      if (balancedMatch.matches) {
+      const bestVariantMatch = scoredVariants.find((queryVariant) =>
+        getTitleMatchResult(rawTitle ?? normalizedTitle, queryVariant, {
+          mode: discoveryMatchMode,
+        }).matches,
+      );
+      if (bestVariantMatch) {
         return true;
       }
 
@@ -366,10 +372,18 @@ function buildGreenhouseRawTitlePreselector(
       if (
         queryAnalysis.family &&
         titleAnalysis.family &&
-        titleAnalysis.family === queryAnalysis.family &&
-        Boolean(titleAnalysis.headWord)
+        titleAnalysis.family === queryAnalysis.family
       ) {
-        return true;
+        const sharedModifierCount = modifierTokens.filter((token) =>
+          containsNormalizedPhrase(normalizedTitle, token),
+        ).length;
+        const isGenericSoftwareHead =
+          queryAnalysis.family === "software_engineering" &&
+          ["engineer", "developer", "architect", "staff"].includes(titleAnalysis.headWord ?? "");
+
+        if (sharedModifierCount > 0 || isGenericSoftwareHead) {
+          return true;
+        }
       }
 
       if (!headWord || modifierTokens.length === 0) {

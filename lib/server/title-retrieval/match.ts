@@ -181,11 +181,19 @@ function computeSameFamilyScore(query: TitleAnalysis, job: TitleAnalysis) {
   }
 
   const sharedMeaningful = sharedMeaningfulTerms(query, job);
+  const compatibleRoleGroup = Boolean(
+    query.roleGroup && job.roleGroup && query.roleGroup === job.roleGroup,
+  );
+  const softwareHeadCompatibility = computeSoftwareFamilyHeadCompatibilityScore(
+    query,
+    job,
+    compatibleRoleGroup,
+    sharedMeaningful.length,
+  );
   if (sharedMeaningful.length === 0) {
-    return 0;
+    return softwareHeadCompatibility;
   }
 
-  const compatibleRoleGroup = query.roleGroup && job.roleGroup && query.roleGroup === job.roleGroup;
   const queryCovered =
     query.meaningfulTokens.length > 0 &&
     query.meaningfulTokens.every((token) => job.meaningfulTokens.includes(token));
@@ -195,8 +203,48 @@ function computeSameFamilyScore(query: TitleAnalysis, job: TitleAnalysis) {
     440 +
       sharedMeaningful.length * 55 +
       (compatibleRoleGroup ? 40 : 0) +
-      (queryCovered ? 35 : 0),
+      (queryCovered ? 35 : 0) +
+      softwareHeadCompatibility,
   );
+}
+
+function computeSoftwareFamilyHeadCompatibilityScore(
+  query: TitleAnalysis,
+  job: TitleAnalysis,
+  compatibleRoleGroup: boolean,
+  sharedMeaningfulCount: number,
+) {
+  if (
+    !compatibleRoleGroup ||
+    query.family !== "software_engineering" ||
+    job.family !== "software_engineering"
+  ) {
+    return 0;
+  }
+
+  const softwareFamilyHeads = new Set(["engineer", "developer", "architect", "staff"]);
+  const queryHead = query.headWord;
+  const jobHead = job.headWord;
+  if (!queryHead || !jobHead || !softwareFamilyHeads.has(queryHead) || !softwareFamilyHeads.has(jobHead)) {
+    return 0;
+  }
+
+  const queryHasSpecificSpecialization = query.meaningfulTokens.some((token) =>
+    ["backend", "frontend", "full stack", "platform"].includes(token),
+  );
+  const jobHasSpecificSpecialization = job.meaningfulTokens.some((token) =>
+    ["backend", "frontend", "full stack", "platform"].includes(token),
+  );
+
+  if (queryHasSpecificSpecialization) {
+    return 0;
+  }
+
+  if (sharedMeaningfulCount === 0 && !jobHasSpecificSpecialization) {
+    return 430;
+  }
+
+  return jobHasSpecificSpecialization ? 0 : 20;
 }
 
 function computeGenericTokenOverlapScore(query: TitleAnalysis, job: TitleAnalysis) {

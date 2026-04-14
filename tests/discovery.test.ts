@@ -10,11 +10,16 @@ import {
   selectQueriesForExecution,
 } from "@/lib/server/discovery/public-search";
 import {
+  discoverBaselineSourcesDetailed,
   discoverConfiguredSources,
+  discoverSupplementalSourcesDetailed,
   discoverSources,
   discoverSourcesDetailed,
+  resolvePublicSearchExecutionOptions,
 } from "@/lib/server/discovery/service";
 import { buildUsDiscoveryLocationTokens } from "@/lib/server/locations/us";
+import { capSourcesWithPlatformDiversity } from "@/lib/server/crawler/source-capper";
+import type { DiscoveredSource } from "@/lib/server/discovery/types";
 
 const discoveryEnvDefaults = {
   greenhouseBoardTokens: ["openai"],
@@ -194,6 +199,97 @@ describe("source discovery", () => {
         expect.objectContaining({
           token: "bottomlinetechnologies",
           companyHint: "Bottomline",
+        }),
+      ]),
+    );
+  });
+
+  it("keeps company-page expansion out of the baseline stage so supplemental recall can do it later", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        `
+          <html>
+            <body>
+              <a href="https://boards.greenhouse.io/datadog/jobs/789">Datadog</a>
+            </body>
+          </html>
+        `,
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        },
+      )) as unknown as typeof fetch;
+
+    const baseline = await discoverBaselineSourcesDetailed({
+      filters: {
+        title: "Software Engineer",
+      },
+      now: new Date("2026-04-12T00:00:00.000Z"),
+      fetchImpl,
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
+        companyPageSources: [
+          {
+            type: "html_page",
+            company: "Datadog",
+            url: "https://careers.datadog.com/jobs",
+          },
+        ],
+      },
+    });
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(baseline.sources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          platform: "company_page",
+          url: "https://careers.datadog.com/jobs",
+        }),
+      ]),
+    );
+
+    const supplemental = await discoverSupplementalSourcesDetailed(
+      {
+        filters: {
+          title: "Software Engineer",
+        },
+        now: new Date("2026-04-12T00:00:00.000Z"),
+        fetchImpl,
+        env: {
+          ...discoveryEnvDefaults,
+          greenhouseBoardTokens: [],
+          leverSiteTokens: [],
+          ashbyBoardTokens: [],
+          PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
+          companyPageSources: [
+            {
+              type: "html_page",
+              company: "Datadog",
+              url: "https://careers.datadog.com/jobs",
+            },
+          ],
+        },
+      },
+      {
+        baselineSources: baseline.sources,
+      },
+    );
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://careers.datadog.com/jobs",
+      expect.anything(),
+    );
+    expect(supplemental.sources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          platform: "greenhouse",
+          token: "datadog",
         }),
       ]),
     );
@@ -828,12 +924,24 @@ describe("source discovery", () => {
     expect(plan.queries.length).toBeGreaterThan(300);
     expect(plan.queries.slice(0, 6).map((query) => query.query)).toEqual([
       "site:boards.greenhouse.io software engineer",
+      "site:boards.greenhouse.io/embed/job_board software engineer",
       "site:job-boards.greenhouse.io software engineer",
+      "site:job-boards.greenhouse.io/embed/job_board software engineer",
       "site:boards.greenhouse.io software engineer united states",
-      "site:job-boards.greenhouse.io software engineer united states",
-      "site:boards.greenhouse.io software engineer usa",
-      "site:job-boards.greenhouse.io software engineer usa",
+      "site:boards.greenhouse.io/embed/job_board software engineer united states",
     ]);
+    expect(plan.queries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          hostKind: "embed",
+          query: "site:boards.greenhouse.io/embed/job_board software engineer",
+        }),
+        expect.objectContaining({
+          hostKind: "embed",
+          query: "site:job-boards.greenhouse.io/embed/job_board software engineer",
+        }),
+      ]),
+    );
     expect(new Set(plan.queries.map((query) => query.query)).size).toBe(plan.queries.length);
     expect(plan.queries.some((query) => query.query.includes("\""))).toBe(false);
     expect(plan.platformPlans[0]?.locationClauses).toHaveLength(32);
@@ -868,6 +976,28 @@ describe("source discovery", () => {
     expect(selected.some((query) => query.roleQuery === "application developer")).toBe(true);
     expect(selected.some((query) => query.roleQuery === "java developer")).toBe(true);
     expect(selected.some((query) => query.roleQuery === "mobile engineer")).toBe(true);
+    expect(selected.some((query) => query.hostKind === "embed")).toBe(false);
+  });
+
+  it("brings Greenhouse embed-board queries into the plan after the higher-yield ATS detail hosts", () => {
+    const plan = buildPublicSearchQueryPlan(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        maxResultsPerQuery: 4,
+        maxQueries: 56,
+      },
+    );
+
+    const selected = selectQueriesForExecution(plan);
+    const firstEmbedIndex = selected.findIndex((query) => query.hostKind === "embed");
+
+    expect(selected).toHaveLength(56);
+    expect(firstEmbedIndex).toBeGreaterThanOrEqual(40);
+    expect(selected.slice(firstEmbedIndex).some((query) => query.hostKind === "embed")).toBe(true);
   });
 
   it("broadens data analyst discovery into close title variants instead of a single narrow query", () => {
@@ -893,7 +1023,7 @@ describe("source discovery", () => {
         "decision scientist",
         "business analyst",
         "operations analyst",
-        "bi analyst",
+        "business operations analyst",
       ]),
     );
   });
@@ -1370,7 +1500,7 @@ describe("source discovery", () => {
     expect(fastResult.diagnostics.publicSearchSkippedReason).toBeUndefined();
     expect(fastResult.diagnostics.publicSearch).toMatchObject({
       executedQueries: expect.any(Number),
-      maxQueries: 24,
+      maxQueries: 12,
       roleQueryCount: 20,
     });
     expect(fastResult.sources.map((source) => source.token)).toEqual(
@@ -1379,7 +1509,7 @@ describe("source discovery", () => {
     expect(balancedFetchImpl).toHaveBeenCalled();
     expect(balancedResult.diagnostics.publicSearch).toMatchObject({
       executedQueries: expect.any(Number),
-      maxQueries: 48,
+      maxQueries: 24,
       roleQueryCount: 20,
     });
   });
@@ -1451,5 +1581,178 @@ describe("source discovery", () => {
     });
 
     expect(sources).toEqual([]);
+  });
+});
+
+describe("discovery budget capping per mode", () => {
+  const makeEnv = (overrides: Partial<typeof discoveryEnvDefaults> = {}) => ({
+    ...discoveryEnvDefaults,
+    ...overrides,
+  });
+
+  it("caps fast mode to 12 queries and 30 sources", () => {
+    const options = resolvePublicSearchExecutionOptions(
+      "fast",
+      makeEnv(),
+      undefined,
+    );
+
+    expect(options.maxQueries).toBe(12);
+    expect(options.maxSources).toBe(30);
+    expect(options.maxLocationClauses).toBe(4);
+    expect(options.maxDirectJobs).toBe(8);
+    expect(options.maxRoleQueries).toBe(8);
+  });
+
+  it("caps fast mode with greenhouse-only platform to 12 queries and 6 direct jobs", () => {
+    const options = resolvePublicSearchExecutionOptions(
+      "fast",
+      makeEnv(),
+      ["greenhouse"],
+    );
+
+    expect(options.maxQueries).toBe(12);
+    expect(options.maxSources).toBe(30);
+    expect(options.maxLocationClauses).toBe(4);
+    expect(options.maxDirectJobs).toBe(6);
+    expect(options.maxRoleQueries).toBe(8);
+  });
+
+  it("caps balanced mode to 24 queries and 50 sources", () => {
+    const options = resolvePublicSearchExecutionOptions(
+      "balanced",
+      makeEnv(),
+      undefined,
+    );
+
+    expect(options.maxQueries).toBe(24);
+    expect(options.maxSources).toBe(50);
+    expect(options.maxLocationClauses).toBe(8);
+    expect(options.maxDirectJobs).toBe(12);
+    expect(options.maxRoleQueries).toBe(12);
+  });
+
+  it("keeps deep mode at full defaults (96 queries, 120 sources)", () => {
+    const options = resolvePublicSearchExecutionOptions(
+      "deep",
+      makeEnv(),
+      undefined,
+    );
+
+    expect(options.maxQueries).toBe(96);
+    expect(options.maxSources).toBe(120);
+    expect(options.maxLocationClauses).toBe(32);
+    expect(options.maxDirectJobs).toBe(24);
+    expect(options.maxRoleQueries).toBe(18);
+  });
+
+  it("uses env overrides when env values are lower than mode caps", () => {
+    const options = resolvePublicSearchExecutionOptions(
+      "fast",
+      makeEnv({
+        PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 8,
+        PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 20,
+        GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 2,
+      }),
+      undefined,
+    );
+
+    expect(options.maxQueries).toBe(8);
+    expect(options.maxSources).toBe(20);
+    expect(options.maxLocationClauses).toBe(2);
+  });
+});
+
+describe("source capping with platform diversity", () => {
+  const makeSource = (platform: string, id: string): DiscoveredSource =>
+    ({
+      id,
+      platform,
+      url: `https://example.com/${id}`,
+      confidence: "high",
+      discoveryMethod: "future_search",
+    }) as DiscoveredSource;
+
+  it("returns all sources when under the cap", () => {
+    const sources = [
+      makeSource("greenhouse", "gh-1"),
+      makeSource("lever", "lev-1"),
+    ];
+
+    const result = capSourcesWithPlatformDiversity(sources, 10);
+
+    expect(result).toEqual(sources);
+    expect(result.length).toBe(2);
+  });
+
+  it("ensures at least 1 source per platform before filling remaining slots", () => {
+    const sources = [
+      makeSource("greenhouse", "gh-1"),
+      makeSource("greenhouse", "gh-2"),
+      makeSource("greenhouse", "gh-3"),
+      makeSource("lever", "lev-1"),
+      makeSource("lever", "lev-2"),
+      makeSource("ashby", "ash-1"),
+    ];
+
+    const result = capSourcesWithPlatformDiversity(sources, 4);
+
+    // Should have at least 1 from each of 3 platforms = 3, then 1 more from round-robin
+    expect(result.length).toBe(4);
+    const platforms = result.map((s) => s.platform);
+    expect(platforms).toContain("greenhouse");
+    expect(platforms).toContain("lever");
+    expect(platforms).toContain("ashby");
+  });
+
+  it("distributes sources round-robin style across platforms", () => {
+    const sources = [
+      makeSource("greenhouse", "gh-1"),
+      makeSource("greenhouse", "gh-2"),
+      makeSource("greenhouse", "gh-3"),
+      makeSource("greenhouse", "gh-4"),
+      makeSource("lever", "lev-1"),
+      makeSource("lever", "lev-2"),
+      makeSource("lever", "lev-3"),
+      makeSource("ashby", "ash-1"),
+    ];
+
+    const result = capSourcesWithPlatformDiversity(sources, 6);
+
+    expect(result.length).toBe(6);
+    const platforms = result.map((s) => s.platform);
+    // Phase 1: 1 from each platform (3 total)
+    // Phase 2: 3 more slots filled round-robin: gh-2, lev-2, ashby has no more, so gh-3
+    expect(platforms.filter((p) => p === "greenhouse").length).toBeGreaterThanOrEqual(2);
+    expect(platforms.filter((p) => p === "lever").length).toBeGreaterThanOrEqual(1);
+    expect(platforms.filter((p) => p === "ashby").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("respects hard cap even when platforms have many sources", () => {
+    const sources = Array.from({ length: 50 }, (_, i) =>
+      makeSource(i % 3 === 0 ? "greenhouse" : i % 3 === 1 ? "lever" : "ashby", `src-${i}`),
+    );
+
+    const result = capSourcesWithPlatformDiversity(sources, 10);
+
+    expect(result.length).toBe(10);
+    const platforms = new Set(result.map((s) => s.platform));
+    expect(platforms.size).toBe(3); // All 3 platforms represented
+  });
+
+  it("handles single-platform sources gracefully", () => {
+    const sources = Array.from({ length: 20 }, (_, i) =>
+      makeSource("greenhouse", `gh-${i}`),
+    );
+
+    const result = capSourcesWithPlatformDiversity(sources, 5);
+
+    expect(result.length).toBe(5);
+    expect(result.every((s) => s.platform === "greenhouse")).toBe(true);
+  });
+
+  it("returns empty array for empty input", () => {
+    const result = capSourcesWithPlatformDiversity([], 10);
+    expect(result).toEqual([]);
   });
 });

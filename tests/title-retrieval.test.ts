@@ -84,7 +84,9 @@ describe("title retrieval query expansion", () => {
   });
 
   it("expands data analyst searches into nearby analyst concepts", () => {
-    expect(queriesFor("Data Analyst")).toEqual(
+    const queries = queriesFor("Data Analyst");
+    // Core concept matches: synonyms and adjacent concepts
+    expect(queries).toEqual(
       expect.arrayContaining([
         "data analyst",
         "business intelligence analyst",
@@ -92,9 +94,11 @@ describe("title retrieval query expansion", () => {
         "product analyst",
         "business analyst",
         "operations analyst",
-        "bi analyst",
       ]),
     );
+    // Should NOT contain unrelated roles
+    expect(queries).not.toContain("data engineer");
+    expect(queries).not.toContain("software engineer");
   });
 
   it("expands data engineer searches into nearby data-platform concepts without broad software spillover", () => {
@@ -253,6 +257,26 @@ describe("title retrieval scoring", () => {
 
     expect(
       getTitleMatchResult("Integration Developer", "Integration Engineer", {
+        mode: "balanced",
+      }),
+    ).toMatchObject({
+      matches: true,
+      tier: "same_family_related",
+    });
+  });
+
+  it("keeps generic same-family software titles like Developer in balanced mode without treating them as exact matches", () => {
+    expect(
+      getTitleMatchResult("Developer", "Software Engineer", {
+        mode: "strict",
+      }),
+    ).toMatchObject({
+      matches: false,
+      tier: "same_family_related",
+    });
+
+    expect(
+      getTitleMatchResult("Developer", "Software Engineer", {
         mode: "balanced",
       }),
     ).toMatchObject({
@@ -450,6 +474,196 @@ describe("title retrieval scoring", () => {
     ).toMatchObject({
       matches: false,
       tier: "none",
+    });
+  });
+});
+
+describe("semantic title expansion", () => {
+  describe("software engineer semantic expansion", () => {
+    it("generates token-synonym variants for software engineer", () => {
+      const queries = buildTitleQueryVariants("Software Engineer", { maxQueries: 32 });
+      const queryList = queries.map((q) => q.query);
+
+      // Token synonym swaps: software->application, engineer->developer
+      expect(queryList).toEqual(
+        expect.arrayContaining([
+          "application developer",
+          "software developer",
+          "application engineer",
+        ]),
+      );
+    });
+
+    it("matches Java Developer as a related role through adjacent concept + token synonyms", () => {
+      const result = getTitleMatchResult("Java Developer", "Software Engineer");
+      expect(result.matches).toBe(true);
+      expect(["adjacent_concept", "synonym", "same_family_related"]).toContain(result.tier);
+    });
+
+    it("matches Backend Developer through head-word alternation (engineer->developer)", () => {
+      const result = getTitleMatchResult("Backend Developer", "Software Engineer");
+      expect(result.matches).toBe(true);
+    });
+
+    it("matches Frontend Developer through semantic expansion", () => {
+      const result = getTitleMatchResult("Frontend Developer", "Software Engineer");
+      expect(result.matches).toBe(true);
+    });
+
+    it("matches Full Stack Developer through semantic expansion", () => {
+      const result = getTitleMatchResult("Full Stack Developer", "Software Engineer");
+      expect(result.matches).toBe(true);
+    });
+
+    it("keeps software engineer queries within software family", () => {
+      const queries = buildTitleQueryVariants("Software Engineer", { maxQueries: 32 });
+      const queryList = queries.map((q) => q.query);
+
+      // Should NOT generate queries from unrelated families
+      expect(queryList).not.toContain("data engineer");
+      expect(queryList).not.toContain("product manager");
+      expect(queryList).not.toContain("recruiter");
+      expect(queryList).not.toContain("sales engineer");
+    });
+  });
+
+  describe("data analyst semantic expansion", () => {
+    it("generates token-synonym variants for data analyst", () => {
+      const queries = buildTitleQueryVariants("Data Analyst", { maxQueries: 32 });
+      const queryList = queries.map((q) => q.query);
+
+      // Token synonym swaps: data->analytics/insights, analyst->scientist
+      expect(queryList).toEqual(
+        expect.arrayContaining([
+          "analytics analyst",
+          "insights analyst",
+          "decision scientist",
+        ]),
+      );
+    });
+
+    it("matches Business Intelligence Analyst as a synonym", () => {
+      const result = getTitleMatchResult("Business Intelligence Analyst", "Data Analyst");
+      expect(result.matches).toBe(true);
+      expect(result.tier).toBe("synonym");
+    });
+
+    it("keeps data analyst queries within analytics family", () => {
+      const queries = buildTitleQueryVariants("Data Analyst", { maxQueries: 32 });
+      const queryList = queries.map((q) => q.query);
+
+      expect(queryList).not.toContain("data engineer");
+      expect(queryList).not.toContain("software engineer");
+    });
+  });
+
+  describe("product manager semantic expansion", () => {
+    it("generates token-synonym variants for product manager", () => {
+      const queries = buildTitleQueryVariants("Product Manager", { maxQueries: 32 });
+      const queryList = queries.map((q) => q.query);
+
+      // Token synonym swaps: product->platform/growth, manager->owner/lead
+      expect(queryList).toEqual(
+        expect.arrayContaining([
+          "product owner",
+          "product lead",
+          "growth product manager",
+        ]),
+      );
+    });
+
+    it("keeps product manager queries within product family", () => {
+      const queries = buildTitleQueryVariants("Product Manager", { maxQueries: 32 });
+      const queryList = queries.map((q) => q.query);
+
+      expect(queryList).not.toContain("program manager");
+      expect(queryList).not.toContain("technical program manager");
+    });
+  });
+
+  describe("QA engineer semantic expansion", () => {
+    it("generates token-synonym variants for qa engineer", () => {
+      const queries = buildTitleQueryVariants("QA Engineer", { maxQueries: 32 });
+      const queryList = queries.map((q) => q.query);
+
+      // Token synonym swaps: qa->quality/test, engineer->analyst
+      expect(queryList).toEqual(
+        expect.arrayContaining([
+          "quality engineer",
+          "test engineer",
+          "qa analyst",
+        ]),
+      );
+    });
+
+    it("matches SDET through adjacent concept", () => {
+      const result = getTitleMatchResult("SDET", "QA Engineer");
+      expect(result.matches).toBe(true);
+    });
+
+    it("keeps qa engineer queries within quality family", () => {
+      const queries = buildTitleQueryVariants("QA Engineer", { maxQueries: 32 });
+      const queryList = queries.map((q) => q.query);
+
+      expect(queryList).not.toContain("software engineer");
+      expect(queryList).not.toContain("backend engineer");
+    });
+  });
+
+  describe("recruiter semantic expansion", () => {
+    it("generates token-synonym variants for recruiter", () => {
+      const queries = buildTitleQueryVariants("Recruiter", { maxQueries: 32 });
+      const queryList = queries.map((q) => q.query);
+
+      expect(queryList).toEqual(
+        expect.arrayContaining([
+          "talent acquisition partner",
+          "sourcer",
+          "technical recruiter",
+        ]),
+      );
+    });
+  });
+
+  describe("unknown title semantic expansion", () => {
+    it("generates head-word alternation variants for unknown engineering titles", () => {
+      const queries = buildTitleQueryVariants("Integration Engineer", { maxQueries: 16 });
+      const queryList = queries.map((q) => q.query);
+
+      // Should try engineer->developer swap
+      expect(queryList).toContain("integration developer");
+    });
+
+    it("generates head-word alternation variants for unknown analyst titles", () => {
+      const queries = buildTitleQueryVariants("Risk Analyst", { maxQueries: 16 });
+      const queryList = queries.map((q) => q.query);
+
+      // Should try analyst->scientist swap
+      expect(queryList).toContain("risk scientist");
+    });
+  });
+
+  describe("cross-family precision", () => {
+    it("does not match data engineer titles against software engineer query", () => {
+      const result = getTitleMatchResult("Data Engineer", "Software Engineer");
+      expect(result.matches).toBe(false);
+      expect(result.tier).toBe("none");
+    });
+
+    it("does not match software engineer titles against data engineer query", () => {
+      const result = getTitleMatchResult("Software Engineer", "Data Engineer");
+      expect(result.matches).toBe(false);
+      expect(result.tier).toBe("none");
+    });
+
+    it("does not match product manager titles against program manager query", () => {
+      const result = getTitleMatchResult("Product Manager", "Program Manager");
+      expect(result.matches).toBe(false);
+    });
+
+    it("does not match sales engineer titles against software engineer query", () => {
+      const result = getTitleMatchResult("Sales Engineer", "Software Engineer");
+      expect(result.matches).toBe(false);
     });
   });
 });

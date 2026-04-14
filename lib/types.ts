@@ -300,6 +300,7 @@ export const crawlRunStatuses = [
   "completed",
   "partial",
   "failed",
+  "aborted",
 ] as const;
 
 export const crawlRunStatusSchema = z.enum(crawlRunStatuses);
@@ -319,6 +320,7 @@ export const crawlSourceStatuses = [
   "success",
   "partial",
   "failed",
+  "aborted",
   "unsupported",
 ] as const;
 
@@ -368,6 +370,10 @@ export const discoveryStageDiagnosticsSchema = z.object({
   zeroCoverageReason: nullableOptional(z.string()),
   publicSearchSkippedReason: nullableOptional(z.string()),
   publicSearch: nullableOptional(publicSearchDiscoveryDiagnosticsSchema),
+  sourcesTruncated: z.boolean().optional(),
+  sourcesTruncatedCount: z.number().int().nonnegative().optional(),
+  sourcesBeforeTruncation: z.number().int().nonnegative().optional(),
+  sourcesAfterTruncation: z.number().int().nonnegative().optional(),
 });
 
 export const crawlDiagnosticsSchema = z.object({
@@ -513,6 +519,8 @@ export const crawlDiagnosticsSchema = z.object({
     )
     .default([]),
   discovery: discoveryStageDiagnosticsSchema.optional(),
+  stoppedReason: nullableOptional(z.enum(["timeout", "target_met", "completed"])),
+  budgetExhausted: z.boolean().optional(),
 });
 
 export const crawlProviderSummarySchema = z.object({
@@ -774,6 +782,23 @@ export const crawlResponseSchema = z.object({
   sourceResults: z.array(crawlSourceResultSchema),
   jobs: z.array(jobListingSchema),
   diagnostics: crawlRunDocumentSchema.shape.diagnostics.default({}),
+  delivery: z.object({
+    mode: z.literal("full"),
+    cursor: z.number().int().nonnegative(),
+  }).optional(),
+});
+
+export const crawlDeltaResponseSchema = z.object({
+  search: searchDocumentSchema,
+  crawlRun: crawlRunDocumentSchema,
+  sourceResults: z.array(crawlSourceResultSchema),
+  jobs: z.array(jobListingSchema),
+  diagnostics: crawlRunDocumentSchema.shape.diagnostics.default({}),
+  delivery: z.object({
+    mode: z.literal("delta"),
+    cursor: z.number().int().nonnegative(),
+    previousCursor: z.number().int().nonnegative(),
+  }),
 });
 
 export type ExperienceLevel = z.infer<typeof experienceLevelSchema>;
@@ -818,6 +843,7 @@ export type CrawlSourceStatus = z.infer<typeof crawlSourceStatusSchema>;
 export type LinkStatus = z.infer<typeof linkStatusSchema>;
 export type CompanyPageSourceConfig = z.infer<typeof companyPageSourceConfigSchema>;
 export type CrawlResponse = z.infer<typeof crawlResponseSchema>;
+export type CrawlDeltaResponse = z.infer<typeof crawlDeltaResponseSchema>;
 export type CrawlDiagnostics = CrawlRun["diagnostics"];
 export type PublicSearchDiscoveryDiagnostics = z.infer<
   typeof publicSearchDiscoveryDiagnosticsSchema

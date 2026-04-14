@@ -10,6 +10,7 @@ import {
   extractMeaningfulTokens,
   normalizeTitleText,
   replaceHeadWord,
+  tokenizeTitle,
 } from "@/lib/server/title-retrieval/normalize";
 import type {
   TitleAnalysis,
@@ -25,6 +26,11 @@ const alternateHeadWords: Partial<Record<string, string[]>> = {
   sourcer: ["recruiter"],
   tester: ["engineer"],
   writer: ["specialist"],
+  analyst: ["scientist"],
+  manager: ["lead"],
+  owner: ["manager"],
+  coordinator: ["specialist"],
+  specialist: ["coordinator"],
 };
 
 const softwareFamilyHeadWords = new Set(["architect", "developer", "engineer"]);
@@ -97,6 +103,15 @@ export function buildTitleQueryVariants(
         conceptId: concept.id,
       }),
     );
+
+    // Generate token-synonym variants: swap synonym tokens into the base title
+    buildTokenSynonymVariants(analysis, concept).forEach((variant) =>
+      push(variant, "synonym", {
+        family: concept.family,
+        conceptId: concept.id,
+      }),
+    );
+
     concept.adjacentConceptIds?.forEach((adjacentConceptId) => {
       const adjacentConcept = getTitleConcept(adjacentConceptId);
       if (!adjacentConcept) {
@@ -115,6 +130,14 @@ export function buildTitleQueryVariants(
       );
       (adjacentConcept.abbreviations ?? []).forEach((abbreviation) =>
         push(abbreviation, "adjacent_concept", {
+          family: adjacentConcept.family,
+          conceptId: adjacentConcept.id,
+        }),
+      );
+
+      // Generate token-synonym variants for adjacent concepts too
+      buildTokenSynonymVariants(analysis, adjacentConcept).forEach((variant) =>
+        push(variant, "adjacent_concept", {
           family: adjacentConcept.family,
           conceptId: adjacentConcept.id,
         }),
@@ -184,6 +207,71 @@ function classifyConceptQueryKind(
   );
 
   return isAdjacentConceptQuery ? "adjacent_concept" : "family_broadening";
+}
+
+/**
+ * Generate query variants by substituting token synonyms into the analysis title.
+ * For example, if the concept has tokenSynonyms [["software","application"],["engineer","developer"]],
+ * and the input is "software engineer", this generates "application developer", "software developer", etc.
+ */
+function buildTokenSynonymVariants(
+  analysis: TitleAnalysis,
+  concept: NonNullable<ReturnType<typeof getTitleConcept>>,
+): string[] {
+  const tokenSynonyms = concept.tokenSynonyms;
+  if (!tokenSynonyms || tokenSynonyms.length === 0) {
+    return [];
+  }
+
+  const baseTitle = analysis.strippedNormalized || analysis.normalized;
+  if (!baseTitle) {
+    return [];
+  }
+
+  const variants = new Set<string>();
+  const baseTokens = tokenizeTitle(baseTitle);
+
+  // For each synonym group, try swapping each synonym term for any matching base token
+  for (const synonymGroup of tokenSynonyms) {
+    const normalizedGroup = synonymGroup
+      .map((term) => normalizeTitleText(term))
+      .filter(Boolean);
+    if (normalizedGroup.length < 2) {
+      continue;
+    }
+
+    // Check if any token from the group appears in the base title
+    const matchingTokens = normalizedGroup.filter((term) =>
+      baseTokens.some((baseToken) =>
+        baseToken === term || term.includes(baseToken) || baseToken.includes(term),
+      ),
+    );
+
+    if (matchingTokens.length === 0) {
+      continue;
+    }
+
+    // For each non-matching synonym in the group, create a variant
+    const nonMatchingSynonyms = normalizedGroup.filter(
+      (synonym) => !matchingTokens.includes(synonym),
+    );
+
+    for (const synonym of nonMatchingSynonyms.slice(0, 3)) {
+      // Try replacing matching tokens with this synonym
+      for (const matchingToken of matchingTokens.slice(0, 2)) {
+        const variantTokens = baseTokens.map((token) =>
+          token === matchingToken || matchingToken.includes(token) ? synonym : token,
+        );
+        const variant = variantTokens.join(" ");
+        const normalizedVariant = normalizeTitleText(variant);
+        if (normalizedVariant && normalizedVariant !== baseTitle) {
+          variants.add(normalizedVariant);
+        }
+      }
+    }
+  }
+
+  return Array.from(variants).filter(Boolean);
 }
 
 export function buildDiscoveryRoleQueries(
@@ -325,13 +413,17 @@ function resolveVariantTier(
     return 3;
   }
 
+  // For all other families, use kind-based tier assignment
   if (
     kind === "original" ||
     kind === "normalized" ||
     kind === "canonical" ||
-    kind === "synonym" ||
-    kind === "adjacent_concept"
+    kind === "synonym"
   ) {
+    return 1;
+  }
+
+  if (kind === "adjacent_concept") {
     return 1;
   }
 

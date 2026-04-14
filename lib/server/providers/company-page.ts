@@ -143,7 +143,7 @@ async function crawlJsonFeed(
   source: Extract<CompanyPageSourceConfig, { type: "json_feed" }>,
   fetchImpl: typeof fetch,
   discoveredAt: string,
-) {
+): Promise<NormalizedJobSeed[]> {
   const result = await safeFetchJson(source.url, {
     fetchImpl,
     method: "GET",
@@ -168,7 +168,7 @@ async function crawlHtmlPage(
   source: CompanyPageHtmlSource,
   fetchImpl: typeof fetch,
   discoveredAt: string,
-) {
+): Promise<NormalizedJobSeed[]> {
   const result = await safeFetchText(source.url, {
     fetchImpl,
     method: "GET",
@@ -195,7 +195,7 @@ function extractCompanyHtmlJobs(input: {
   sourcePageUrl: string;
   html: string;
   discoveredAt: string;
-}) {
+}): NormalizedJobSeed[] {
   const jsonLdJobs = collectJsonLdJobPostings(input.html)
     .map((record, index) => normalizeJsonLdJob(input.company, input.discoveredAt, record, index))
     .filter(isDefined);
@@ -211,7 +211,7 @@ function extractEmbeddedJsonJobs(input: {
   sourcePageUrl: string;
   html: string;
   discoveredAt: string;
-}) {
+}): NormalizedJobSeed[] {
   const payloads = collectJsonScriptPayloads(input.html);
   const records = payloads.flatMap((payload) =>
     deepCollect(payload, (record) => looksLikeStructuredJobRecord(record, input.sourcePageUrl)),

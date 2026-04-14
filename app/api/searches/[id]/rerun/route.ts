@@ -3,12 +3,15 @@ import { NextResponse } from "next/server";
 import { startSearchRerun, ResourceNotFoundError } from "@/lib/server/crawler/service";
 
 export async function POST(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ id: string }> },
 ) {
   try {
     const params = await context.params;
-    const { result, queued } = await startSearchRerun(params.id);
+    const requestOwnerKey = request.headers.get("x-job-crawler-client-id")?.trim() || undefined;
+    const { result, queued } = await startSearchRerun(params.id, {
+      requestOwnerKey,
+    });
     return NextResponse.json(
       {
         ...result,

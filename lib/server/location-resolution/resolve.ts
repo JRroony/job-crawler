@@ -414,8 +414,8 @@ function normalizeFreeformValue(value?: string) {
 
 function splitLocationParts(value: string) {
   return value
-    .split(/[,/|]| - /g)
-    .map((part) => part.trim())
+    .split(/[,/|;]|\n| - /g)
+    .map((part) => sanitizeLocationPart(part))
     .filter(Boolean);
 }
 
@@ -424,6 +424,15 @@ function stripLeadingWorkplaceDescriptor(value: string) {
     .replace(/^(?:remote|hybrid|onsite|on site)\s+(?:in|within)\s+/i, "")
     .replace(/^(?:remote|hybrid|onsite|on site)\s+/i, "")
     .trim();
+}
+
+function sanitizeLocationPart(value: string) {
+  return stripLeadingWorkplaceDescriptor(
+    value
+      .replace(/\((?:remote|hybrid|onsite|on site)[^)]+\)/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim(),
+  );
 }
 
 function firstString(

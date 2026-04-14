@@ -109,6 +109,31 @@ describe("JobCrawlerRepository", () => {
     expect(validation?.jobId).toBe(savedJob._id);
   });
 
+  it("records a delivery cursor for newly saved jobs so active crawls can poll deltas", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      {
+        title: "Software Engineer",
+      },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const crawlRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+    );
+
+    const [savedJob] = await repository.persistJobs(crawlRun._id, [
+      createPersistableJob(),
+    ]);
+
+    const firstDelta = await repository.getJobsByCrawlRunAfterSequence(crawlRun._id, 0);
+
+    expect(await repository.getCrawlRunDeliveryCursor(crawlRun._id)).toBe(1);
+    expect(firstDelta.cursor).toBe(1);
+    expect(firstDelta.jobs.map((job) => job._id)).toEqual([savedJob._id]);
+  });
+
   it("merges duplicate jobs across crawl runs without updating the immutable _id field", async () => {
     const db = new FakeDb();
     const repository = new JobCrawlerRepository(db);
@@ -699,6 +724,9 @@ describe("JobCrawlerRepository", () => {
     expect(
       db.collection(collectionNames.crawlRuns).indexes.map((index) => index.name),
     ).toContain("crawlRuns_validationMode_startedAt_desc");
+    expect(
+      db.collection(collectionNames.crawlRunJobEvents).indexes.map((index) => index.name),
+    ).toContain("crawlRunJobEvents_run_sequence");
   });
 
   it("groups duplicate updates into a single bulk write instead of issuing per-job mutations", async () => {

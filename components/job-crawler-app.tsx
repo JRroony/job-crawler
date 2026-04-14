@@ -27,6 +27,7 @@ import {
 import { SearchBar } from "@/components/job-search/search-bar";
 import { ResultsTable } from "@/components/results-table";
 import type {
+  CrawlDeltaResponse,
   CrawlDiagnostics,
   CrawlResponse,
   ExperienceLevel,
@@ -98,9 +99,14 @@ type ResultNotice = {
 
 type SearchRoutePayload = CrawlResponse & {
   queued?: boolean;
+  aborted?: boolean;
   error?: string;
   details?: unknown;
   readableErrors?: unknown;
+};
+
+type SearchDeltaRoutePayload = CrawlDeltaResponse & {
+  error?: string;
 };
 
 const initialFilters: SearchFilters = {
@@ -133,7 +139,15 @@ export function JobCrawlerApp({
     initialError ? "initial_load" : null,
   );
   const [revalidatingIds, setRevalidatingIds] = useState<string[]>([]);
+  const [backgroundCrawlId, setBackgroundCrawlId] = useState<string | null>(null);
+  const [backgroundCrawlNotice, setBackgroundCrawlNotice] = useState<{
+    searchId: string;
+    title: string;
+  } | null>(null);
   const pollSequenceRef = useRef(0);
+  const activeDeliveryCursorRef = useRef(0);
+  const clientRequestOwnerKeyRef = useRef(createClientRequestOwnerKey());
+  const activeRequestControllerRef = useRef<AbortController | null>(null);
 
   function buildLiveFilters(baseFilters: SearchFilters = filters) {
     return normalizeSearchFiltersForClient({
@@ -175,6 +189,7 @@ export function JobCrawlerApp({
     const normalizedPayload = normalizeCrawlResponseForClient(payload);
 
     setActiveResult(normalizedPayload);
+    activeDeliveryCursorRef.current = normalizedPayload.delivery?.cursor ?? 0;
     hydrateSearchForm(normalizedPayload.search.filters);
     setViewState("loading");
     setErrorKind(null);
@@ -185,6 +200,8 @@ export function JobCrawlerApp({
     options: {
       updatedAfter?: string;
       pollToken: number;
+      signal?: AbortSignal;
+      onSettled?: () => void;
     },
   ) {
     const deadline = Date.now() + queuedSearchPollTimeoutMs;
@@ -195,8 +212,16 @@ export function JobCrawlerApp({
         return;
       }
 
-      const response = await fetch(`/api/searches/${searchId}`);
-      const payload = (await response.json()) as SearchRoutePayload;
+      const response = await fetch(
+        `/api/searches/${searchId}?mode=delta&after=${activeDeliveryCursorRef.current}`,
+        {
+        signal: options.signal,
+        },
+      );
+      const payload = (await response.json()) as SearchDeltaRoutePayload;
+      if (!isLatestClientRequest(options.pollToken, pollSequenceRef.current)) {
+        return;
+      }
       if (!response.ok) {
         throw createClassifiedClientError(
           "runtime",
@@ -204,17 +229,37 @@ export function JobCrawlerApp({
         );
       }
 
-      if (payload.crawlRun.status === "running") {
-        applyQueuedResult(payload);
-        continue;
-      }
-
-      if (options.updatedAfter && payload.search.updatedAt <= options.updatedAfter) {
-        continue;
-      }
-
-      applyLoadedResult(payload);
+      applyDeltaResult(payload);
       refreshRecentSearch(payload.search);
+
+      if (payload.crawlRun.status === "running") {
+        continue;
+      }
+
+      const finalResponse = await fetch(`/api/searches/${searchId}`, {
+        signal: options.signal,
+      });
+      const finalPayload = (await finalResponse.json()) as SearchRoutePayload;
+      if (!isLatestClientRequest(options.pollToken, pollSequenceRef.current)) {
+        return;
+      }
+      if (!finalResponse.ok) {
+        throw createClassifiedClientError(
+          "runtime",
+          finalPayload.error ?? "The search could not be loaded.",
+        );
+      }
+
+      if (options.updatedAfter && finalPayload.search.updatedAt <= options.updatedAfter) {
+        applyLoadedResult(finalPayload);
+        refreshRecentSearch(finalPayload.search);
+        options.onSettled?.();
+        return;
+      }
+
+      applyLoadedResult(finalPayload);
+      refreshRecentSearch(finalPayload.search);
+      options.onSettled?.();
       return;
     }
 
@@ -230,6 +275,7 @@ export function JobCrawlerApp({
 
   async function submitSearch(nextFilters: SearchFilters) {
     const pollToken = ++pollSequenceRef.current;
+    const requestController = replaceActiveRequestController();
     const payloadResult = buildSearchRequestPayload(nextFilters);
 
     if (!payloadResult.ok) {
@@ -242,17 +288,23 @@ export function JobCrawlerApp({
     setViewState("loading");
     setMessage("");
     setErrorKind(null);
+    setBackgroundCrawlNotice(null);
 
     try {
       const response = await fetch("/api/searches", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "x-job-crawler-client-id": clientRequestOwnerKeyRef.current,
         },
+        signal: requestController.signal,
         body: JSON.stringify(payloadResult.payload),
       });
 
       const payload = (await response.json()) as SearchRoutePayload;
+      if (!isLatestClientRequest(pollToken, pollSequenceRef.current)) {
+        return;
+      }
       if (!response.ok) {
         if (response.status === 400) {
           throw createClassifiedClientError(
@@ -276,9 +328,18 @@ export function JobCrawlerApp({
       if (payload.queued) {
         refreshRecentSearch(payload.search);
         applyQueuedResult(payload);
-        await pollSearchUntilSettled(payload.search._id, {
+        setBackgroundCrawlId(payload.search._id);
+        // Start background polling without blocking the UI
+        void pollSearchUntilSettled(payload.search._id, {
           updatedAfter: payload.search.updatedAt,
           pollToken,
+          signal: requestController.signal,
+          onSettled: () => {
+            setBackgroundCrawlNotice({
+              searchId: payload.search._id,
+              title: payload.search.filters.title,
+            });
+          },
         });
         return;
       }
@@ -286,6 +347,9 @@ export function JobCrawlerApp({
       applyLoadedResult(payload);
       refreshRecentSearch(payload.search);
     } catch (error) {
+      if (!isLatestClientRequest(pollToken, pollSequenceRef.current) || isAbortLikeClientError(error)) {
+        return;
+      }
       setViewState("error");
       setErrorKind(resolveErrorKind(error));
       setMessage(error instanceof Error ? error.message : "The crawl request failed.");
@@ -302,6 +366,7 @@ export function JobCrawlerApp({
     }
 
     const pollToken = ++pollSequenceRef.current;
+    const requestController = replaceActiveRequestController();
     setViewState("loading");
     setMessage("");
     setErrorKind(null);
@@ -309,8 +374,15 @@ export function JobCrawlerApp({
     try {
       const response = await fetch(`/api/searches/${id}/rerun`, {
         method: "POST",
+        headers: {
+          "x-job-crawler-client-id": clientRequestOwnerKeyRef.current,
+        },
+        signal: requestController.signal,
       });
       const payload = (await response.json()) as SearchRoutePayload;
+      if (!isLatestClientRequest(pollToken, pollSequenceRef.current)) {
+        return;
+      }
       if (!response.ok) {
         throw createClassifiedClientError(
           "runtime",
@@ -328,6 +400,7 @@ export function JobCrawlerApp({
         await pollSearchUntilSettled(payload.search._id, {
           updatedAfter: payload.search.updatedAt,
           pollToken,
+          signal: requestController.signal,
         });
         return;
       }
@@ -335,6 +408,9 @@ export function JobCrawlerApp({
       applyLoadedResult(payload);
       refreshRecentSearch(payload.search);
     } catch (error) {
+      if (!isLatestClientRequest(pollToken, pollSequenceRef.current) || isAbortLikeClientError(error)) {
+        return;
+      }
       setViewState("error");
       setErrorKind(resolveErrorKind(error));
       setMessage(error instanceof Error ? error.message : "The rerun request failed.");
@@ -343,13 +419,19 @@ export function JobCrawlerApp({
 
   async function loadSearch(searchId: string) {
     const pollToken = ++pollSequenceRef.current;
+    const requestController = replaceActiveRequestController();
     setViewState("loading");
     setMessage("");
     setErrorKind(null);
 
     try {
-      const response = await fetch(`/api/searches/${searchId}`);
+      const response = await fetch(`/api/searches/${searchId}`, {
+        signal: requestController.signal,
+      });
       const payload = (await response.json()) as CrawlResponse & { error?: string };
+      if (!isLatestClientRequest(pollToken, pollSequenceRef.current)) {
+        return;
+      }
       if (!response.ok) {
         throw createClassifiedClientError(
           "runtime",
@@ -362,13 +444,70 @@ export function JobCrawlerApp({
         await pollSearchUntilSettled(searchId, {
           updatedAfter: payload.search.updatedAt,
           pollToken,
+          signal: requestController.signal,
         });
       }
     } catch (error) {
+      if (!isLatestClientRequest(pollToken, pollSequenceRef.current) || isAbortLikeClientError(error)) {
+        return;
+      }
       setViewState("error");
       setErrorKind(resolveErrorKind(error));
       setMessage(error instanceof Error ? error.message : "The search could not be loaded.");
     }
+  }
+
+  async function stopActiveSearch(searchId?: string) {
+    const id = searchId ?? activeResult?.search._id;
+    if (!id) {
+      return;
+    }
+
+    const pollToken = ++pollSequenceRef.current;
+    const requestController = replaceActiveRequestController();
+    setMessage("");
+    setErrorKind(null);
+
+    try {
+      const response = await fetch(`/api/searches/${id}`, {
+        method: "DELETE",
+        signal: requestController.signal,
+      });
+      const payload = (await response.json()) as SearchRoutePayload;
+      if (!isLatestClientRequest(pollToken, pollSequenceRef.current)) {
+        return;
+      }
+
+      if (!response.ok) {
+        throw createClassifiedClientError(
+          "runtime",
+          payload.error ?? "The crawl could not be stopped.",
+        );
+      }
+
+      applyLoadedResult(payload);
+      refreshRecentSearch(payload.search);
+      setMessage(
+        payload.aborted
+          ? "The crawl was stopped. No more results will be saved for that run."
+          : "That crawl was already finished.",
+      );
+    } catch (error) {
+      if (!isLatestClientRequest(pollToken, pollSequenceRef.current) || isAbortLikeClientError(error)) {
+        return;
+      }
+
+      setViewState("error");
+      setErrorKind(resolveErrorKind(error));
+      setMessage(error instanceof Error ? error.message : "The crawl could not be stopped.");
+    }
+  }
+
+  function replaceActiveRequestController() {
+    activeRequestControllerRef.current?.abort();
+    const controller = new AbortController();
+    activeRequestControllerRef.current = controller;
+    return controller;
   }
 
   async function revalidateSingleJob(jobId: string) {
@@ -404,9 +543,47 @@ export function JobCrawlerApp({
     const normalizedPayload = normalizeCrawlResponseForClient(payload);
 
     setActiveResult(normalizedPayload);
+    activeDeliveryCursorRef.current = normalizedPayload.delivery?.cursor ?? 0;
     hydrateSearchForm(normalizedPayload.search.filters);
     setViewState(resolveViewState(normalizedPayload));
     setErrorKind(null);
+  }
+
+  function applyDeltaResult(payload: CrawlDeltaResponse) {
+    const normalizedPayload = normalizeCrawlDeltaResponseForClient(payload);
+    let mergedResult: CrawlResponse | null = null;
+
+    activeDeliveryCursorRef.current = normalizedPayload.delivery.cursor;
+    setActiveResult((current) => {
+      mergedResult = mergeCrawlDeltaIntoResult(current, normalizedPayload);
+      return mergedResult;
+    });
+    hydrateSearchForm(normalizedPayload.search.filters);
+    setViewState(
+      normalizedPayload.crawlRun.status === "running"
+        ? "loading"
+        : mergedResult
+          ? resolveViewState(mergedResult)
+          : "loading",
+    );
+    setErrorKind(null);
+  }
+
+  function dismissBackgroundCrawlNotice() {
+    setBackgroundCrawlNotice(null);
+  }
+
+  function startNewSearch() {
+    // Abort the current polling request but keep the background crawl running
+    activeRequestControllerRef.current?.abort();
+    activeRequestControllerRef.current = null;
+    setViewState("idle");
+    setBackgroundCrawlId(null);
+    setBackgroundCrawlNotice(null);
+    setMessage("");
+    setErrorKind(null);
+    // Reset poll token so a new search gets its own sequence
+    pollSequenceRef.current = 0;
   }
 
   const visibleJobs = useMemo(
@@ -498,7 +675,43 @@ export function JobCrawlerApp({
               fetchedCount={activeResult?.crawlRun.totalFetchedJobs}
               matchedCount={activeResult?.crawlRun.totalMatchedJobs}
               providerSummary={activeResult?.crawlRun.providerSummary}
+              actionButton={
+                backgroundCrawlId ? (
+                  <button
+                    type="button"
+                    onClick={startNewSearch}
+                    className="inline-flex items-center justify-center rounded-full border border-ink/15 bg-white px-4 py-2 text-sm font-semibold text-ink transition hover:border-sand hover:bg-sand/20"
+                  >
+                    New Search
+                  </button>
+                ) : undefined
+              }
             />
+          ) : null}
+
+          {backgroundCrawlNotice ? (
+            <section className="rounded-[18px] border border-[#0a66c2]/20 bg-[#0a66c2]/5 px-5 py-4 shadow-sm">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-semibold text-ink">
+                    Your previous search completed
+                  </div>
+                  <p className="mt-1 text-sm text-slate">
+                    &ldquo;{backgroundCrawlNotice.title}&rdquo; finished crawling. View the full results whenever you&apos;re ready.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    dismissBackgroundCrawlNotice();
+                    void loadSearch(backgroundCrawlNotice.searchId);
+                  }}
+                  className="shrink-0 rounded-full bg-[#0a66c2] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#004182]"
+                >
+                  View Results
+                </button>
+              </div>
+            </section>
           ) : null}
 
           {viewState === "idle" ? (
@@ -566,7 +779,17 @@ export function JobCrawlerApp({
                       </div>
                     ) : null}
                   </div>
-                  <div className="grid gap-3 sm:grid-cols-2 lg:min-w-[320px]">
+                  <div className="space-y-3 lg:min-w-[320px]">
+                    {activeResult.crawlRun.status === "running" ? (
+                      <button
+                        type="button"
+                        onClick={() => void stopActiveSearch(activeResult.search._id)}
+                        className="inline-flex w-full items-center justify-center rounded-full border border-ink/15 bg-white px-4 py-2 text-sm font-semibold text-ink transition hover:border-sand hover:bg-sand/20"
+                      >
+                        Stop crawl
+                      </button>
+                    ) : null}
+                    <div className="grid gap-3 sm:grid-cols-2">
                     <div className="rounded-[18px] border border-ink/8 bg-mist/30 px-4 py-3">
                       <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate/60">
                         Visible results
@@ -585,6 +808,7 @@ export function JobCrawlerApp({
                         {describePlatformScope(activeResult.search.filters.platforms)}
                       </div>
                     </div>
+                  </div>
                   </div>
                 </div>
               </section>
@@ -683,6 +907,15 @@ export function resolveViewState(result: CrawlResponse): ViewState {
 export function describeZeroResultState(result: CrawlResponse): ZeroResultState {
   const diagnostics = result.diagnostics;
 
+  if (result.crawlRun.status === "aborted") {
+    return {
+      title: "The crawl was stopped before more jobs were saved",
+      description:
+        "This run was canceled before completion, so the saved result set may be incomplete.",
+      highlights: buildOperationalHighlights(diagnostics, { includeFilters: false }),
+    };
+  }
+
   if (diagnostics.discoveredSources === 0) {
     return {
       title: "No runnable sources were discovered",
@@ -740,8 +973,55 @@ export function describeZeroResultState(result: CrawlResponse): ZeroResultState 
   };
 }
 
-function describeResultNotice(result: CrawlResponse): ResultNotice | null {
+export function isLatestClientRequest(requestToken: number, currentToken: number) {
+  return requestToken === currentToken;
+}
+
+function createClientRequestOwnerKey() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+
+  return `job-crawler-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function isAbortLikeClientError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+export function describeResultNotice(result: CrawlResponse): ResultNotice | null {
   const diagnostics = result.diagnostics;
+
+  if (result.crawlRun.status === "running" && result.jobs.length > 0) {
+    const crawlMode = resolveCrawlMode(result.search.filters.crawlMode);
+    const modeHighlight =
+      crawlMode === "fast"
+        ? "Fast mode keeps heavier recall work behind the first visible batch."
+        : crawlMode === "balanced"
+          ? "Balanced mode starts supplemental recall while the first batch is already visible."
+          : "Deep mode keeps widening recall while the visible batch is already available.";
+
+    return {
+      title: "Initial jobs are visible while supplemental recall keeps running",
+      description:
+        "You can review and filter the saved jobs now. The crawler is still exploring slower sources and public discovery paths in the same run.",
+      tone: "tide",
+      highlights: [
+        modeHighlight,
+        `Saved ${result.jobs.length} job${result.jobs.length === 1 ? "" : "s"} so far while the crawl continues.`,
+      ],
+    };
+  }
+
+  if (result.crawlRun.status === "aborted") {
+    return {
+      title: "This crawl was stopped before it finished",
+      description:
+        "The currently visible jobs were saved before cancellation, so the result set may be incomplete.",
+      tone: "amber",
+      highlights: buildOperationalHighlights(diagnostics, { includeFilters: false }),
+    };
+  }
 
   if (result.jobs.length > 0 && diagnostics.validationDeferred > 0) {
     return {
@@ -908,6 +1188,33 @@ function normalizeCrawlResponseForClient(payload: CrawlResponse): CrawlResponse 
   };
 }
 
+function normalizeCrawlDeltaResponseForClient(payload: CrawlDeltaResponse): CrawlDeltaResponse {
+  return {
+    ...payload,
+    search: normalizeSearchDocumentForClient(payload.search),
+  };
+}
+
+export function mergeCrawlDeltaIntoResult(
+  current: CrawlResponse | null,
+  payload: CrawlDeltaResponse,
+): CrawlResponse {
+  const baseJobs = current?.search._id === payload.search._id ? current.jobs : [];
+  const mergedJobs = dedupeJobsById([...baseJobs, ...payload.jobs]).sort(jobComparator);
+
+  return {
+    search: payload.search,
+    crawlRun: payload.crawlRun,
+    sourceResults: payload.sourceResults,
+    jobs: mergedJobs,
+    diagnostics: payload.diagnostics,
+    delivery: {
+      mode: "full",
+      cursor: payload.delivery.cursor,
+    },
+  };
+}
+
 function buildFilterBadges(filters: SearchFilters) {
   const badges: string[] = [];
 
@@ -1011,6 +1318,16 @@ function dedupeSearches(searches: SearchDocument[]) {
   searches.forEach((search) => {
     map.set(search._id, search);
   });
+  return Array.from(map.values());
+}
+
+function dedupeJobsById(jobs: CrawlResponse["jobs"]) {
+  const map = new Map<string, CrawlResponse["jobs"][number]>();
+
+  jobs.forEach((job) => {
+    map.set(job._id, job);
+  });
+
   return Array.from(map.values());
 }
 

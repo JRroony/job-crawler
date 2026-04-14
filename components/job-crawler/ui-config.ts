@@ -98,19 +98,19 @@ export const crawlModeOptions: Array<{
   {
     value: "fast",
     label: "Fast",
-    description: "Save matches quickly and defer validation.",
+    description: "Show baseline matches first, then continue heavier recall work in the background.",
     validationSummary: "Deferred validation",
   },
   {
     value: "balanced",
     label: "Balanced",
-    description: "Validate the newest saved links inline, then defer the rest.",
+    description: "Start supplemental recall sooner while still keeping the first visible batch responsive.",
     validationSummary: "Inline newest 5, defer the rest",
   },
   {
     value: "deep",
     label: "Deep",
-    description: "Validate all saved links inline before the run finishes.",
+    description: "Spend more budget on supplemental recall and finish with full inline validation.",
     validationSummary: "Inline validation for all saved jobs",
   },
 ];
@@ -201,6 +201,10 @@ export function labelForProviderStatus(status: CrawlSourceResult["status"]) {
     return "Degraded";
   }
 
+  if (status === "aborted") {
+    return "Stopped";
+  }
+
   if (status === "unsupported") {
     return "Limited";
   }
@@ -234,6 +238,13 @@ export function sourceStatusTone(status: CrawlSourceResult["status"]) {
     return {
       badge: "bg-tide/10 text-tide border border-tide/20",
       card: "border-tide/20 bg-[linear-gradient(180deg,rgba(63,114,175,0.06),rgba(255,255,255,0.95))]",
+    };
+  }
+
+  if (status === "aborted") {
+    return {
+      badge: "bg-slate-100 text-slate-800 border border-slate-200",
+      card: "border-slate-200 bg-[linear-gradient(180deg,rgba(148,163,184,0.10),rgba(255,255,255,0.95))]",
     };
   }
 

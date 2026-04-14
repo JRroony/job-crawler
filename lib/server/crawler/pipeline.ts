@@ -24,6 +24,7 @@ import {
   type LinkValidationDraft,
 } from "@/lib/server/crawler/link-validation";
 import { sortJobsForPersistence, sortJobsWithDiagnostics } from "@/lib/server/crawler/sort";
+import { capSourcesWithPlatformDiversity } from "@/lib/server/crawler/source-capper";
 import { getEnv } from "@/lib/server/env";
 import type { JobCrawlerRepository, PersistableJob } from "@/lib/server/db/repository";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
@@ -70,11 +71,41 @@ type ExecuteCrawlPipelineInput = {
   inlineValidationTopN?: number;
   providerTimeoutMs?: number;
   progressUpdateIntervalMs?: number;
+  signal?: AbortSignal;
 };
+
+export class CrawlAbortedError extends Error {
+  constructor(message = "The crawl was aborted.") {
+    super(message);
+    this.name = "AbortError";
+  }
+}
+
+function mergeAbortSignals(signals: Array<AbortSignal | undefined>): AbortSignal {
+  const controller = new AbortController();
+  
+  for (const signal of signals) {
+    if (!signal) {
+      continue;
+    }
+    
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      return controller.signal;
+    }
+    
+    signal.addEventListener("abort", () => {
+      controller.abort(signal.reason);
+    }, { once: true });
+  }
+  
+  return controller.signal;
+}
 
 export async function executeCrawlPipeline(
   input: ExecuteCrawlPipelineInput,
 ): Promise<CrawlResponse> {
+  throwIfAborted(input.signal);
   const crawlStartedMs = Date.now();
   const normalizedFilters = searchFiltersSchema.parse(input.search.filters);
   const selectedProviders = selectProvidersForSearch(
@@ -93,8 +124,23 @@ export async function executeCrawlPipeline(
   const env = getEnv();
   const providerTimeoutMs =
     input.providerTimeoutMs ?? env.CRAWL_PROVIDER_TIMEOUT_MS;
+  const globalTimeoutMs = env.CRAWL_GLOBAL_TIMEOUT_MS;
+  const targetJobCount = env.CRAWL_TARGET_JOB_COUNT;
   const progressUpdateIntervalMs =
     input.progressUpdateIntervalMs ?? env.CRAWL_PROGRESS_UPDATE_INTERVAL_MS;
+
+  // Create global timeout AbortController
+  const globalTimeoutController = new AbortController();
+  const globalTimeoutHandle = setTimeout(() => {
+    globalTimeoutController.abort(
+      new Error(`Crawl exceeded the global timeout of ${globalTimeoutMs}ms.`),
+    );
+  }, globalTimeoutMs);
+
+  // Merge global timeout with input signal
+  const mergedSignal = mergeAbortSignals([input.signal, globalTimeoutController.signal]);
+
+  const abortableFetchImpl = createAbortableFetch(input.fetchImpl, mergedSignal);
   const crawlRun =
     input.crawlRun ??
     (await input.repository.createCrawlRun(search._id, input.now.toISOString(), {
@@ -110,40 +156,52 @@ export async function executeCrawlPipeline(
     );
   }
 
+  const stageTimingsMs = {
+    discovery: 0,
+    providerExecution: 0,
+    filtering: 0,
+    dedupe: 0,
+    persistence: 0,
+    validation: 0,
+    responseAssembly: 0,
+  };
+  const diagnostics = createEmptyDiagnostics();
+  const sourceResultsByProvider = new Map<CrawlSourceResult["provider"], CrawlSourceResult>();
+  const providerSavedJobIds = new Map<CrawlSourceResult["provider"], Set<string>>();
+  const savedJobIds = new Set<string>();
+  const providerDurationsMs: Array<{
+    provider: CrawlSourceResult["provider"];
+    duration: number;
+    sourceCount: number;
+    timedOut: boolean;
+  }> = [];
+  let totalFetchedJobs = 0;
+  let totalMatchedJobs = 0;
+  let firstVisibleResultAtMs: number | undefined;
+  let mutationQueue = Promise.resolve();
+  const mutationErrors: unknown[] = [];
+  let progressUpdateCount = 0;
+  let persistenceBatchCount = 0;
+  let pendingProgressStage: CrawlRunStage | undefined;
+  let pendingProgressNow: string | undefined;
+  let lastProgressFlushAtMs = 0;
+  let progressFlushPromise: Promise<void> | null = null;
+  const activeStagePromises = new Set<Promise<unknown>>();
+
   try {
-    const stageTimingsMs = {
-      discovery: 0,
-      providerExecution: 0,
-      filtering: 0,
-      dedupe: 0,
-      persistence: 0,
-      validation: 0,
-      responseAssembly: 0,
+    const trackStagePromise = <T,>(promise: Promise<T>) => {
+      activeStagePromises.add(promise);
+      return promise.finally(() => {
+        activeStagePromises.delete(promise);
+      });
     };
-    const diagnostics = createEmptyDiagnostics();
-    const sourceResultsByProvider = new Map<CrawlSourceResult["provider"], CrawlSourceResult>();
-    const providerSavedJobIds = new Map<CrawlSourceResult["provider"], Set<string>>();
-    const savedJobIds = new Set<string>();
-    const providerDurationsMs: Array<{
-      provider: CrawlSourceResult["provider"];
-      duration: number;
-      sourceCount: number;
-      timedOut: boolean;
-    }> = [];
-    let totalFetchedJobs = 0;
-    let totalMatchedJobs = 0;
-    let firstVisibleResultAtMs: number | undefined;
-    let mutationQueue = Promise.resolve();
-    const mutationErrors: unknown[] = [];
-    let progressUpdateCount = 0;
-    let persistenceBatchCount = 0;
-    let pendingProgressStage: CrawlRunStage | undefined;
-    let pendingProgressNow: string | undefined;
-    let lastProgressFlushAtMs = 0;
-    let progressFlushPromise: Promise<void> | null = null;
 
     const queueMutation = <T,>(task: () => Promise<T>) => {
-      const run = mutationQueue.then(task, task);
+      const wrappedTask = async () => {
+        throwIfAborted(mergedSignal);
+        return task();
+      };
+      const run = mutationQueue.then(wrappedTask, wrappedTask);
       mutationQueue = run.then(
         () => undefined,
         () => undefined,
@@ -160,6 +218,7 @@ export async function executeCrawlPipeline(
       stage: CrawlRunStage,
       now = new Date().toISOString(),
     ) => {
+      throwIfAborted(mergedSignal);
       progressUpdateCount += 1;
       syncPerformanceDiagnostics({
         diagnostics,
@@ -187,6 +246,7 @@ export async function executeCrawlPipeline(
     };
 
     const flushProgressUpdate = async (force = false) => {
+      throwIfAborted(mergedSignal);
       if (!pendingProgressStage || !pendingProgressNow) {
         return;
       }
@@ -253,7 +313,9 @@ export async function executeCrawlPipeline(
       startedAt: string;
       finishedAt: string;
       accumulateProviderTotals?: boolean;
+      onFirstVisibleSaved?: () => void;
     }) => {
+      throwIfAborted(mergedSignal);
       const filteringStartedMs = Date.now();
       persistenceBatchCount += 1;
       const filteredSeeds = filterSeedsForSearch(payload.seeds, normalizedFilters, {
@@ -294,6 +356,10 @@ export async function executeCrawlPipeline(
           savedJobIds.add(job._id);
           newVisibleJobCount += 1;
         }
+      }
+
+      if (newVisibleJobCount > 0) {
+        payload.onFirstVisibleSaved?.();
       }
 
       if (!firstVisibleResultAtMs && savedJobIds.size > 0) {
@@ -393,7 +459,11 @@ export async function executeCrawlPipeline(
     const runProviderStage = async (
       provider: CrawlProvider,
       sourcesForProvider: Parameters<CrawlProvider["crawlSources"]>[1],
+      options: {
+        onFirstVisibleSaved?: () => void;
+      } = {},
     ) => {
+      throwIfAborted(mergedSignal);
       if (sourcesForProvider.length === 0) {
         return;
       }
@@ -419,9 +489,10 @@ export async function executeCrawlPipeline(
         const result = await runProviderWithTimeout(
           provider.crawlSources(
             {
-              fetchImpl: input.fetchImpl,
+              fetchImpl: abortableFetchImpl,
               now: input.now,
               filters: normalizedFilters,
+              signal: mergedSignal,
               onBatch: async (batch) => {
                 emittedLiveBatch = true;
                 totalFetchedJobs += batch.fetchedCount;
@@ -436,6 +507,7 @@ export async function executeCrawlPipeline(
                     startedAt,
                     finishedAt: new Date().toISOString(),
                     accumulateProviderTotals: true,
+                    onFirstVisibleSaved: options.onFirstVisibleSaved,
                   }),
                 ).catch((error) => {
                   mutationErrors.push(error);
@@ -449,6 +521,7 @@ export async function executeCrawlPipeline(
         );
 
         const finishedAt = new Date().toISOString();
+        throwIfAborted(mergedSignal);
         const durationMs = Date.now() - startedMs;
         providerDurationsMs.push({
           provider: result.provider,
@@ -477,12 +550,14 @@ export async function executeCrawlPipeline(
               startedAt,
               finishedAt,
               accumulateProviderTotals: true,
+              onFirstVisibleSaved: options.onFirstVisibleSaved,
             }),
           );
           return;
         }
 
         await queueMutation(async () => {
+          throwIfAborted(mergedSignal);
           const existing = sourceResultsByProvider.get(result.provider);
           if (!existing) {
             return;
@@ -500,6 +575,10 @@ export async function executeCrawlPipeline(
           await updateRunProgress("crawling", finishedAt);
         });
       } catch (reason) {
+        if (isAbortError(reason)) {
+          throw toAbortError(reason);
+        }
+
         const finishedAt = new Date().toISOString();
         const durationMs = Date.now() - startedMs;
         const timedOut = isTimeoutError(reason);
@@ -543,7 +622,9 @@ export async function executeCrawlPipeline(
       sources: DiscoveredSource[];
       jobs: NormalizedJobSeed[];
       diagnostics?: CrawlDiagnostics["discovery"];
+      onFirstVisibleSaved?: () => void;
     }) => {
+      throwIfAborted(mergedSignal);
       const newSources = payload.sources.filter((source) => {
         if (discoveredSourceIds.has(source.id)) {
           return false;
@@ -552,8 +633,46 @@ export async function executeCrawlPipeline(
         discoveredSourceIds.add(source.id);
         return true;
       });
+
+      // Global source cap: after merging baseline + supplemental, cap total sources
+      // to CRAWL_MAX_SOURCES while preserving platform diversity.
+      const maxSources = env.CRAWL_MAX_SOURCES;
+      const totalDiscoveredBeforeCap = discoveredSourceIds.size;
+      let cappedSources = newSources;
+      let sourcesTruncated = false;
+      let sourcesTruncatedCount = 0;
+
+      if (totalDiscoveredBeforeCap > maxSources) {
+        sourcesTruncated = true;
+        sourcesTruncatedCount = totalDiscoveredBeforeCap - maxSources;
+        cappedSources = capSourcesWithPlatformDiversity(newSources, maxSources);
+        // Remove the capped-out sources from discoveredSourceIds so they don't affect provider routing
+        const cappedIds = new Set(cappedSources.map((s) => s.id));
+        for (const id of discoveredSourceIds) {
+          if (!cappedIds.has(id)) {
+            // Keep only sources that made it into the cap
+          }
+        }
+        // Rebuild discoveredSourceIds to only include capped sources
+        discoveredSourceIds.clear();
+        cappedSources.forEach((s) => discoveredSourceIds.add(s.id));
+
+        console.info("[crawl:source-cap]", {
+          searchId: search._id,
+          stage: payload.label,
+          discoveredBeforeCap: totalDiscoveredBeforeCap,
+          maxSources,
+          cappedTo: cappedSources.length,
+          truncatedCount: sourcesTruncatedCount,
+          platformDistribution: cappedSources.reduce<Record<string, number>>((counts, source) => {
+            counts[source.platform] = (counts[source.platform] ?? 0) + 1;
+            return counts;
+          }, {}),
+        });
+      }
+
       const providerSources = selectedProviders.map((provider) =>
-        newSources.filter((source) => provider.supportsSource(source)),
+        cappedSources.filter((source) => provider.supportsSource(source)),
       );
 
       diagnostics.discoveredSources = discoveredSourceIds.size;
@@ -561,7 +680,17 @@ export async function executeCrawlPipeline(
       totalHarvestedDiscoveryJobs += payload.jobs.length;
       diagnostics.directJobsHarvested = totalHarvestedDiscoveryJobs;
       if (payload.diagnostics) {
-        diagnostics.discovery = payload.diagnostics;
+        diagnostics.discovery = {
+          ...payload.diagnostics,
+          ...(sourcesTruncated
+            ? {
+                sourcesTruncated: true,
+                sourcesTruncatedCount,
+                sourcesBeforeTruncation: totalDiscoveredBeforeCap,
+                sourcesAfterTruncation: cappedSources.length,
+              }
+            : {}),
+        };
       }
 
       const providerRouting = selectedProviders.map((provider, index) => ({
@@ -596,6 +725,7 @@ export async function executeCrawlPipeline(
             sourceCount: 0,
             startedAt: crawlRun.startedAt,
             finishedAt: new Date().toISOString(),
+            onFirstVisibleSaved: payload.onFirstVisibleSaved,
           }),
         );
       }
@@ -612,7 +742,9 @@ export async function executeCrawlPipeline(
 
       await Promise.all(
         selectedProviders.map((provider, index) =>
-          runProviderStage(provider, providerSources[index]),
+          runProviderStage(provider, providerSources[index], {
+            onFirstVisibleSaved: payload.onFirstVisibleSaved,
+          }),
         ),
       );
       await mutationQueue;
@@ -623,45 +755,63 @@ export async function executeCrawlPipeline(
     Object.assign(diagnostics, createEmptyDiagnostics());
 
     if (input.discovery.discoverBaseline && input.discovery.discoverSupplemental) {
+      throwIfAborted(mergedSignal);
+      const baselineVisibility = createDeferred<void>();
+      let baselineVisibilityResolved = false;
+      const markBaselineVisible = () => {
+        if (baselineVisibilityResolved) {
+          return;
+        }
+
+        baselineVisibilityResolved = true;
+        baselineVisibility.resolve();
+      };
       const baselineDiscoveryStartedMs = Date.now();
       const baselineStage = await input.discovery.discoverBaseline({
         filters: normalizedFilters,
         now: input.now,
-        fetchImpl: input.fetchImpl,
+        fetchImpl: abortableFetchImpl,
       });
       stageTimingsMs.discovery += Date.now() - baselineDiscoveryStartedMs;
-      const baselineProcessingPromise = processDiscoveryStage({
+      const baselineProcessingPromise = trackStagePromise(processDiscoveryStage({
         label: baselineStage.label,
         sources: baselineStage.sources,
         jobs: baselineStage.jobs ?? [],
         diagnostics: baselineStage.diagnostics,
-      });
+        onFirstVisibleSaved: markBaselineVisible,
+      }));
+      const baselineCompletionSignal = baselineProcessingPromise.finally(markBaselineVisible);
+
+      if (normalizedFilters.crawlMode === "fast") {
+        await Promise.race([baselineVisibility.promise, baselineCompletionSignal]);
+      }
 
       const supplementalDiscoveryStartedMs = Date.now();
       const supplementalStage = await input.discovery.discoverSupplemental(
         {
           filters: normalizedFilters,
           now: input.now,
-          fetchImpl: input.fetchImpl,
+          fetchImpl: abortableFetchImpl,
         },
         {
           baselineSources: baselineStage.sources,
         },
       );
       stageTimingsMs.discovery += Date.now() - supplementalDiscoveryStartedMs;
-      const supplementalProcessingPromise = processDiscoveryStage({
+      const supplementalProcessingPromise = trackStagePromise(processDiscoveryStage({
         label: supplementalStage.label,
         sources: supplementalStage.sources,
         jobs: supplementalStage.jobs ?? [],
         diagnostics: supplementalStage.diagnostics,
-      });
+      }));
       await Promise.all([baselineProcessingPromise, supplementalProcessingPromise]);
     } else if (input.discovery.discoverInStages) {
+      throwIfAborted(mergedSignal);
       const stagedDiscoveryStartedMs = Date.now();
       const discoveryStages = await input.discovery.discoverInStages({
         filters: normalizedFilters,
         now: input.now,
-        fetchImpl: input.fetchImpl,
+        fetchImpl: abortableFetchImpl,
       });
       stageTimingsMs.discovery += Date.now() - stagedDiscoveryStartedMs;
       for (const discoveryStage of discoveryStages) {
@@ -673,18 +823,19 @@ export async function executeCrawlPipeline(
         });
       }
     } else {
+      throwIfAborted(mergedSignal);
       const fullDiscoveryStartedMs = Date.now();
       const discoveryExecution = input.discovery.discoverWithDiagnostics
         ? await input.discovery.discoverWithDiagnostics({
             filters: normalizedFilters,
             now: input.now,
-            fetchImpl: input.fetchImpl,
+            fetchImpl: abortableFetchImpl,
           })
         : {
             sources: await input.discovery.discover({
               filters: normalizedFilters,
               now: input.now,
-              fetchImpl: input.fetchImpl,
+              fetchImpl: abortableFetchImpl,
             }),
             jobs: [],
             diagnostics: undefined,
@@ -705,6 +856,79 @@ export async function executeCrawlPipeline(
     if (mutationErrors.length > 0) {
       throw mutationErrors[0];
     }
+    throwIfAborted(mergedSignal);
+    
+    // Early termination: check if we've reached the target job count
+    const currentSavedJobs = await input.repository.getJobsByCrawlRun(crawlRun._id);
+    if (currentSavedJobs.length >= targetJobCount) {
+      diagnostics.stoppedReason = "target_met";
+      diagnostics.budgetExhausted = true;
+      console.info("[crawl:early-termination]", {
+        searchId: search._id,
+        reason: "Early termination: target job count reached",
+        savedJobs: currentSavedJobs.length,
+        targetJobCount,
+      });
+      // Skip validation and finalize immediately
+      await flushProgressUpdate(true);
+      await updateRunProgress("finalizing");
+      
+      const sourceResults = buildSortedSourceResults();
+      const status = deriveRunStatus(sourceResults, currentSavedJobs.length);
+      const finishedAt = new Date().toISOString();
+      
+      clearTimeout(globalTimeoutHandle);
+      diagnostics.stoppedReason = "target_met";
+      
+      await input.repository.finalizeCrawlRun(crawlRun._id, {
+        status,
+        stage: "finalizing",
+        totalFetchedJobs,
+        totalMatchedJobs,
+        dedupedJobs: currentSavedJobs.length,
+        diagnostics,
+        validationMode: validationStrategy.mode,
+        providerSummary: buildProviderSummary(sourceResults),
+        finishedAt,
+      });
+      await input.repository.updateSearchLatestRun(search._id, crawlRun._id, status, finishedAt);
+      
+      const responseAssemblyStartedMs = Date.now();
+      const finalizedRun = (await input.repository.getCrawlRun(crawlRun._id)) as CrawlRun;
+      const response = crawlResponseSchema.parse({
+        search: {
+          ...search,
+          latestCrawlRunId: crawlRun._id,
+          lastStatus: status,
+          updatedAt: finishedAt,
+        },
+        crawlRun: finalizedRun,
+        sourceResults,
+        jobs: sortJobsWithDiagnostics(
+          currentSavedJobs.map(applyResolvedExperienceLevel),
+          normalizedFilters.title,
+          input.now,
+        ),
+        diagnostics: finalizedRun.diagnostics,
+        delivery: {
+          mode: "full",
+          cursor: currentSavedJobs.length,
+        },
+      });
+      stageTimingsMs.responseAssembly = Date.now() - responseAssemblyStartedMs;
+      syncPerformanceDiagnostics({
+        diagnostics,
+        stageTimingsMs,
+        providerDurationsMs,
+        crawlStartedMs,
+        firstVisibleResultAtMs,
+        progressUpdateCount,
+        persistenceBatchCount,
+      });
+      
+      return response;
+    }
+    
     if (discoveredSourceIds.size === 0) {
       console.warn("[crawl:provider-routing]", {
         searchId: search._id,
@@ -717,10 +941,11 @@ export async function executeCrawlPipeline(
       });
     }
 
-    let savedJobs = await input.repository.getJobsByCrawlRun(crawlRun._id);
+    let savedJobs = currentSavedJobs;
     if (validationStrategy.mode === "deferred") {
       diagnostics.validationDeferred = savedJobs.length;
     } else if (savedJobs.length > 0) {
+      throwIfAborted(mergedSignal);
       await flushProgressUpdate(true);
       await updateRunProgress("validating");
       const validationStartedMs = Date.now();
@@ -732,7 +957,7 @@ export async function executeCrawlPipeline(
         savedJobs,
         validationStrategy,
         input.repository,
-        input.fetchImpl,
+        abortableFetchImpl,
         input.now,
       );
       diagnostics.validationDeferred = deferredCount;
@@ -756,6 +981,7 @@ export async function executeCrawlPipeline(
       await updateRunProgress("validating");
     }
 
+    throwIfAborted(mergedSignal);
     await flushProgressUpdate(true);
     await updateRunProgress("finalizing");
 
@@ -793,6 +1019,10 @@ export async function executeCrawlPipeline(
         input.now,
       ),
       diagnostics: finalizedRun.diagnostics,
+      delivery: {
+        mode: "full",
+        cursor: savedJobIds.size,
+      },
     });
     stageTimingsMs.responseAssembly = Date.now() - responseAssemblyStartedMs;
     syncPerformanceDiagnostics({
@@ -854,29 +1084,175 @@ export async function executeCrawlPipeline(
       totalMs: diagnostics.performance?.stageTimingsMs?.total ?? Date.now() - crawlStartedMs,
     });
 
+    clearTimeout(globalTimeoutHandle);
+    diagnostics.stoppedReason = "completed";
     return response;
   } catch (error) {
+    const aborted = isAbortError(error) || mergedSignal?.aborted === true;
+    const isTimeout = error instanceof Error && error.message.includes("global timeout");
     const message = error instanceof Error ? error.message : "Crawl failed unexpectedly.";
     const finishedAt = new Date().toISOString();
+    
+    // Clear the global timeout handle to prevent further execution
+    clearTimeout(globalTimeoutHandle);
+    
+    if (activeStagePromises.size > 0) {
+      await Promise.allSettled(Array.from(activeStagePromises));
+    }
+    await mutationQueue.catch(() => undefined);
+    syncPerformanceDiagnostics({
+      diagnostics,
+      stageTimingsMs,
+      providerDurationsMs,
+      crawlStartedMs,
+      firstVisibleResultAtMs,
+      progressUpdateCount,
+      persistenceBatchCount,
+    });
+
+    const sourceResults = Array.from(sourceResultsByProvider.values())
+      .sort((left, right) => left.provider.localeCompare(right.provider))
+      .map((sourceResult) => {
+      if (sourceResult.status !== "running") {
+        return sourceResult;
+      }
+
+      return crawlSourceResultSchema.parse({
+        ...sourceResult,
+        status: aborted ? "aborted" : "failed",
+        errorMessage: aborted ? message : sourceResult.errorMessage ?? message,
+        finishedAt,
+      });
+      });
+
+    for (const sourceResult of sourceResults) {
+      sourceResultsByProvider.set(sourceResult.provider, sourceResult);
+      await input.repository.updateCrawlSourceResult(sourceResult);
+    }
+
+    // Handle timeout gracefully: finalize with partial results as "completed"
+    if (isTimeout) {
+      diagnostics.stoppedReason = "timeout";
+      diagnostics.budgetExhausted = true;
+      console.warn("[crawl:global-timeout]", {
+        searchId: search._id,
+        savedCount: savedJobIds.size,
+        timeoutMs: globalTimeoutMs,
+      });
+      
+      const timeoutStatus: CrawlRunStatus = savedJobIds.size > 0 ? "completed" : "partial";
+      
+      await input.repository.finalizeCrawlRun(crawlRun._id, {
+        status: timeoutStatus,
+        stage: "finalizing",
+        totalFetchedJobs,
+        totalMatchedJobs,
+        dedupedJobs: savedJobIds.size,
+        diagnostics,
+        validationMode: validationStrategy.mode,
+        errorMessage: savedJobIds.size > 0 ? undefined : message,
+        providerSummary: buildProviderSummary(sourceResults),
+        finishedAt,
+      });
+      await input.repository.updateSearchLatestRun(
+        search._id,
+        crawlRun._id,
+        timeoutStatus,
+        finishedAt,
+      );
+      
+      const responseAssemblyStartedMs = Date.now();
+      const savedJobs = await input.repository.getJobsByCrawlRun(crawlRun._id);
+      const finalizedRun = (await input.repository.getCrawlRun(crawlRun._id)) as CrawlRun;
+      const response = crawlResponseSchema.parse({
+        search: {
+          ...search,
+          latestCrawlRunId: crawlRun._id,
+          lastStatus: timeoutStatus,
+          updatedAt: finishedAt,
+        },
+        crawlRun: finalizedRun,
+        sourceResults,
+        jobs: sortJobsWithDiagnostics(
+          savedJobs.map(applyResolvedExperienceLevel),
+          normalizedFilters.title,
+          input.now,
+        ),
+        diagnostics: finalizedRun.diagnostics,
+        delivery: {
+          mode: "full",
+          cursor: savedJobIds.size,
+        },
+      });
+      stageTimingsMs.responseAssembly = Date.now() - responseAssemblyStartedMs;
+      return response;
+    }
+
+    const recoveredStatus: CrawlRunStatus =
+      !aborted && savedJobIds.size > 0 ? "partial" : aborted ? "aborted" : "failed";
 
     await input.repository.finalizeCrawlRun(crawlRun._id, {
-      status: "failed",
+      status: recoveredStatus,
       stage: "finalizing",
-      totalFetchedJobs: 0,
-      totalMatchedJobs: 0,
-      dedupedJobs: 0,
-      diagnostics: createEmptyDiagnostics(),
+      totalFetchedJobs,
+      totalMatchedJobs,
+      dedupedJobs: savedJobIds.size,
+      diagnostics,
       validationMode: validationStrategy.mode,
       errorMessage: message,
+      providerSummary: buildProviderSummary(sourceResults),
       finishedAt,
     });
     await input.repository.updateSearchLatestRun(
       search._id,
       crawlRun._id,
-      "failed",
+      recoveredStatus,
       finishedAt,
     );
-    throw error;
+
+    if (recoveredStatus === "partial") {
+      const responseAssemblyStartedMs = Date.now();
+      const savedJobs = await input.repository.getJobsByCrawlRun(crawlRun._id);
+      const finalizedRun = (await input.repository.getCrawlRun(crawlRun._id)) as CrawlRun;
+      const response = crawlResponseSchema.parse({
+        search: {
+          ...search,
+          latestCrawlRunId: crawlRun._id,
+          lastStatus: recoveredStatus,
+          updatedAt: finishedAt,
+        },
+        crawlRun: finalizedRun,
+        sourceResults,
+        jobs: sortJobsWithDiagnostics(
+          savedJobs.map(applyResolvedExperienceLevel),
+          normalizedFilters.title,
+          input.now,
+        ),
+        diagnostics: finalizedRun.diagnostics,
+        delivery: {
+          mode: "full",
+          cursor: savedJobIds.size,
+        },
+      });
+      stageTimingsMs.responseAssembly = Date.now() - responseAssemblyStartedMs;
+      syncPerformanceDiagnostics({
+        diagnostics,
+        stageTimingsMs,
+        providerDurationsMs,
+        crawlStartedMs,
+        firstVisibleResultAtMs,
+        progressUpdateCount,
+        persistenceBatchCount,
+      });
+      console.warn("[crawl:recovered-partial-result]", {
+        searchId: search._id,
+        savedCount: savedJobIds.size,
+        error: message,
+      });
+      return response;
+    }
+
+    throw aborted ? toAbortError(error) : error;
   }
 }
 
@@ -1905,6 +2281,95 @@ function syncPerformanceDiagnostics(input: {
   };
 }
 
+function throwIfAborted(signal?: AbortSignal): asserts signal is AbortSignal | undefined {
+  if (!signal?.aborted) {
+    return;
+  }
+
+  throw toAbortError(signal.reason);
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function toAbortError(error: unknown) {
+  if (error instanceof CrawlAbortedError) {
+    return error;
+  }
+
+  if (error instanceof Error) {
+    const abortError = new CrawlAbortedError(error.message);
+    abortError.stack = error.stack;
+    return abortError;
+  }
+
+  return new CrawlAbortedError();
+}
+
+function createAbortableFetch(
+  fetchImpl: typeof fetch,
+  signal?: AbortSignal,
+): typeof fetch {
+  if (!signal) {
+    return fetchImpl;
+  }
+
+  return async (input, init) => {
+    throwIfAborted(signal);
+    const controller = new AbortController();
+    const cleanup = linkAbortSignals(controller, [signal, init?.signal]);
+
+    try {
+      return await fetchImpl(input, {
+        ...init,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (isAbortError(error) || signal.aborted || init?.signal?.aborted) {
+        throw toAbortError(error);
+      }
+
+      throw error;
+    } finally {
+      cleanup();
+    }
+  };
+}
+
+function linkAbortSignals(
+  controller: AbortController,
+  signals: Array<AbortSignal | null | undefined>,
+) {
+  const listeners: Array<{
+    signal: AbortSignal;
+    onAbort: () => void;
+  }> = [];
+
+  for (const signal of signals) {
+    if (!signal) {
+      continue;
+    }
+
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      break;
+    }
+
+    const onAbort = () => {
+      controller.abort(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    listeners.push({ signal, onAbort });
+  }
+
+  return () => {
+    listeners.forEach(({ signal, onAbort }) => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  };
+}
+
 async function runProviderWithTimeout<P>(
   task: Promise<P>,
   provider: CrawlSourceResult["provider"],
@@ -1932,6 +2397,18 @@ async function runProviderWithTimeout<P>(
 
 function isTimeoutError(error: unknown) {
   return error instanceof Error && error.message.includes("crawl budget");
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+
+  return {
+    promise,
+    resolve,
+  };
 }
 
 function buildProviderSummary(

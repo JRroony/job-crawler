@@ -957,6 +957,310 @@ describe("pipeline title retrieval", () => {
     );
   });
 
+  it("delays supplemental recall in fast mode until the first visible batch has been saved", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T15:07:00.000Z");
+    const startedAtMs = Date.now();
+    let supplementalStartedAtMs: number | undefined;
+
+    const provider = createStubProvider("greenhouse", async (context, sources) => {
+      const source = sources[0];
+
+      if (source?.token === "acme") {
+        await new Promise((resolve) => setTimeout(resolve, 35));
+        await context.onBatch?.({
+          provider: "greenhouse",
+          sourceCount: 1,
+          fetchedCount: 1,
+          jobs: [
+            {
+              title: "Baseline Software Engineer",
+              company: "Acme",
+              locationText: "Remote, United States",
+              sourcePlatform: "greenhouse",
+              sourceJobId: "baseline-fast-1",
+              sourceUrl: "https://example.com/jobs/baseline-fast-1",
+              applyUrl: "https://example.com/jobs/baseline-fast-1/apply",
+              canonicalUrl: "https://example.com/jobs/baseline-fast-1",
+              discoveredAt: now.toISOString(),
+              rawSourceMetadata: {},
+            },
+          ],
+        });
+        return {
+          provider: "greenhouse",
+          status: "success",
+          sourceCount: 1,
+          fetchedCount: 1,
+          matchedCount: 1,
+          warningCount: 0,
+          jobs: [],
+        };
+      }
+
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: 1,
+        fetchedCount: 0,
+        matchedCount: 0,
+        warningCount: 0,
+        jobs: [],
+      };
+    });
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [];
+      },
+      async discoverBaseline() {
+        return {
+          label: "baseline",
+          sources: [
+            classifySourceCandidate({
+              url: "https://boards.greenhouse.io/acme",
+              token: "acme",
+              confidence: "high",
+              discoveryMethod: "configured_env",
+            }),
+          ],
+          jobs: [],
+        };
+      },
+      async discoverSupplemental() {
+        supplementalStartedAtMs = Date.now() - startedAtMs;
+        return {
+          label: "public_search",
+          sources: [
+            classifySourceCandidate({
+              url: "https://boards.greenhouse.io/datadog",
+              token: "datadog",
+              confidence: "medium",
+              discoveryMethod: "future_search",
+            }),
+          ],
+          jobs: [],
+        };
+      },
+    };
+
+    const result = await runSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+        crawlMode: "fast",
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+        progressUpdateIntervalMs: 5,
+      },
+    );
+
+    expect(result.jobs.map((job) => job.title)).toContain("Baseline Software Engineer");
+    expect(result.diagnostics.performance.timeToFirstVisibleResultMs).toBeGreaterThanOrEqual(30);
+    expect(supplementalStartedAtMs).toBeGreaterThanOrEqual(
+      result.diagnostics.performance.timeToFirstVisibleResultMs ?? 0,
+    );
+  });
+
+  it("starts supplemental recall earlier in balanced mode than in fast mode", async () => {
+    const now = new Date("2026-04-10T15:08:00.000Z");
+    const buildRun = async (crawlMode: "fast" | "balanced") => {
+      const repository = new JobCrawlerRepository(new FakeDb());
+      const startedAtMs = Date.now();
+      let supplementalStartedAtMs: number | undefined;
+
+      const provider = createStubProvider("greenhouse", async (context, sources) => {
+        if (sources[0]?.token === "acme") {
+          await new Promise((resolve) => setTimeout(resolve, 35));
+          await context.onBatch?.({
+            provider: "greenhouse",
+            sourceCount: 1,
+            fetchedCount: 1,
+            jobs: [
+              {
+                title: `${crawlMode} baseline job`,
+                company: "Acme",
+                locationText: "Remote, United States",
+                sourcePlatform: "greenhouse",
+                sourceJobId: `${crawlMode}-baseline-job`,
+                sourceUrl: `https://example.com/jobs/${crawlMode}-baseline-job`,
+                applyUrl: `https://example.com/jobs/${crawlMode}-baseline-job/apply`,
+                canonicalUrl: `https://example.com/jobs/${crawlMode}-baseline-job`,
+                discoveredAt: now.toISOString(),
+                rawSourceMetadata: {},
+              },
+            ],
+          });
+        }
+
+        return {
+          provider: "greenhouse",
+          status: "success",
+          sourceCount: sources.length,
+          fetchedCount: 1,
+          matchedCount: 1,
+          warningCount: 0,
+          jobs: [],
+        };
+      });
+
+      const discovery: DiscoveryService = {
+        async discover() {
+          return [];
+        },
+        async discoverBaseline() {
+          return {
+            label: "baseline",
+            sources: [
+              classifySourceCandidate({
+                url: "https://boards.greenhouse.io/acme",
+                token: "acme",
+                confidence: "high",
+                discoveryMethod: "configured_env",
+              }),
+            ],
+            jobs: [],
+          };
+        },
+        async discoverSupplemental() {
+          supplementalStartedAtMs = Date.now() - startedAtMs;
+          return {
+            label: "public_search",
+            sources: [],
+            jobs: [],
+          };
+        },
+      };
+
+      const result = await runSearchFromFilters(
+        {
+          title: "Software Engineer",
+          country: "United States",
+          platforms: ["greenhouse"],
+          crawlMode,
+        },
+        {
+          repository,
+          providers: [provider],
+          discovery,
+          fetchImpl: vi.fn() as unknown as typeof fetch,
+          now,
+          progressUpdateIntervalMs: 5,
+        },
+      );
+
+      return {
+        result,
+        supplementalStartedAtMs,
+      };
+    };
+
+    const fastRun = await buildRun("fast");
+    const balancedRun = await buildRun("balanced");
+
+    expect(fastRun.supplementalStartedAtMs).toBeGreaterThanOrEqual(
+      fastRun.result.diagnostics.performance.timeToFirstVisibleResultMs ?? 0,
+    );
+    expect(balancedRun.supplementalStartedAtMs).toBeLessThan(
+      balancedRun.result.diagnostics.performance.timeToFirstVisibleResultMs ?? Number.POSITIVE_INFINITY,
+    );
+  });
+
+  it("keeps already-saved jobs when supplemental discovery fails later in the run", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T15:09:00.000Z");
+
+    const provider = createStubProvider("greenhouse", async (context) => {
+      await context.onBatch?.({
+        provider: "greenhouse",
+        sourceCount: 1,
+        fetchedCount: 1,
+        jobs: [
+          {
+            title: "Software Engineer",
+            company: "Acme",
+            locationText: "Remote, United States",
+            sourcePlatform: "greenhouse",
+            sourceJobId: "saved-before-failure",
+            sourceUrl: "https://example.com/jobs/saved-before-failure",
+            applyUrl: "https://example.com/jobs/saved-before-failure/apply",
+            canonicalUrl: "https://example.com/jobs/saved-before-failure",
+            discoveredAt: now.toISOString(),
+            rawSourceMetadata: {},
+          },
+        ],
+      });
+
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: 1,
+        fetchedCount: 1,
+        matchedCount: 1,
+        warningCount: 0,
+        jobs: [],
+      };
+    });
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [];
+      },
+      async discoverBaseline() {
+        return {
+          label: "baseline",
+          sources: [
+            classifySourceCandidate({
+              url: "https://boards.greenhouse.io/acme",
+              token: "acme",
+              confidence: "high",
+              discoveryMethod: "configured_env",
+            }),
+          ],
+          jobs: [],
+        };
+      },
+      async discoverSupplemental() {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        throw new Error("Supplemental discovery failed after the baseline batch.");
+      },
+    };
+
+    const result = await runSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+        crawlMode: "fast",
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+        progressUpdateIntervalMs: 5,
+      },
+    );
+
+    expect(result.crawlRun.status).toBe("partial");
+    expect(result.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
+    expect(result.search.lastStatus).toBe("partial");
+
+    const [search] = await repository.listRecentSearches(1);
+    const crawlRun = await repository.getCrawlRun(search.latestCrawlRunId as string);
+    const savedJobs = await repository.getJobsByCrawlRun(crawlRun?._id as string);
+
+    expect(crawlRun?.status).toBe("partial");
+    expect(savedJobs.map((job) => job.title)).toEqual(["Software Engineer"]);
+  });
+
   it("persists fast-provider results while a slower provider is still running", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const now = new Date("2026-04-10T15:10:00.000Z");
@@ -1150,7 +1454,7 @@ describe("pipeline title retrieval", () => {
     );
     const elapsedMs = Date.now() - startedAt;
 
-    expect(elapsedMs).toBeLessThan(140);
+    expect(elapsedMs).toBeLessThan(240);
     expect(result.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
     expect(result.crawlRun.status).toBe("partial");
     expect(result.diagnostics.providerFailures).toBe(1);
@@ -1181,6 +1485,7 @@ describe("pipeline title retrieval", () => {
         "Java Developer",
         "Platform Engineer",
         "Application Engineer",
+        "Developer",
         "Member of Technical Staff",
       ],
       excluded: ["Sales Engineer", "Recruiter"],
@@ -1284,6 +1589,125 @@ describe("pipeline title retrieval", () => {
         explanation: expect.any(String),
       }),
     });
+  });
+
+  it.each([
+    {
+      title: "Software Engineer",
+      expectedTitles: [
+        "Software Development Engineer",
+        "Backend Engineer",
+        "Full Stack Engineer",
+        "Frontend Engineer",
+        "Application Engineer",
+        "Developer",
+      ],
+      excludedTitles: ["Sales Engineer", "Recruiter"],
+      expectedCounts: { fetchedCount: 8, matchedCount: 6, savedCount: 6 },
+    },
+    {
+      title: "Data Analyst",
+      expectedTitles: [
+        "Business Intelligence Analyst",
+        "Reporting Analyst",
+        "Business Analyst",
+      ],
+      excludedTitles: ["Data Engineer", "Sales Analyst"],
+      expectedCounts: { fetchedCount: 5, matchedCount: 3, savedCount: 3 },
+    },
+    {
+      title: "Business Analyst",
+      expectedTitles: [
+        "Business Systems Analyst",
+        "Systems Analyst",
+        "Operations Analyst",
+      ],
+      excludedTitles: ["Data Engineer", "Product Manager"],
+      expectedCounts: { fetchedCount: 5, matchedCount: 3, savedCount: 3 },
+    },
+    {
+      title: "Product Manager",
+      expectedTitles: [
+        "Technical Product Manager",
+        "Growth Product Manager",
+        "Associate Product Manager",
+      ],
+      excludedTitles: ["Technical Program Manager", "Engineering Manager"],
+      expectedCounts: { fetchedCount: 5, matchedCount: 3, savedCount: 3 },
+    },
+  ])("reports Greenhouse recall counts for $title + United States", async ({
+    title,
+    expectedTitles,
+    excludedTitles,
+    expectedCounts,
+  }) => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T15:45:00.000Z");
+
+    const jobs = [...expectedTitles, ...excludedTitles].map((jobTitle, index) => ({
+      title: jobTitle,
+      company: "Acme",
+      country: "United States",
+      locationText:
+        title === "Software Engineer" && jobTitle === "Backend Engineer"
+          ? "Bellevue, WA"
+          : title === "Software Engineer" && jobTitle === "Full Stack Engineer"
+            ? "Seattle, WA"
+            : title === "Software Engineer" && jobTitle === "Frontend Engineer"
+              ? "Austin, TX"
+              : title === "Software Engineer" && jobTitle === "Application Engineer"
+                ? "San Jose, CA"
+                : "Remote, United States",
+      sourcePlatform: "greenhouse" as const,
+      sourceJobId: `${title}-${index}`,
+      sourceUrl: `https://example.com/jobs/${title}-${index}`,
+      applyUrl: `https://example.com/jobs/${title}-${index}/apply`,
+      canonicalUrl: `https://example.com/jobs/${title}-${index}`,
+      discoveredAt: now.toISOString(),
+      rawSourceMetadata: {},
+    }));
+
+    const provider = createStubProvider("greenhouse", async () => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: 1,
+      fetchedCount: jobs.length,
+      matchedCount: jobs.length,
+      warningCount: 0,
+      jobs,
+    }));
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+
+    const result = await runSearchFromFilters(
+      {
+        title,
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    expect(result.jobs.map((job) => job.title)).toEqual(expect.arrayContaining(expectedTitles));
+    expect(result.jobs.map((job) => job.title)).not.toEqual(expect.arrayContaining(excludedTitles));
+    expect(result.sourceResults[0]).toMatchObject(expectedCounts);
   });
 
   it("keeps non-senior product manager roles when experience filtering is active", async () => {

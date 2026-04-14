@@ -10,6 +10,8 @@ import {
   type CrawlLinkValidationMode,
 } from "@/lib/server/crawler/pipeline";
 import {
+  abortOwnerSearchRun,
+  abortSearchRun,
   isSearchRunPending,
   queueSearchRun,
 } from "@/lib/server/crawler/background-runs";
@@ -31,6 +33,7 @@ import type { DiscoveryService } from "@/lib/server/discovery/types";
 import { createDefaultProviders } from "@/lib/server/providers";
 import type { CrawlProvider } from "@/lib/server/providers/types";
 import {
+  crawlDeltaResponseSchema,
   crawlResponseSchema,
   searchFiltersSchema,
   type CrawlRun,
@@ -39,6 +42,12 @@ import {
 } from "@/lib/types";
 
 export class ResourceNotFoundError extends Error {}
+export class CrawlAbortedError extends Error {
+  constructor(message = "The crawl was aborted.") {
+    super(message);
+    this.name = "CrawlAbortedError";
+  }
+}
 export class InputValidationError extends Error {
   constructor(private readonly error: ZodError) {
     super("Invalid search filters.");
@@ -65,6 +74,8 @@ type Runtime = {
   inlineValidationTopN?: number;
   providerTimeoutMs?: number;
   progressUpdateIntervalMs?: number;
+  requestOwnerKey?: string;
+  signal?: AbortSignal;
 };
 
 export async function runSearchFromFilters(
@@ -102,6 +113,7 @@ export async function runSearchFromFilters(
     inlineValidationTopN: runtime.inlineValidationTopN,
     providerTimeoutMs: runtime.providerTimeoutMs,
     progressUpdateIntervalMs: runtime.progressUpdateIntervalMs,
+    signal: runtime.signal,
   });
 }
 
@@ -133,6 +145,7 @@ export async function rerunSearch(searchId: string, runtime: Runtime = {}) {
     inlineValidationTopN: runtime.inlineValidationTopN,
     providerTimeoutMs: runtime.providerTimeoutMs,
     progressUpdateIntervalMs: runtime.progressUpdateIntervalMs,
+    signal: runtime.signal,
   });
 }
 
@@ -150,6 +163,12 @@ export async function startSearchFromFilters(
   const filters = parsedFilters.data;
   console.info("[crawl:normalized-filters]", filters);
   const repository = await resolveRepository(runtime.repository);
+  const requestOwnerKey = normalizeRequestOwnerKey(runtime.requestOwnerKey);
+  if (requestOwnerKey) {
+    void abortOwnerSearchRun(requestOwnerKey, {
+      reason: "The crawl was superseded by a newer search request.",
+    });
+  }
   const now = runtime.now ?? new Date();
   const search = await repository.createSearch(filters, now.toISOString());
   const crawlRun = await repository.createCrawlRun(search._id, now.toISOString(), {
@@ -159,7 +178,7 @@ export async function startSearchFromFilters(
   await repository.updateSearchLatestRun(search._id, crawlRun._id, "running", now.toISOString());
 
   const queued =
-    queueSearchRun(search._id, async () => {
+    queueSearchRun(search._id, async (signal) => {
       await executeCrawl({
         search,
         crawlRun,
@@ -173,8 +192,21 @@ export async function startSearchFromFilters(
         inlineValidationTopN: runtime.inlineValidationTopN,
         providerTimeoutMs: runtime.providerTimeoutMs,
         progressUpdateIntervalMs: runtime.progressUpdateIntervalMs,
+        signal,
       });
+    }, {
+      ownerKey: requestOwnerKey,
     }) || isSearchRunPending(search._id);
+
+  // If the client disconnects before the background crawl finishes, abort it
+  if (runtime.signal) {
+    const onAbort = () => {
+      void abortSearchRun(search._id, {
+        reason: "The client disconnected before the crawl completed.",
+      });
+    };
+    runtime.signal.addEventListener("abort", onAbort, { once: true });
+  }
 
   return {
     queued,
@@ -194,6 +226,19 @@ export async function startSearchRerun(searchId: string, runtime: Runtime = {}) 
     throw new ResourceNotFoundError(`Search ${searchId} was not found.`);
   }
 
+  const requestOwnerKey = normalizeRequestOwnerKey(runtime.requestOwnerKey);
+  if (requestOwnerKey) {
+    await abortOwnerSearchRun(requestOwnerKey, {
+      reason: "The crawl was superseded by a newer search request.",
+      awaitCompletion: true,
+    });
+  } else {
+    await abortSearchRun(search._id, {
+      reason: "The crawl was superseded by a rerun request.",
+      awaitCompletion: true,
+    });
+  }
+
   const now = runtime.now ?? new Date();
   const crawlRun = await repository.createCrawlRun(search._id, now.toISOString(), {
     validationMode: runtime.linkValidationMode ?? defaultCrawlLinkValidationMode,
@@ -201,7 +246,7 @@ export async function startSearchRerun(searchId: string, runtime: Runtime = {}) 
   });
   await repository.updateSearchLatestRun(search._id, crawlRun._id, "running", now.toISOString());
   const queued =
-    queueSearchRun(search._id, async () => {
+    queueSearchRun(search._id, async (signal) => {
       await executeCrawl({
         search,
         crawlRun,
@@ -215,7 +260,10 @@ export async function startSearchRerun(searchId: string, runtime: Runtime = {}) 
         inlineValidationTopN: runtime.inlineValidationTopN,
         providerTimeoutMs: runtime.providerTimeoutMs,
         progressUpdateIntervalMs: runtime.progressUpdateIntervalMs,
+        signal,
       });
+    }, {
+      ownerKey: requestOwnerKey,
     }) || isSearchRunPending(search._id);
 
   return {
@@ -230,40 +278,101 @@ export async function startSearchRerun(searchId: string, runtime: Runtime = {}) 
 
 export async function getSearchDetails(searchId: string, runtime: Runtime = {}) {
   const repository = await resolveRepository(runtime.repository);
+  const resolved = await loadSearchRun(searchId, repository);
+
+  if (!resolved.crawlRun) {
+    return buildSyntheticCrawlResponse(
+      resolved.search,
+      isSearchRunPending(searchId) ? "running" : undefined,
+    );
+  }
+
+  let jobs = await repository.getJobsByCrawlRun(resolved.crawlRun._id);
+  if (resolved.crawlRun.status !== "running") {
+    jobs = await refreshStaleJobs(jobs, repository, runtime.fetchImpl ?? fetch, runtime.now ?? new Date());
+  }
+  const sourceResults = await repository.getCrawlSourceResults(resolved.crawlRun._id);
+  const deliveryCursor = await repository.getCrawlRunDeliveryCursor(resolved.crawlRun._id);
+
+  return crawlResponseSchema.parse({
+    search: resolved.search,
+    crawlRun: resolved.crawlRun,
+    sourceResults,
+    jobs: sortJobsWithDiagnostics(
+      jobs.map(applyResolvedExperienceLevel),
+      resolved.search.filters.title,
+      runtime.now ?? new Date(),
+    ),
+    diagnostics: resolved.crawlRun.diagnostics,
+    delivery: {
+      mode: "full",
+      cursor: deliveryCursor,
+    },
+  });
+}
+
+export async function getSearchJobDeltas(
+  searchId: string,
+  afterCursor: number,
+  runtime: Runtime = {},
+) {
+  const repository = await resolveRepository(runtime.repository);
+  const resolved = await loadSearchRun(searchId, repository);
+
+  if (!resolved.crawlRun) {
+    return crawlDeltaResponseSchema.parse({
+      ...buildSyntheticCrawlResponse(
+        resolved.search,
+        isSearchRunPending(searchId) ? "running" : undefined,
+      ),
+      delivery: {
+        mode: "delta",
+        previousCursor: afterCursor,
+        cursor: 0,
+      },
+    });
+  }
+
+  const [sourceResults, jobDelta] = await Promise.all([
+    repository.getCrawlSourceResults(resolved.crawlRun._id),
+    repository.getJobsByCrawlRunAfterSequence(resolved.crawlRun._id, afterCursor),
+  ]);
+
+  return crawlDeltaResponseSchema.parse({
+    search: resolved.search,
+    crawlRun: resolved.crawlRun,
+    sourceResults,
+    jobs: sortJobsWithDiagnostics(
+      jobDelta.jobs.map(applyResolvedExperienceLevel),
+      resolved.search.filters.title,
+      runtime.now ?? new Date(),
+    ),
+    diagnostics: resolved.crawlRun.diagnostics,
+    delivery: {
+      mode: "delta",
+      previousCursor: afterCursor,
+      cursor: jobDelta.cursor,
+    },
+  });
+}
+
+export async function abortSearch(searchId: string, runtime: Runtime = {}) {
+  const repository = await resolveRepository(runtime.repository);
   const search = await repository.getSearch(searchId);
 
   if (!search) {
     throw new ResourceNotFoundError(`Search ${searchId} was not found.`);
   }
 
-  if (!search.latestCrawlRunId) {
-    return buildSyntheticCrawlResponse(search, isSearchRunPending(searchId) ? "running" : undefined);
-  }
-
-  const crawlRun = await repository.getCrawlRun(search.latestCrawlRunId);
-  if (!crawlRun) {
-    throw new ResourceNotFoundError(
-      `Latest crawl run ${search.latestCrawlRunId} for search ${searchId} was not found.`,
-    );
-  }
-
-  let jobs = await repository.getJobsByCrawlRun(crawlRun._id);
-  if (crawlRun.status !== "running") {
-    jobs = await refreshStaleJobs(jobs, repository, runtime.fetchImpl ?? fetch, runtime.now ?? new Date());
-  }
-  const sourceResults = await repository.getCrawlSourceResults(crawlRun._id);
-
-  return crawlResponseSchema.parse({
-    search,
-    crawlRun,
-    sourceResults,
-    jobs: sortJobsWithDiagnostics(
-      jobs.map(applyResolvedExperienceLevel),
-      search.filters.title,
-      runtime.now ?? new Date(),
-    ),
-    diagnostics: crawlRun.diagnostics,
+  const aborted = await abortSearchRun(searchId, {
+    reason: "The crawl was stopped by the user.",
+    awaitCompletion: true,
   });
+
+  return {
+    aborted,
+    result: await getSearchDetails(searchId, runtime),
+  };
 }
 
 export async function revalidateJob(jobId: string, runtime: Runtime = {}) {
@@ -328,6 +437,8 @@ type ExecuteCrawlInput = {
   inlineValidationTopN?: Parameters<typeof executeCrawlPipeline>[0]["inlineValidationTopN"];
   providerTimeoutMs?: Parameters<typeof executeCrawlPipeline>[0]["providerTimeoutMs"];
   progressUpdateIntervalMs?: Parameters<typeof executeCrawlPipeline>[0]["progressUpdateIntervalMs"];
+  requestOwnerKey?: string;
+  signal?: AbortSignal;
 };
 
 async function executeCrawl(input: ExecuteCrawlInput) {
@@ -338,9 +449,39 @@ async function resolveRepository(repository?: JobCrawlerRepository) {
   return repository ?? getRepository();
 }
 
+async function loadSearchRun(
+  searchId: string,
+  repository: JobCrawlerRepository,
+) {
+  const search = await repository.getSearch(searchId);
+
+  if (!search) {
+    throw new ResourceNotFoundError(`Search ${searchId} was not found.`);
+  }
+
+  if (!search.latestCrawlRunId) {
+    return {
+      search,
+      crawlRun: null,
+    };
+  }
+
+  const crawlRun = await repository.getCrawlRun(search.latestCrawlRunId);
+  if (!crawlRun) {
+    throw new ResourceNotFoundError(
+      `Latest crawl run ${search.latestCrawlRunId} for search ${searchId} was not found.`,
+    );
+  }
+
+  return {
+    search,
+    crawlRun,
+  };
+}
+
 function buildSyntheticCrawlResponse(
   search: SearchDocument,
-  status?: "running",
+  status?: "running" | "aborted",
 ) {
   const crawlStatus = status ?? search.lastStatus ?? "completed";
   const diagnostics = {
@@ -381,5 +522,14 @@ function buildSyntheticCrawlResponse(
     sourceResults: [],
     jobs: [],
     diagnostics,
+    delivery: {
+      mode: "full",
+      cursor: 0,
+    },
   });
+}
+
+function normalizeRequestOwnerKey(value?: string) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }

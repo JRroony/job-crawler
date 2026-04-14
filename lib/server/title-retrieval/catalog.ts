@@ -552,6 +552,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "data developer",
       "software engineer data engineering",
     ],
+    tokenSynonyms: [
+      ["data", "big data", "data warehouse", "data pipeline"],
+      ["engineer", "developer"],
+    ],
     adjacentConceptIds: ["analytics_engineer", "data_platform_engineer"],
     broadDiscoveryQueries: [
       "data engineer",
@@ -590,6 +594,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "dbt engineer",
       "analytics developer",
     ],
+    tokenSynonyms: [
+      ["analytics", "business intelligence", "bi"],
+      ["engineer", "developer"],
+    ],
     adjacentConceptIds: ["data_engineer", "data_platform_engineer"],
     broadDiscoveryQueries: [
       "analytics engineer",
@@ -615,6 +623,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "data platform developer",
       "software engineer data platform",
       "platform engineer data",
+    ],
+    tokenSynonyms: [
+      ["data platform", "data infrastructure", "data systems"],
+      ["engineer", "developer"],
     ],
     adjacentConceptIds: ["data_engineer", "analytics_engineer"],
     broadDiscoveryQueries: [
@@ -794,7 +806,11 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
     id: "program_manager",
     family: "program_management",
     canonicalTitle: "program manager",
-    aliases: ["program lead"],
+    aliases: ["program lead", "program management"],
+    tokenSynonyms: [
+      ["program", "project"],
+      ["manager", "lead"],
+    ],
     adjacentConceptIds: [
       "technical_program_manager",
       "delivery_manager",
@@ -872,6 +888,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "sourcer",
       "talent sourcer",
     ],
+    tokenSynonyms: [
+      ["recruiter", "talent acquisition", "sourcer"],
+      ["partner", "specialist"],
+    ],
     adjacentConceptIds: ["technical_recruiter"],
     broadDiscoveryQueries: [
       "recruiter",
@@ -886,6 +906,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
     family: "recruiting",
     canonicalTitle: "technical recruiter",
     aliases: ["engineering recruiter", "tech recruiter"],
+    tokenSynonyms: [
+      ["technical", "engineering", "tech"],
+      ["recruiter", "sourcer"],
+    ],
     adjacentConceptIds: ["recruiter"],
     broadDiscoveryQueries: [
       "technical recruiter",
@@ -906,6 +930,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "developer documentation writer",
       "docs writer",
     ],
+    tokenSynonyms: [
+      ["technical", "developer", "api", "documentation"],
+      ["writer", "specialist"],
+    ],
     broadDiscoveryQueries: [
       "technical writer",
       "documentation writer",
@@ -923,6 +951,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "qa analyst",
       "test automation engineer",
     ],
+    tokenSynonyms: [
+      ["qa", "quality", "quality assurance", "test"],
+      ["engineer", "analyst"],
+    ],
     adjacentConceptIds: ["test_engineer", "software_engineer_in_test"],
     broadDiscoveryQueries: [
       "qa engineer",
@@ -938,6 +970,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
     family: "quality_assurance",
     canonicalTitle: "test engineer",
     aliases: ["quality assurance tester", "validation engineer", "software tester"],
+    tokenSynonyms: [
+      ["test", "testing", "validation", "quality"],
+      ["engineer", "tester"],
+    ],
     adjacentConceptIds: ["qa_engineer", "software_engineer_in_test"],
     broadDiscoveryQueries: [
       "test engineer",
@@ -956,6 +992,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "software development engineer in test",
     ],
     abbreviations: ["sdet"],
+    tokenSynonyms: [
+      ["software engineer in test", "software developer in test", "sdet"],
+      ["engineer", "developer"],
+    ],
     adjacentConceptIds: ["qa_engineer", "test_engineer"],
     broadDiscoveryQueries: [
       "software engineer in test",
@@ -975,6 +1015,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "application support engineer",
       "support specialist",
     ],
+    tokenSynonyms: [
+      ["support", "technical support", "customer support", "application support"],
+      ["engineer", "specialist"],
+    ],
     broadDiscoveryQueries: [
       "support engineer",
       "technical support engineer",
@@ -992,6 +1036,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "presales engineer",
       "solutions consultant",
     ],
+    tokenSynonyms: [
+      ["sales", "solutions", "pre sales"],
+      ["engineer", "consultant"],
+    ],
     broadDiscoveryQueries: [
       "sales engineer",
       "solutions engineer",
@@ -1007,6 +1055,10 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
       "business operations manager",
       "ops manager",
       "operations coordinator",
+    ],
+    tokenSynonyms: [
+      ["operations", "business operations", "ops"],
+      ["manager", "coordinator"],
     ],
     adjacentConceptIds: ["operations_analyst"],
     broadDiscoveryQueries: [

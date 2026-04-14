@@ -58,6 +58,7 @@ export type ProviderExecutionContext = {
   fetchImpl: FetchLike;
   now: Date;
   filters: SearchFilters;
+  signal?: AbortSignal;
   onBatch?: (batch: ProviderBatchProgress) => Promise<void> | void;
 };
 

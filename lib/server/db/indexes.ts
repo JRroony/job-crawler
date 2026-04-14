@@ -20,6 +20,7 @@ export const collectionNames = {
   jobs: "jobs",
   crawlRuns: "crawlRuns",
   crawlSourceResults: "crawlSourceResults",
+  crawlRunJobEvents: "crawlRunJobEvents",
   linkValidations: "linkValidations",
 } as const;
 
@@ -106,6 +107,18 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     {
       key: { searchId: 1, finishedAt: -1 },
       name: "crawlSourceResults_searchId_finishedAt_desc",
+    },
+  ]);
+
+  await db.collection(collectionNames.crawlRunJobEvents).createIndexes([
+    {
+      key: { crawlRunId: 1, sequence: 1 },
+      name: "crawlRunJobEvents_run_sequence",
+      unique: true,
+    },
+    {
+      key: { crawlRunId: 1, jobId: 1 },
+      name: "crawlRunJobEvents_run_job",
     },
   ]);
 

@@ -11,6 +11,13 @@ describe("Greenhouse provider preselection", () => {
         JSON.stringify({
           jobs: [
             {
+              id: "software-development-engineer",
+              title: "Software Development Engineer",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/software-development-engineer",
+              company_name: "Acme",
+              location: { name: "Remote, United States" },
+            },
+            {
               id: "backend-developer",
               title: "Backend Developer",
               absolute_url: "https://boards.greenhouse.io/acme/jobs/backend-developer",
@@ -32,9 +39,23 @@ describe("Greenhouse provider preselection", () => {
               location: { name: "Remote, United States" },
             },
             {
+              id: "application-engineer",
+              title: "Application Engineer",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/application-engineer",
+              company_name: "Acme",
+              location: { name: "Remote, United States" },
+            },
+            {
               id: "application-developer",
               title: "Application Developer",
               absolute_url: "https://boards.greenhouse.io/acme/jobs/application-developer",
+              company_name: "Acme",
+              location: { name: "Remote, United States" },
+            },
+            {
+              id: "developer",
+              title: "Developer",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/developer",
               company_name: "Acme",
               location: { name: "Remote, United States" },
             },
@@ -92,14 +113,17 @@ describe("Greenhouse provider preselection", () => {
     expect(result).toMatchObject({
       provider: "greenhouse",
       status: "success",
-      fetchedCount: 7,
-      matchedCount: 5,
+      fetchedCount: 10,
+      matchedCount: 8,
     });
     expect(result.jobs.map((job) => job.title)).toEqual([
+      "Software Development Engineer",
       "Backend Developer",
       "Frontend Developer",
       "Full Stack Developer",
+      "Application Engineer",
       "Application Developer",
+      "Developer",
       "Platform Developer",
     ]);
   });

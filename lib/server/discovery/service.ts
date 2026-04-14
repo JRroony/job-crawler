@@ -122,18 +122,8 @@ export async function discoverBaselineSourcesDetailed(
     discoverCatalogSources(input.filters.platforms),
     selectedPlatforms,
   );
-  const companyPageExpandedSources = dedupeDiscoveredSources(
-    await expandCompanyPageSources(
-      dedupeDiscoveredSources([...unfilteredConfiguredSources, ...curatedSources]),
-      input.fetchImpl,
-    ),
-  );
   const sources = filterDiscoveredSources(
-    dedupeDiscoveredSources([
-      ...configuredSources,
-      ...curatedSources,
-      ...companyPageExpandedSources,
-    ]),
+    dedupeDiscoveredSources([...configuredSources, ...curatedSources]),
     selectedPlatforms,
   );
 
@@ -161,10 +151,18 @@ export async function discoverSupplementalSourcesDetailed(
     discoverCatalogSources(input.filters.platforms),
     selectedPlatforms,
   );
+  const baselineSources = filterDiscoveredSources(
+    dedupeDiscoveredSources(context.baselineSources),
+    selectedPlatforms,
+  );
+  const expansionCandidates = dedupeDiscoveredSources([
+    ...unfilteredConfiguredSources,
+    ...curatedSources,
+  ]);
   const companyPageExpansionStartedMs = Date.now();
   const companyPageExpandedSources = dedupeDiscoveredSources(
     await expandCompanyPageSources(
-      dedupeDiscoveredSources([...unfilteredConfiguredSources, ...curatedSources]),
+      expansionCandidates,
       input.fetchImpl,
     ),
   );
@@ -205,21 +203,17 @@ export async function discoverSupplementalSourcesDetailed(
     : 0;
   const publicSources = publicSearchResult.sources;
   const publicJobs = publicSearchResult.jobs;
-  const baselineSources = dedupeDiscoveredSources(context.baselineSources);
   const discoveredBeforeFiltering = dedupeDiscoveredSources([
     ...baselineSources,
+    ...companyPageExpandedSources,
     ...publicSources,
   ]);
   const discoveredSources = filterDiscoveredSources(
     discoveredBeforeFiltering,
     selectedPlatforms,
   );
-  const filteredBaselineSources = filterDiscoveredSources(
-    baselineSources,
-    selectedPlatforms,
-  );
   const publicSourcesOnly = discoveredSources.filter(
-    (source) => !filteredBaselineSources.some((baseline) => baseline.id === source.id),
+    (source) => !baselineSources.some((baseline) => baseline.id === source.id),
   );
 
   logDiscoveryTrace(input.filters, {
@@ -274,7 +268,7 @@ export async function discoverSupplementalSourcesDetailed(
   };
 }
 
-function resolvePublicSearchExecutionOptions(
+export function resolvePublicSearchExecutionOptions(
   crawlMode: CrawlMode | undefined,
   env: DiscoveryEnvSnapshot,
   platforms?: readonly string[],
@@ -298,38 +292,32 @@ function resolvePublicSearchExecutionOptions(
   }
 
   if (crawlMode === "balanced") {
-    if (greenhouseFirstOnly) {
-      return {
-        ...base,
-        maxQueries: Math.min(base.maxQueries, 48),
-        maxLocationClauses: Math.min(base.maxLocationClauses, 16),
-        maxDirectJobs: Math.min(base.maxDirectJobs, 12),
-        maxRoleQueries: 16,
-      };
-    }
-
     return {
       ...base,
-      maxQueries: Math.min(base.maxQueries, 36),
-      maxLocationClauses: Math.min(base.maxLocationClauses, 12),
-      maxDirectJobs: Math.min(base.maxDirectJobs, 16),
+      maxQueries: Math.min(base.maxQueries, 24),
+      maxSources: Math.min(base.maxSources, 50),
+      maxLocationClauses: Math.min(base.maxLocationClauses, 8),
+      maxDirectJobs: Math.min(base.maxDirectJobs, 12),
       maxRoleQueries: 12,
     };
   }
 
+  // "fast" mode (default) — aggressive caps to finish in ~15-30 seconds
   if (greenhouseFirstOnly) {
     return {
       ...base,
-      maxQueries: Math.min(base.maxQueries, 24),
-      maxLocationClauses: Math.min(base.maxLocationClauses, 10),
+      maxQueries: Math.min(base.maxQueries, 12),
+      maxSources: Math.min(base.maxSources, 30),
+      maxLocationClauses: Math.min(base.maxLocationClauses, 4),
       maxDirectJobs: Math.min(base.maxDirectJobs, 6),
-      maxRoleQueries: 12,
+      maxRoleQueries: 8,
     };
   }
 
   return {
     ...base,
     maxQueries: Math.min(base.maxQueries, 12),
+    maxSources: Math.min(base.maxSources, 30),
     maxLocationClauses: Math.min(base.maxLocationClauses, 4),
     maxDirectJobs: Math.min(base.maxDirectJobs, 8),
     maxRoleQueries: 8,

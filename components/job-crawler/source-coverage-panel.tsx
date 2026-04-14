@@ -26,6 +26,7 @@ export function SourceCoveragePanel(props: SourceCoveragePanelProps) {
       success: 0,
       partial: 0,
       failed: 0,
+      aborted: 0,
       unsupported: 0,
     },
   );
@@ -52,6 +53,9 @@ export function SourceCoveragePanel(props: SourceCoveragePanelProps) {
         <StatusSummaryPill label="Healthy" value={summary.success} tone="success" />
         <StatusSummaryPill label="Degraded" value={summary.partial} tone="partial" />
         <StatusSummaryPill label="Failed" value={summary.failed} tone="failed" />
+        {summary.aborted > 0 ? (
+          <StatusSummaryPill label="Stopped" value={summary.aborted} tone="failed" />
+        ) : null}
         {summary.unsupported > 0 ? (
           <StatusSummaryPill label="Limited" value={summary.unsupported} tone="unsupported" />
         ) : null}
@@ -173,13 +177,17 @@ function statusRank(status: SourceCoveragePanelProps["sourceResults"][number]["s
     return 1;
   }
 
-  if (status === "partial") {
+  if (status === "aborted") {
     return 2;
   }
 
-  if (status === "unsupported") {
+  if (status === "partial") {
     return 3;
   }
 
-  return 4;
+  if (status === "unsupported") {
+    return 4;
+  }
+
+  return 5;
 }
