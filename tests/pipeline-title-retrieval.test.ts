@@ -854,6 +854,109 @@ describe("pipeline title retrieval", () => {
     await runPromise;
   });
 
+  it("persists supplemental Greenhouse results without waiting for a slower baseline Greenhouse batch", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T15:05:00.000Z");
+
+    const provider = createStubProvider("greenhouse", async (_context, sources) => {
+      const source = sources[0];
+      if (source?.token === "acme") {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: sources.length,
+        fetchedCount: sources.length,
+        matchedCount: sources.length,
+        warningCount: 0,
+        jobs: sources.map((currentSource) => ({
+          title:
+            currentSource.token === "datadog"
+              ? "Supplemental Software Engineer"
+              : "Baseline Software Engineer",
+          company: currentSource.companyHint ?? "Acme",
+          locationText: "Seattle, WA",
+          sourcePlatform: "greenhouse" as const,
+          sourceJobId: `${currentSource.token}-job`,
+          sourceUrl: `https://example.com/jobs/${currentSource.token}-job`,
+          applyUrl: `https://example.com/jobs/${currentSource.token}-job/apply`,
+          canonicalUrl: `https://example.com/jobs/${currentSource.token}-job`,
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        })),
+      };
+    });
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [];
+      },
+      async discoverBaseline() {
+        return {
+          label: "baseline",
+          sources: [
+            classifySourceCandidate({
+              url: "https://boards.greenhouse.io/acme",
+              token: "acme",
+              confidence: "high",
+              discoveryMethod: "configured_env",
+            }),
+          ],
+          jobs: [],
+        };
+      },
+      async discoverSupplemental() {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return {
+          label: "public_search",
+          sources: [
+            classifySourceCandidate({
+              url: "https://boards.greenhouse.io/datadog",
+              token: "datadog",
+              confidence: "medium",
+              discoveryMethod: "future_search",
+            }),
+          ],
+          jobs: [],
+        };
+      },
+    };
+
+    const runPromise = runSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+        progressUpdateIntervalMs: 5,
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    const [search] = await repository.listRecentSearches(1);
+    const crawlRun = await repository.getCrawlRun(search.latestCrawlRunId as string);
+    const midJobs = await repository.getJobsByCrawlRun(crawlRun?._id as string);
+
+    expect(midJobs.map((job) => job.title)).toContain("Supplemental Software Engineer");
+
+    const result = await runPromise;
+
+    expect(result.jobs.map((job) => job.title)).toEqual(
+      expect.arrayContaining([
+        "Baseline Software Engineer",
+        "Supplemental Software Engineer",
+      ]),
+    );
+  });
+
   it("persists fast-provider results while a slower provider is still running", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const now = new Date("2026-04-10T15:10:00.000Z");

@@ -18,6 +18,10 @@ describe("location resolution", () => {
       expected: { city: "Seattle", state: "Washington" },
     },
     {
+      locationText: "San Jose, CA",
+      expected: { city: "San Jose", state: "California" },
+    },
+    {
       locationText: "New York, NY",
       expected: { city: "New York", state: "New York" },
     },

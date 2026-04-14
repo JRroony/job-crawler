@@ -1305,7 +1305,7 @@ describe("source discovery", () => {
     );
   });
 
-  it("keeps fast mode materially lighter by skipping public ATS search when registry coverage already exists", async () => {
+  it("keeps Greenhouse fast mode active even when registry coverage already exists", async () => {
     const fastFetchImpl = vi.fn(async () => {
       return new Response("<html></html>", {
         status: 200,
@@ -1366,14 +1366,22 @@ describe("source discovery", () => {
       },
     });
 
-    expect(fastFetchImpl).not.toHaveBeenCalled();
-    expect(fastResult.diagnostics.publicSearchSkippedReason).toContain("Fast mode skipped public ATS search");
-    expect(fastResult.diagnostics.publicSearch).toBeUndefined();
+    expect(fastFetchImpl).toHaveBeenCalled();
+    expect(fastResult.diagnostics.publicSearchSkippedReason).toBeUndefined();
+    expect(fastResult.diagnostics.publicSearch).toMatchObject({
+      executedQueries: expect.any(Number),
+      maxQueries: 24,
+      roleQueryCount: 20,
+    });
     expect(fastResult.sources.map((source) => source.token)).toEqual(
       expect.arrayContaining(["openai", "benchling"]),
     );
     expect(balancedFetchImpl).toHaveBeenCalled();
-    expect(balancedResult.diagnostics.publicSearch?.executedQueries).toBeGreaterThan(0);
+    expect(balancedResult.diagnostics.publicSearch).toMatchObject({
+      executedQueries: expect.any(Number),
+      maxQueries: 48,
+      roleQueryCount: 20,
+    });
   });
 
   it("merges registry-backed Greenhouse sources with public search additions without duplicates", async () => {

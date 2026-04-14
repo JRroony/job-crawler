@@ -172,11 +172,13 @@ export async function discoverSupplementalSourcesDetailed(
   const publicSearchOptions = resolvePublicSearchExecutionOptions(
     input.filters.crawlMode,
     input.env,
+    input.filters.platforms,
   );
   const publicSearchSkippedReason = input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED
     ? resolvePublicSearchSkippedReason(
         input.filters.crawlMode,
         configuredSources.length + curatedSources.length + companyPageExpandedSources.length > 0,
+        input.filters.platforms,
       )
     : undefined;
   const shouldExecutePublicSearch =
@@ -275,7 +277,12 @@ export async function discoverSupplementalSourcesDetailed(
 function resolvePublicSearchExecutionOptions(
   crawlMode: CrawlMode | undefined,
   env: DiscoveryEnvSnapshot,
+  platforms?: readonly string[],
 ) {
+  const greenhouseFirstOnly =
+    Array.isArray(platforms) &&
+    platforms.length > 0 &&
+    platforms.every((platform) => platform === "greenhouse");
   const base = {
     maxResultsPerQuery: env.PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS,
     maxSources: env.PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES,
@@ -291,11 +298,31 @@ function resolvePublicSearchExecutionOptions(
   }
 
   if (crawlMode === "balanced") {
+    if (greenhouseFirstOnly) {
+      return {
+        ...base,
+        maxQueries: Math.min(base.maxQueries, 48),
+        maxLocationClauses: Math.min(base.maxLocationClauses, 16),
+        maxDirectJobs: Math.min(base.maxDirectJobs, 12),
+        maxRoleQueries: 16,
+      };
+    }
+
     return {
       ...base,
       maxQueries: Math.min(base.maxQueries, 36),
       maxLocationClauses: Math.min(base.maxLocationClauses, 12),
       maxDirectJobs: Math.min(base.maxDirectJobs, 16),
+      maxRoleQueries: 12,
+    };
+  }
+
+  if (greenhouseFirstOnly) {
+    return {
+      ...base,
+      maxQueries: Math.min(base.maxQueries, 24),
+      maxLocationClauses: Math.min(base.maxLocationClauses, 10),
+      maxDirectJobs: Math.min(base.maxDirectJobs, 6),
       maxRoleQueries: 12,
     };
   }
@@ -312,8 +339,17 @@ function resolvePublicSearchExecutionOptions(
 function resolvePublicSearchSkippedReason(
   crawlMode: CrawlMode | undefined,
   hasBaselineCoverage: boolean,
+  platforms?: readonly string[],
 ) {
+  const greenhouseFirstOnly =
+    Array.isArray(platforms) &&
+    platforms.length > 0 &&
+    platforms.every((platform) => platform === "greenhouse");
   if (crawlMode !== "fast" || !hasBaselineCoverage) {
+    return undefined;
+  }
+
+  if (greenhouseFirstOnly) {
     return undefined;
   }
 

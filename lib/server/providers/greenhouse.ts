@@ -362,6 +362,16 @@ function buildGreenhouseRawTitlePreselector(
         return true;
       }
 
+      const titleAnalysis = analyzeTitle(rawTitle ?? normalizedTitle);
+      if (
+        queryAnalysis.family &&
+        titleAnalysis.family &&
+        titleAnalysis.family === queryAnalysis.family &&
+        Boolean(titleAnalysis.headWord)
+      ) {
+        return true;
+      }
+
       if (!headWord || modifierTokens.length === 0) {
         return false;
       }
@@ -531,27 +541,27 @@ function buildProviderCompanyToken(companyHint?: string) {
 function resolveGreenhouseCrawlStrategy(crawlMode?: string) {
   if (crawlMode === "fast") {
     return {
-      concurrency: 12,
-      timeoutMs: 3_500,
+      concurrency: 16,
+      timeoutMs: 1_800,
       retries: 0,
-      maxTitleVariants: 14,
+      maxTitleVariants: 18,
     };
   }
 
   if (crawlMode === "deep") {
     return {
       concurrency: 6,
-      timeoutMs: 6_500,
+      timeoutMs: 5_500,
       retries: 1,
-      maxTitleVariants: 20,
+      maxTitleVariants: 24,
     };
   }
 
   return {
-    concurrency: 8,
-    timeoutMs: 4_500,
-    retries: 1,
-    maxTitleVariants: 18,
+    concurrency: 10,
+    timeoutMs: 2_800,
+    retries: 0,
+    maxTitleVariants: 22,
   };
 }
 

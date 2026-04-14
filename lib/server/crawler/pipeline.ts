@@ -649,13 +649,13 @@ export async function executeCrawlPipeline(
         },
       );
       stageTimingsMs.discovery += Date.now() - supplementalDiscoveryStartedMs;
-      await baselineProcessingPromise;
-      await processDiscoveryStage({
+      const supplementalProcessingPromise = processDiscoveryStage({
         label: supplementalStage.label,
         sources: supplementalStage.sources,
         jobs: supplementalStage.jobs ?? [],
         diagnostics: supplementalStage.diagnostics,
       });
+      await Promise.all([baselineProcessingPromise, supplementalProcessingPromise]);
     } else if (input.discovery.discoverInStages) {
       const stagedDiscoveryStartedMs = Date.now();
       const discoveryStages = await input.discovery.discoverInStages({
