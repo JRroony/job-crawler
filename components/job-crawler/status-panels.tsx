@@ -9,13 +9,28 @@ import { cn } from "@/lib/utils";
 type NoticeTone = "amber" | "tide";
 type StateTone = "neutral" | "amber" | "red";
 
-export function MessageBanner(props: { message: string }) {
+type MessageTone = "error" | "info";
+
+export function MessageBanner(props: { message: string; tone?: MessageTone }) {
+  const tone = props.tone ?? "error";
+
   return (
-    <div className="rounded-[18px] border border-red-200/80 bg-red-50/90 px-4 py-3">
-      <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-red-700">
-        Search issue
+    <div className={cn(
+      "rounded-[18px] px-4 py-3",
+      tone === "error"
+        ? "border border-red-200/80 bg-red-50/90"
+        : "border border-tide/20 bg-[rgba(63,114,175,0.07)]",
+    )}>
+      <div className={cn(
+        "font-mono text-[11px] uppercase tracking-[0.18em]",
+        tone === "error" ? "text-red-700" : "text-tide",
+      )}>
+        {tone === "error" ? "Search issue" : "Notice"}
       </div>
-      <div className="mt-1 text-sm leading-6 text-red-800">{props.message}</div>
+      <div className={cn(
+        "mt-1 text-sm leading-6",
+        tone === "error" ? "text-red-800" : "text-slate",
+      )}>{props.message}</div>
     </div>
   );
 }
@@ -153,11 +168,37 @@ export function LoadingPanel(props: {
   matchedCount?: number;
   providerSummary?: CrawlResponse["crawlRun"]["providerSummary"];
   actionButton?: React.ReactNode;
+  stopButton?: React.ReactNode;
 }) {
   const stageLabel = describeStage(props.stage);
   const providerSummary = props.providerSummary ?? [];
   const activeProviders = providerSummary.filter((provider) => provider.sourceCount > 0);
   const hasVisibleResults = (props.foundCount ?? 0) > 0;
+
+  // When results are already visible, show a compact inline bar instead of the full panel.
+  if (hasVisibleResults) {
+    return (
+      <section className="rounded-[16px] border border-ink/8 bg-white/90 px-4 py-3 shadow-[0_12px_32px_rgba(15,23,42,0.04)]">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="flex h-2.5 w-2.5 items-center justify-center">
+              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-ember" />
+            </div>
+            <span className="text-sm text-slate">
+              {stageLabel} &middot; {props.foundCount} saved
+            </span>
+            <span className="hidden text-xs text-slate/60 sm:inline">
+              ({props.fetchedCount} fetched, {props.matchedCount} matched)
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {props.stopButton}
+            {props.actionButton}
+          </div>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className="rounded-[20px] border border-ink/8 bg-white p-5 shadow-[0_18px_48px_rgba(15,23,42,0.05)]">
@@ -165,13 +206,10 @@ export function LoadingPanel(props: {
         Search in progress
       </div>
       <h2 className="mt-2 text-xl font-semibold text-ink">
-        {hasVisibleResults ? "Showing partial results while the crawl continues" : "Gathering fresh job results"}
+        Gathering fresh job results
       </h2>
       <p className="mt-2 max-w-3xl text-sm leading-6 text-slate">
         {stageLabel}
-        {(props.foundCount ?? 0) > 0
-          ? ` ${props.foundCount} saved job${props.foundCount === 1 ? "" : "s"} are already available to review.`
-          : ""}
       </p>
       <div className="mt-4 flex flex-wrap gap-2 text-sm text-slate">
         <span className="rounded-full border border-ink/10 bg-mist/35 px-3 py-1.5">
@@ -184,8 +222,11 @@ export function LoadingPanel(props: {
           {props.foundCount ?? 0} saved
         </span>
       </div>
-      {props.actionButton ? (
-        <div className="mt-4">{props.actionButton}</div>
+      {props.stopButton || props.actionButton ? (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {props.stopButton}
+          {props.actionButton}
+        </div>
       ) : null}
       <div className="mt-4 grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
         <div className="space-y-3">
@@ -210,7 +251,7 @@ export function LoadingPanel(props: {
         </div>
 
         <div className="grid gap-4">
-          {Array.from({ length: hasVisibleResults ? 2 : 4 }).map((_, index) => (
+          {Array.from({ length: 4 }).map((_, index) => (
             <div
               key={index}
               className="h-16 rounded-[20px] bg-[linear-gradient(90deg,rgba(79,93,117,0.08),rgba(79,93,117,0.18),rgba(79,93,117,0.08))] bg-[length:200%_100%] animate-shimmer"

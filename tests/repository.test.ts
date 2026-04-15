@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import { ensureDatabaseIndexes, collectionNames } from "@/lib/server/db/indexes";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
+import { toSourceInventoryRecord } from "@/lib/server/discovery/inventory";
+import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import type { JobListing } from "@/lib/types";
 
 import { FakeDb } from "@/tests/helpers/fake-db";
@@ -132,6 +134,34 @@ describe("JobCrawlerRepository", () => {
     expect(await repository.getCrawlRunDeliveryCursor(crawlRun._id)).toBe(1);
     expect(firstDelta.cursor).toBe(1);
     expect(firstDelta.jobs.map((job) => job._id)).toEqual([savedJob._id]);
+  });
+
+  it("persists crawl run cancellation requests and heartbeats", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      {
+        title: "Software Engineer",
+      },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const crawlRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+    );
+
+    await repository.heartbeatCrawlRun(crawlRun._id, "2026-03-29T00:01:00.000Z");
+    const canceled = await repository.requestCrawlRunCancellation(crawlRun._id, {
+      reason: "Stopped by the user.",
+      requestedAt: "2026-03-29T00:02:00.000Z",
+    });
+    const controlState = await repository.getCrawlRunControlState(crawlRun._id);
+
+    expect(canceled?.cancelRequestedAt).toBe("2026-03-29T00:02:00.000Z");
+    expect(canceled?.cancelReason).toBe("Stopped by the user.");
+    expect(controlState?.lastHeartbeatAt).toBe("2026-03-29T00:01:00.000Z");
+    expect(controlState?.cancelRequestedAt).toBe("2026-03-29T00:02:00.000Z");
+    expect(controlState?.cancelReason).toBe("Stopped by the user.");
   });
 
   it("merges duplicate jobs across crawl runs without updating the immutable _id field", async () => {
@@ -494,6 +524,7 @@ describe("JobCrawlerRepository", () => {
         discoveredSources: 1,
         crawledSources: 1,
         discovery: {
+          inventorySources: 0,
           configuredSources: 0,
           curatedSources: 0,
           publicSources: 0,
@@ -819,5 +850,49 @@ describe("JobCrawlerRepository", () => {
 
     expect(jobsCollection.stats.bulkWriteCalls).toBe(1);
     expect(jobsCollection.stats.updateOneCalls).toBe(1);
+  });
+
+  it("upserts persistent source inventory records without duplicating stable source ids", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const firstSeenAt = "2026-04-14T00:00:00.000Z";
+    const refreshedAt = "2026-04-15T00:00:00.000Z";
+
+    const greenhouse = toSourceInventoryRecord(
+      classifySourceCandidate({
+        url: "https://boards.greenhouse.io/openai",
+        token: "openai",
+        companyHint: "OpenAI",
+        confidence: "high",
+        discoveryMethod: "platform_registry",
+      }),
+      {
+        now: firstSeenAt,
+        inventoryOrigin: "greenhouse_registry",
+        inventoryRank: 0,
+      },
+    );
+
+    await repository.upsertSourceInventory([greenhouse]);
+    await repository.upsertSourceInventory([
+      {
+        ...greenhouse,
+        companyHint: "OpenAI Careers",
+        lastSeenAt: refreshedAt,
+        lastRefreshedAt: refreshedAt,
+      },
+    ]);
+
+    const inventory = await repository.listSourceInventory();
+
+    expect(inventory).toHaveLength(1);
+    expect(inventory[0]).toMatchObject({
+      _id: greenhouse._id,
+      companyHint: "OpenAI Careers",
+      firstSeenAt,
+      lastSeenAt: refreshedAt,
+      lastRefreshedAt: refreshedAt,
+    });
+    expect(db.snapshot(collectionNames.sourceInventory)).toHaveLength(1);
   });
 });

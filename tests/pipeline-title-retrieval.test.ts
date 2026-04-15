@@ -477,6 +477,7 @@ describe("pipeline title retrieval", () => {
             },
           ],
           diagnostics: {
+            inventorySources: 0,
             configuredSources: 0,
             curatedSources: 0,
             publicSources: 1,
@@ -1454,7 +1455,7 @@ describe("pipeline title retrieval", () => {
     );
     const elapsedMs = Date.now() - startedAt;
 
-    expect(elapsedMs).toBeLessThan(240);
+    expect(elapsedMs).toBeLessThan(500);
     expect(result.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
     expect(result.crawlRun.status).toBe("partial");
     expect(result.diagnostics.providerFailures).toBe(1);
@@ -1520,7 +1521,9 @@ describe("pipeline title retrieval", () => {
       ],
       excluded: ["Technical Program Manager", "Engineering Manager"],
     },
-  ])("retrieves related titles for %s without over-including weak matches", async ({ query, expected, excluded }) => {
+  ])(
+    "retrieves related titles for %s without over-including weak matches",
+    async ({ query, expected, excluded }) => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const now = new Date("2026-04-10T15:30:00.000Z");
 
@@ -1589,7 +1592,9 @@ describe("pipeline title retrieval", () => {
         explanation: expect.any(String),
       }),
     });
-  });
+    },
+    10_000,
+  );
 
   it.each([
     {
@@ -1705,9 +1710,227 @@ describe("pipeline title retrieval", () => {
       },
     );
 
-    expect(result.jobs.map((job) => job.title)).toEqual(expect.arrayContaining(expectedTitles));
-    expect(result.jobs.map((job) => job.title)).not.toEqual(expect.arrayContaining(excludedTitles));
-    expect(result.sourceResults[0]).toMatchObject(expectedCounts);
+  expect(result.jobs.map((job) => job.title)).toEqual(expect.arrayContaining(expectedTitles));
+  expect(result.jobs.map((job) => job.title)).not.toEqual(expect.arrayContaining(excludedTitles));
+  expect(result.sourceResults[0]).toMatchObject(expectedCounts);
+  });
+
+  it.each([
+    {
+      title: "Software Engineer",
+      expectedTitles: [
+        "Software Development Engineer",
+        "Backend Engineer",
+        "Full Stack Engineer",
+        "Frontend Engineer",
+        "Application Developer",
+        "Platform Engineer",
+        "Java Developer",
+      ],
+      excludedTitles: ["Data Analyst", "Business Analyst", "Product Manager"],
+    },
+    {
+      title: "Software Development Engineer",
+      expectedTitles: [
+        "Software Development Engineer",
+        "Backend Engineer",
+        "Full Stack Engineer",
+        "Java Developer",
+      ],
+      excludedTitles: ["Data Analyst", "Product Manager"],
+    },
+    {
+      title: "Backend Engineer",
+      expectedTitles: ["Backend Engineer"],
+      excludedTitles: ["Frontend Engineer", "Data Analyst", "Product Manager"],
+    },
+    {
+      title: "Full Stack Engineer",
+      expectedTitles: ["Full Stack Engineer"],
+      excludedTitles: ["Data Analyst", "Product Manager"],
+    },
+    {
+      title: "Frontend Engineer",
+      expectedTitles: ["Frontend Engineer"],
+      excludedTitles: ["Backend Engineer", "Data Analyst", "Product Manager"],
+    },
+    {
+      title: "Application Developer",
+      expectedTitles: ["Application Developer"],
+      excludedTitles: ["Data Analyst", "Product Manager"],
+    },
+    {
+      title: "Platform Engineer",
+      expectedTitles: ["Platform Engineer"],
+      excludedTitles: ["Data Analyst", "Business Analyst", "Product Manager"],
+    },
+    {
+      title: "Java Developer",
+      expectedTitles: ["Java Developer"],
+      excludedTitles: ["Data Analyst", "Product Manager"],
+    },
+    {
+      title: "Data Analyst",
+      expectedTitles: ["Data Analyst", "Business Intelligence Analyst", "Business Analyst"],
+      excludedTitles: ["Backend Engineer", "Product Manager"],
+    },
+    {
+      title: "Business Analyst",
+      expectedTitles: ["Business Analyst"],
+      excludedTitles: ["Data Analyst", "Backend Engineer", "Product Manager"],
+    },
+    {
+      title: "Product Manager",
+      expectedTitles: ["Product Manager", "Technical Product Manager"],
+      excludedTitles: ["Business Analyst", "Backend Engineer", "Program Manager"],
+    },
+  ])("keeps Greenhouse recall in the provider while the pipeline preserves precision for $title", async ({
+    title,
+    expectedTitles,
+    excludedTitles,
+  }) => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-11T12:00:00.000Z");
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+    const fetchImpl = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          jobs: [
+            {
+              id: "software-development-engineer",
+              title: "Software Development Engineer",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/software-development-engineer",
+              company_name: "Acme",
+              location: { name: "Remote, United States" },
+            },
+            {
+              id: "backend-engineer",
+              title: "Backend Engineer",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/backend-engineer",
+              company_name: "Acme",
+              location: { name: "Bellevue, WA" },
+            },
+            {
+              id: "full-stack-engineer",
+              title: "Full Stack Engineer",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/full-stack-engineer",
+              company_name: "Acme",
+              location: { name: "Seattle, WA" },
+            },
+            {
+              id: "frontend-engineer",
+              title: "Frontend Engineer",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/frontend-engineer",
+              company_name: "Acme",
+              location: { name: "Austin, TX" },
+            },
+            {
+              id: "application-developer",
+              title: "Application Developer",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/application-developer",
+              company_name: "Acme",
+              location: { name: "San Jose, CA" },
+            },
+            {
+              id: "platform-engineer",
+              title: "Platform Engineer",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/platform-engineer",
+              company_name: "Acme",
+              location: { name: "Remote - California" },
+            },
+            {
+              id: "java-developer",
+              title: "Java Developer",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/java-developer",
+              company_name: "Acme",
+              location: { name: "Remote, United States" },
+            },
+            {
+              id: "data-analyst",
+              title: "Data Analyst",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/data-analyst",
+              company_name: "Acme",
+              location: { name: "New York, NY" },
+            },
+            {
+              id: "bi-analyst",
+              title: "Business Intelligence Analyst",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/bi-analyst",
+              company_name: "Acme",
+              location: { name: "Remote, United States" },
+            },
+            {
+              id: "business-analyst",
+              title: "Business Analyst",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/business-analyst",
+              company_name: "Acme",
+              location: { name: "Chicago, IL" },
+            },
+            {
+              id: "product-manager",
+              title: "Product Manager",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/product-manager",
+              company_name: "Acme",
+              location: { name: "Remote, United States" },
+            },
+            {
+              id: "technical-product-manager",
+              title: "Technical Product Manager",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/technical-product-manager",
+              company_name: "Acme",
+              location: { name: "Remote, United States" },
+            },
+            {
+              id: "program-manager",
+              title: "Program Manager",
+              absolute_url: "https://boards.greenhouse.io/acme/jobs/program-manager",
+              company_name: "Acme",
+              location: { name: "Remote, United States" },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await runSearchFromFilters(
+      {
+        title,
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [createGreenhouseProvider()],
+        discovery,
+        fetchImpl,
+        now,
+      },
+    );
+
+    const returnedTitles = result.jobs.map((job) => job.title);
+    expect(returnedTitles).toEqual(expect.arrayContaining(expectedTitles));
+    expect(returnedTitles).not.toEqual(expect.arrayContaining(excludedTitles));
+    expect(result.sourceResults[0]).toMatchObject({
+      provider: "greenhouse",
+      fetchedCount: 13,
+    });
   });
 
   it("keeps non-senior product manager roles when experience filtering is active", async () => {

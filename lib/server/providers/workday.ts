@@ -238,11 +238,12 @@ async function crawlWorkdaySource(
   context: ProviderExecutionContext,
   source: WorkdayDiscoveredSource,
 ) {
+  await context.throwIfCanceled?.();
   const warnings: string[] = [];
   const dropReasons: string[] = [];
   const discoveredAt = context.now.toISOString();
 
-  const apiAttempt = await fetchWorkdaySourceFromApi(source, context.fetchImpl);
+  const apiAttempt = await fetchWorkdaySourceFromApi(source, context.fetchImpl, context.throwIfCanceled);
   const jobsFromApi = apiAttempt.jobs.map((candidate) =>
     normalizeWorkdayJob({
       source,
@@ -253,7 +254,12 @@ async function crawlWorkdaySource(
 
   const fallback =
     apiAttempt.jobs.length === 0
-      ? await fetchWorkdaySourceFromHtml(source, context.fetchImpl, discoveredAt)
+      ? await fetchWorkdaySourceFromHtml(
+          source,
+          context.fetchImpl,
+          discoveredAt,
+          context.throwIfCanceled,
+        )
       : {
           fetchedCount: 0,
           jobs: [] as NormalizedJobSeed[],
@@ -262,12 +268,15 @@ async function crawlWorkdaySource(
 
   const detailFallbackJob =
     jobsFromApi.length === 0 && fallback.jobs.length === 0 && isDetailLikeWorkdaySource(source)
-      ? await extractWorkdayJobFromDetailUrl({
+      ? await (async () => {
+          await context.throwIfCanceled?.();
+          return extractWorkdayJobFromDetailUrl({
           detailUrl: source.url,
           source,
           discoveredAt,
           fetchImpl: context.fetchImpl,
-        })
+          });
+        })()
       : undefined;
 
   if (apiAttempt.warning) {
@@ -301,6 +310,7 @@ async function crawlWorkdaySource(
   });
 
   if (normalizedJobs.length > 0) {
+    await context.throwIfCanceled?.();
     await context.onBatch?.({
       provider: "workday",
       jobs: normalizedJobs,
@@ -324,11 +334,13 @@ async function crawlWorkdaySource(
 async function fetchWorkdaySourceFromApi(
   source: WorkdayDiscoveredSource,
   fetchImpl: typeof fetch,
+  throwIfCanceled?: () => Promise<void>,
 ) {
   const attempts: WorkdayFetchAttempt[] = [];
   const apiUrls = resolveWorkdayApiUrls(source);
 
   for (const apiUrl of apiUrls) {
+    await throwIfCanceled?.();
     const result = await safeFetchJson<unknown>(apiUrl, {
       fetchImpl,
       method: "GET",
@@ -368,7 +380,9 @@ async function fetchWorkdaySourceFromHtml(
   source: WorkdayDiscoveredSource,
   fetchImpl: typeof fetch,
   discoveredAt: string,
+  throwIfCanceled?: () => Promise<void>,
 ) {
+  await throwIfCanceled?.();
   const result = await safeFetchText(source.url, {
     fetchImpl,
     method: "GET",

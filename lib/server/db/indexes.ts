@@ -22,6 +22,7 @@ export const collectionNames = {
   crawlSourceResults: "crawlSourceResults",
   crawlRunJobEvents: "crawlRunJobEvents",
   linkValidations: "linkValidations",
+  sourceInventory: "sourceInventory",
 } as const;
 
 let indexesEnsured = false;
@@ -130,6 +131,22 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     {
       key: { applyUrl: 1, checkedAt: -1 },
       name: "linkValidations_applyUrl_checkedAt_desc",
+    },
+  ]);
+
+  await db.collection(collectionNames.sourceInventory).createIndexes([
+    {
+      key: { platform: 1, inventoryRank: 1, companyHint: 1 },
+      name: "sourceInventory_platform_rank_companyHint",
+    },
+    {
+      key: { token: 1, platform: 1 },
+      name: "sourceInventory_token_platform",
+      sparse: true,
+    },
+    {
+      key: { lastRefreshedAt: -1, platform: 1 },
+      name: "sourceInventory_lastRefreshedAt_desc_platform",
     },
   ]);
 

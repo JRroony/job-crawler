@@ -159,6 +159,7 @@ async function crawlLeverSource(
   context: ProviderExecutionContext,
   source: LeverDiscoveredSource,
 ) {
+  await context.throwIfCanceled?.();
   const warnings: string[] = [];
   const dropReasons: string[] = [];
   const discoveredAt = context.now.toISOString();
@@ -170,6 +171,7 @@ async function crawlLeverSource(
 
   let payload: LeverPosting[] = [];
   if (apiUrl) {
+    await context.throwIfCanceled?.();
     const result = await safeFetchJson<LeverPosting[]>(apiUrl, {
       fetchImpl: context.fetchImpl,
       method: "GET",
@@ -204,16 +206,19 @@ async function crawlLeverSource(
 
   const detailFallbackJob =
     jobs.length === 0 && source.jobId && siteToken
-      ? await extractLeverJobFromDetailUrl({
+      ? await (async () => {
+          await context.throwIfCanceled?.();
+          return extractLeverJobFromDetailUrl({
           detailUrl:
             parseLeverUrl(source.url)?.canonicalJobUrl ??
-            buildCanonicalLeverJobUrl(siteToken, source.jobId),
+            buildCanonicalLeverJobUrl(siteToken, source.jobId!),
           siteToken,
-          jobId: source.jobId,
+          jobId: source.jobId!,
           companyHint: source.companyHint,
           discoveredAt,
           fetchImpl: context.fetchImpl,
-        })
+          });
+        })()
       : undefined;
 
   if (payload.length === 0 && !detailFallbackJob) {
@@ -234,6 +239,7 @@ async function crawlLeverSource(
   });
 
   if (normalizedJobs.length > 0) {
+    await context.throwIfCanceled?.();
     await context.onBatch?.({
       provider: "lever",
       jobs: normalizedJobs,

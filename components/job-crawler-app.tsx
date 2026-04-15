@@ -109,6 +109,8 @@ type SearchDeltaRoutePayload = CrawlDeltaResponse & {
   error?: string;
 };
 
+type ProgressiveSearchSnapshot = Pick<CrawlResponse, "crawlRun" | "jobs">;
+
 const initialFilters: SearchFilters = {
   title: "",
   country: "",
@@ -118,7 +120,8 @@ const initialFilters: SearchFilters = {
   crawlMode: "fast",
 };
 
-const queuedSearchPollIntervalMs = 1_500;
+const queuedSearchPollIntervalEmptyMs = 250;
+const queuedSearchPollIntervalVisibleMs = 750;
 const queuedSearchPollTimeoutMs = 90_000;
 
 export function JobCrawlerApp({
@@ -207,7 +210,7 @@ export function JobCrawlerApp({
     const deadline = Date.now() + queuedSearchPollTimeoutMs;
 
     while (options.pollToken === pollSequenceRef.current && Date.now() < deadline) {
-      await delay(queuedSearchPollIntervalMs);
+      await delay(resolveQueuedSearchPollIntervalMs(activeDeliveryCursorRef.current));
       if (options.pollToken !== pollSequenceRef.current) {
         return;
       }
@@ -327,20 +330,25 @@ export function JobCrawlerApp({
 
       if (payload.queued) {
         refreshRecentSearch(payload.search);
-        applyQueuedResult(payload);
-        setBackgroundCrawlId(payload.search._id);
-        // Start background polling without blocking the UI
-        void pollSearchUntilSettled(payload.search._id, {
-          updatedAfter: payload.search.updatedAt,
-          pollToken,
-          signal: requestController.signal,
-          onSettled: () => {
-            setBackgroundCrawlNotice({
-              searchId: payload.search._id,
-              title: payload.search.filters.title,
-            });
-          },
-        });
+        if (shouldApplyQueuedResultImmediately(payload)) {
+          applyLoadedResult(payload);
+        } else {
+          applyQueuedResult(payload);
+        }
+        if (payload.crawlRun.status === "running") {
+          setBackgroundCrawlId(payload.search._id);
+          void pollSearchUntilSettled(payload.search._id, {
+            updatedAfter: payload.search.updatedAt,
+            pollToken,
+            signal: requestController.signal,
+            onSettled: () => {
+              setBackgroundCrawlNotice({
+                searchId: payload.search._id,
+                title: payload.search.filters.title,
+              });
+            },
+          });
+        }
         return;
       }
 
@@ -392,16 +400,18 @@ export function JobCrawlerApp({
 
       if (payload.queued) {
         refreshRecentSearch(payload.search);
-        if (payload.crawlRun.status === "running" || !activeResult) {
+        if (!shouldApplyQueuedResultImmediately(payload) && (payload.crawlRun.status === "running" || !activeResult)) {
           applyQueuedResult(payload);
         } else {
-          setViewState("loading");
+          applyLoadedResult(payload);
         }
-        await pollSearchUntilSettled(payload.search._id, {
-          updatedAfter: payload.search.updatedAt,
-          pollToken,
-          signal: requestController.signal,
-        });
+        if (payload.crawlRun.status === "running") {
+          await pollSearchUntilSettled(payload.search._id, {
+            updatedAfter: payload.search.updatedAt,
+            pollToken,
+            signal: requestController.signal,
+          });
+        }
         return;
       }
 
@@ -573,10 +583,25 @@ export function JobCrawlerApp({
     setBackgroundCrawlNotice(null);
   }
 
-  function startNewSearch() {
-    // Abort the current polling request but keep the background crawl running
+  async function startNewSearch() {
+    // Stop any running server-side crawl first
+    const runningSearchId = activeResult?.crawlRun.status === "running"
+      ? activeResult.search._id
+      : backgroundCrawlId ?? null;
+    if (runningSearchId) {
+      try {
+        await fetch(`/api/searches/${runningSearchId}`, {
+          method: "DELETE",
+        });
+      } catch {
+        // Best-effort: ignore errors when stopping the crawl
+      }
+    }
+
+    // Abort the current polling request
     activeRequestControllerRef.current?.abort();
     activeRequestControllerRef.current = null;
+    setActiveResult(null);
     setViewState("idle");
     setBackgroundCrawlId(null);
     setBackgroundCrawlNotice(null);
@@ -664,7 +689,12 @@ export function JobCrawlerApp({
             onClear={clearBrowseFilters}
           />
 
-          {message && !blockingErrorState ? <MessageBanner message={message} /> : null}
+          {message && !blockingErrorState ? (
+            <MessageBanner
+              message={message}
+              tone={errorKind ? "error" : "info"}
+            />
+          ) : null}
         </div>
 
         <div className="mt-4 space-y-4">
@@ -675,12 +705,23 @@ export function JobCrawlerApp({
               fetchedCount={activeResult?.crawlRun.totalFetchedJobs}
               matchedCount={activeResult?.crawlRun.totalMatchedJobs}
               providerSummary={activeResult?.crawlRun.providerSummary}
-              actionButton={
-                backgroundCrawlId ? (
+              stopButton={
+                activeResult?.crawlRun.status === "running" && activeResult?.search._id ? (
                   <button
                     type="button"
-                    onClick={startNewSearch}
-                    className="inline-flex items-center justify-center rounded-full border border-ink/15 bg-white px-4 py-2 text-sm font-semibold text-ink transition hover:border-sand hover:bg-sand/20"
+                    onClick={() => void stopActiveSearch(activeResult.search._id)}
+                    className="inline-flex items-center justify-center rounded-full border border-ink/15 bg-white px-3 py-1.5 text-xs font-semibold text-ink transition hover:border-red-300 hover:bg-red-50"
+                  >
+                    Stop crawl
+                  </button>
+                ) : undefined
+              }
+              actionButton={
+                activeResult?.crawlRun.status === "running" ? (
+                  <button
+                    type="button"
+                    onClick={() => void startNewSearch()}
+                    className="inline-flex items-center justify-center rounded-full border border-ink/15 bg-white px-3 py-1.5 text-xs font-semibold text-ink transition hover:border-sand hover:bg-sand/20"
                   >
                     New Search
                   </button>
@@ -975,6 +1016,16 @@ export function describeZeroResultState(result: CrawlResponse): ZeroResultState 
 
 export function isLatestClientRequest(requestToken: number, currentToken: number) {
   return requestToken === currentToken;
+}
+
+export function shouldApplyQueuedResultImmediately(result: ProgressiveSearchSnapshot) {
+  return result.crawlRun.status !== "running" || result.jobs.length > 0;
+}
+
+export function resolveQueuedSearchPollIntervalMs(visibleJobCount: number) {
+  return visibleJobCount > 0
+    ? queuedSearchPollIntervalVisibleMs
+    : queuedSearchPollIntervalEmptyMs;
 }
 
 function createClientRequestOwnerKey() {

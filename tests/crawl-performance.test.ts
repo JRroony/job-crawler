@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { getSearchDetails, startSearchFromFilters } from "@/lib/server/crawler/service";
+import {
+  getSearchDetails,
+  getSearchJobDeltas,
+  startSearchFromFilters,
+} from "@/lib/server/crawler/service";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
@@ -64,6 +68,85 @@ describe("crawl performance optimizations", () => {
   });
 
   describe("global timeout", () => {
+    it("aborts the provider signal when the provider timeout fires", async () => {
+      const repository = new JobCrawlerRepository(new FakeDb());
+      const now = new Date("2026-04-13T11:55:00.000Z");
+      let providerSignalAborted = false;
+      let fetchSignalAborted = false;
+
+      const hangingFetch: typeof fetch = (_input, init) =>
+        new Promise<Response>((_, reject) => {
+          if (init?.signal?.aborted) {
+            fetchSignalAborted = true;
+            const error = new Error("The request was aborted.");
+            error.name = "AbortError";
+            reject(error);
+            return;
+          }
+
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              fetchSignalAborted = true;
+              const error = new Error("The request was aborted.");
+              error.name = "AbortError";
+              reject(error);
+            },
+            { once: true },
+          );
+        });
+
+      const provider = createStubProvider("greenhouse", async (context, _sources) => {
+        context.signal?.addEventListener(
+          "abort",
+          () => {
+            providerSignalAborted = true;
+          },
+          { once: true },
+        );
+
+        await context.fetchImpl("https://example.com/hanging-provider-request");
+
+        return {
+          provider: "greenhouse",
+          status: "success",
+          sourceCount: 0,
+          fetchedCount: 0,
+          matchedCount: 0,
+          warningCount: 0,
+          jobs: [] as NormalizedJobSeed[],
+        };
+      });
+
+      const started = await startSearchFromFilters(
+        {
+          title: "Software Engineer",
+          country: "United States",
+          platforms: ["greenhouse"],
+        },
+        {
+          repository,
+          providers: [provider],
+          discovery: createDiscovery(),
+          fetchImpl: hangingFetch,
+          now,
+          requestOwnerKey: "client-provider-timeout-abort",
+          progressUpdateIntervalMs: 1,
+          providerTimeoutMs: 50,
+        },
+      );
+
+      await waitForBackgroundRunToSettle();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const result = await getSearchDetails(started.result.search._id, { repository });
+
+      expect(providerSignalAborted).toBe(true);
+      expect(fetchSignalAborted).toBe(true);
+      expect(result.crawlRun.status).toBe("failed");
+      expect(result.jobs).toHaveLength(0);
+    });
+
     it("respects provider timeout and completes the crawl", async () => {
       const repository = new JobCrawlerRepository(new FakeDb());
       const now = new Date("2026-04-13T12:00:00.000Z");
@@ -213,6 +296,198 @@ describe("crawl performance optimizations", () => {
       expect(result.crawlRun.status).toBe("completed");
       expect(result.jobs.length).toBeGreaterThan(0);
     });
+
+    it("returns an early visible batch before the crawl fully finishes and preserves delta delivery", async () => {
+      const repository = new JobCrawlerRepository(new FakeDb());
+      const now = new Date("2026-04-13T13:30:00.000Z");
+      let releaseFinalBatch: (() => void) | undefined;
+      const finalBatchGate = new Promise<void>((resolve) => {
+        releaseFinalBatch = resolve;
+      });
+
+      const provider = createStubProvider("greenhouse", async (context, sources) => {
+        await context.onBatch?.({
+          provider: "greenhouse",
+          fetchedCount: 1,
+          sourceCount: sources.length,
+          jobs: [createProviderJob("Software Engineer", "early-1", 1, now)],
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 40));
+
+        await context.onBatch?.({
+          provider: "greenhouse",
+          fetchedCount: 2,
+          sourceCount: sources.length,
+          jobs: [
+            createProviderJob("Software Engineer II", "early-2", 2, now),
+            createProviderJob("Software Engineer III", "early-3", 3, now),
+          ],
+        });
+
+        await finalBatchGate;
+
+        await context.onBatch?.({
+          provider: "greenhouse",
+          fetchedCount: 2,
+          sourceCount: sources.length,
+          jobs: [
+            createProviderJob("Staff Software Engineer", "late-4", 4, now),
+            createProviderJob("Principal Software Engineer", "late-5", 5, now),
+          ],
+        });
+
+        return {
+          provider: "greenhouse",
+          status: "success",
+          sourceCount: sources.length,
+          fetchedCount: 0,
+          matchedCount: 0,
+          warningCount: 0,
+          jobs: [],
+        };
+      });
+
+      const started = await startSearchFromFilters(
+        {
+          title: "Software Engineer",
+          country: "United States",
+          platforms: ["greenhouse"],
+        },
+        {
+          repository,
+          providers: [provider],
+          discovery: createDiscovery(),
+          now,
+          requestOwnerKey: "client-progressive-visible",
+          progressUpdateIntervalMs: 1,
+          earlyVisibleTarget: 3,
+          initialVisibleWaitMs: 500,
+        },
+      );
+
+      expect(started.result.crawlRun.status).toBe("running");
+      expect(started.result.jobs.map((job) => job.title)).toEqual([
+        "Software Engineer",
+        "Software Engineer II",
+        "Software Engineer III",
+      ]);
+      expect(started.result.delivery?.cursor).toBe(3);
+
+      const noDeltaYet = await getSearchJobDeltas(
+        started.result.search._id,
+        started.result.delivery?.cursor ?? 0,
+        { repository },
+      );
+      expect(noDeltaYet.jobs).toHaveLength(0);
+      expect(noDeltaYet.delivery.cursor).toBe(3);
+
+      releaseFinalBatch?.();
+      const lateDelta = await waitForDeltaJobs(
+        started.result.search._id,
+        repository,
+        started.result.delivery?.cursor ?? 0,
+        2,
+      );
+
+      expect(lateDelta.jobs.map((job) => job.title)).toEqual(
+        expect.arrayContaining([
+          "Staff Software Engineer",
+          "Principal Software Engineer",
+        ]),
+      );
+      expect(lateDelta.delivery.previousCursor).toBe(3);
+      expect(lateDelta.delivery.cursor).toBe(5);
+
+      await waitForBackgroundRunToSettle();
+
+      const finalResult = await getSearchDetails(started.result.search._id, { repository });
+      expect(finalResult.crawlRun.status).toBe("completed");
+      expect(finalResult.jobs).toHaveLength(5);
+    });
+
+    it("returns the first saved jobs quickly even when the early visible target is still unmet", async () => {
+      const repository = new JobCrawlerRepository(new FakeDb());
+      const now = new Date("2026-04-13T13:45:00.000Z");
+      let releaseSlowTail: (() => void) | undefined;
+      const slowTailGate = new Promise<void>((resolve) => {
+        releaseSlowTail = resolve;
+      });
+
+      const provider = createStubProvider("greenhouse", async (context, sources) => {
+        await context.onBatch?.({
+          provider: "greenhouse",
+          fetchedCount: 1,
+          sourceCount: sources.length,
+          jobs: [createProviderJob("Software Engineer", "first-visible", 1, now)],
+        });
+
+        await slowTailGate;
+
+        await context.onBatch?.({
+          provider: "greenhouse",
+          fetchedCount: 2,
+          sourceCount: sources.length,
+          jobs: [
+            createProviderJob("Senior Software Engineer", "late-visible", 2, now),
+            createProviderJob("Staff Software Engineer", "late-visible", 3, now),
+          ],
+        });
+
+        return {
+          provider: "greenhouse",
+          status: "success",
+          sourceCount: sources.length,
+          fetchedCount: 0,
+          matchedCount: 0,
+          warningCount: 0,
+          jobs: [],
+        };
+      });
+
+      const startedAtMs = Date.now();
+      const started = await startSearchFromFilters(
+        {
+          title: "Software Engineer",
+          country: "United States",
+          platforms: ["greenhouse"],
+        },
+        {
+          repository,
+          providers: [provider],
+          discovery: createDiscovery(),
+          now,
+          requestOwnerKey: "client-progressive-timeout",
+          progressUpdateIntervalMs: 1,
+          earlyVisibleTarget: 50,
+          initialVisibleWaitMs: 120,
+        },
+      );
+
+      const elapsedMs = Date.now() - startedAtMs;
+
+      expect(elapsedMs).toBeLessThan(400);
+      expect(started.result.crawlRun.status).toBe("running");
+      expect(started.result.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
+      expect(started.result.delivery?.cursor).toBe(1);
+
+      releaseSlowTail?.();
+      const delta = await waitForDeltaJobs(
+        started.result.search._id,
+        repository,
+        started.result.delivery?.cursor ?? 0,
+        2,
+      );
+
+      expect(delta.jobs.map((job) => job.title)).toEqual(
+        expect.arrayContaining([
+          "Senior Software Engineer",
+          "Staff Software Engineer",
+        ]),
+      );
+      expect(delta.delivery.previousCursor).toBe(1);
+      expect(delta.delivery.cursor).toBe(3);
+    });
   });
 
   describe("environment variable defaults", () => {
@@ -270,3 +545,23 @@ describe("crawl performance optimizations", () => {
     });
   });
 });
+
+async function waitForDeltaJobs(
+  searchId: string,
+  repository: JobCrawlerRepository,
+  afterCursor: number,
+  expectedCount: number,
+) {
+  const deadline = Date.now() + 2_000;
+
+  while (Date.now() < deadline) {
+    const delta = await getSearchJobDeltas(searchId, afterCursor, { repository });
+    if (delta.jobs.length >= expectedCount) {
+      return delta;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error(`Timed out waiting for ${expectedCount} delta job(s) after cursor ${afterCursor}.`);
+}

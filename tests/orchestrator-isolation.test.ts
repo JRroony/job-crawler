@@ -4,6 +4,7 @@ import { runSearchFromFilters } from "@/lib/server/crawler/service";
 import { collectionNames } from "@/lib/server/db/indexes";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
+import { createDiscoveryService, refreshSourceInventory } from "@/lib/server/discovery/service";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
 import { discoverSources } from "@/lib/server/discovery/service";
 import { createGreenhouseProvider } from "@/lib/server/providers/greenhouse";
@@ -254,6 +255,126 @@ describe("crawl orchestration", () => {
       platforms: ["greenhouse"],
     });
   });
+
+  it("uses persistent inventory-backed Greenhouse sources before slower supplemental discovery runs", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-14T12:00:00.000Z");
+    let supplementalFetchStarted = false;
+    let inventoryRoutedBeforeSupplemental = false;
+
+    await refreshSourceInventory({
+      repository,
+      now,
+      env: {
+        greenhouseBoardTokens: ["openai"],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
+        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
+        PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 20,
+        PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 12,
+        PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: 2,
+        GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 8,
+      },
+    });
+
+    const discovery = createDiscoveryService({
+      repository,
+      env: {
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [
+          {
+            type: "html_page",
+            company: "Datadog",
+            url: "https://careers.datadog.com/jobs",
+          },
+        ],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
+        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
+        PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 20,
+        PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 12,
+        PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: 2,
+        GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 8,
+      },
+    });
+
+    const provider = createStubProvider("greenhouse", async (_context, sources) => {
+      if (sources.some((source) => source.token === "openai") && !supplementalFetchStarted) {
+        inventoryRoutedBeforeSupplemental = true;
+      }
+      const datadogSource = sources.find((source) => source.token === "datadog");
+      if (datadogSource) {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      }
+
+      const emittedSources = sources.filter(
+        (source) => source.token === "openai" || source.token === "datadog",
+      );
+
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: sources.length,
+        fetchedCount: emittedSources.length,
+        matchedCount: emittedSources.length,
+        jobs: emittedSources.map((currentSource) => ({
+          title: currentSource.token === "openai" ? "Inventory Software Engineer" : "Supplemental Software Engineer",
+          company: currentSource.companyHint ?? "Acme",
+          locationText: "Remote, United States",
+          sourcePlatform: "greenhouse" as const,
+          sourceJobId: `${currentSource.token}-job`,
+          sourceUrl: `https://example.com/jobs/${currentSource.token}-job`,
+          applyUrl: `https://example.com/jobs/${currentSource.token}-job/apply`,
+          canonicalUrl: `https://example.com/jobs/${currentSource.token}-job`,
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        })),
+      };
+    });
+
+    const fetchImpl = vi.fn(async () => {
+      supplementalFetchStarted = true;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return new Response(
+        '<html><body><a href="https://boards.greenhouse.io/datadog/jobs/123">Datadog</a></body></html>',
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const runPromise = runSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl,
+        now,
+        progressUpdateIntervalMs: 5,
+      },
+    );
+
+    const result = await runPromise;
+
+    expect(inventoryRoutedBeforeSupplemental).toBe(true);
+    expect(result.jobs.map((job) => job.title)).toEqual(
+      expect.arrayContaining([
+        "Inventory Software Engineer",
+        "Supplemental Software Engineer",
+      ]),
+    );
+  }, 10000);
 
   it("returns jobs in the crawl response when registry-backed Greenhouse sources are available", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
@@ -506,7 +627,9 @@ describe("crawl orchestration", () => {
     expect(storedJobs[0]?.experienceLevel).toBe("intern");
   });
 
-  it("matches experience filters from inferred titles when normalized experience is missing", async () => {
+  it(
+    "matches experience filters from inferred titles when normalized experience is missing",
+    async () => {
     const fetchImpl = vi.fn(async (_input: string, init?: RequestInit) => {
       if (init?.method === "HEAD") {
         return new Response(null, {
@@ -606,7 +729,9 @@ describe("crawl orchestration", () => {
       expect(storedRuns[0]).not.toHaveProperty("warnings");
       expect(storedSourceResults[0]).not.toHaveProperty("warnings");
     }
-  });
+    },
+    10_000,
+  );
 
   it("matches and persists experience filters from provider metadata when the title is generic", async () => {
     const db = new FakeDb();

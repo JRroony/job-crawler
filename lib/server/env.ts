@@ -28,7 +28,9 @@ const envSchema = z.object({
   CRAWL_PROVIDER_TIMEOUT_MS: z.coerce.number().int().positive().default(9000),
   CRAWL_PROGRESS_UPDATE_INTERVAL_MS: z.coerce.number().int().positive().default(250),
   CRAWL_GLOBAL_TIMEOUT_MS: z.coerce.number().int().positive().default(60000),
+  CRAWL_INITIAL_VISIBLE_WAIT_MS: z.coerce.number().int().nonnegative().default(400),
   CRAWL_TARGET_JOB_COUNT: z.coerce.number().int().positive().default(30),
+  CRAWL_EARLY_VISIBLE_TARGET: z.coerce.number().int().positive().default(30),
 });
 
 type ParsedEnv = z.infer<typeof envSchema>;
@@ -83,8 +85,12 @@ export function getEnv() {
         process.env.CRAWL_PROGRESS_UPDATE_INTERVAL_MS ?? "250",
       CRAWL_GLOBAL_TIMEOUT_MS:
         process.env.CRAWL_GLOBAL_TIMEOUT_MS ?? "60000",
+      CRAWL_INITIAL_VISIBLE_WAIT_MS:
+        process.env.CRAWL_INITIAL_VISIBLE_WAIT_MS ?? "400",
       CRAWL_TARGET_JOB_COUNT:
         process.env.CRAWL_TARGET_JOB_COUNT ?? "30",
+      CRAWL_EARLY_VISIBLE_TARGET:
+        process.env.CRAWL_EARLY_VISIBLE_TARGET ?? "30",
     });
   }
 

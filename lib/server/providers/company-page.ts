@@ -64,6 +64,7 @@ export function createCompanyPageProvider() {
     provider: "company_page",
     supportsSource: isCompanyPageSource,
     async crawlSources(context, sources) {
+      await context.throwIfCanceled?.();
       if (sources.length === 0) {
         return unsupportedProviderResult(
           "company_page",
@@ -77,9 +78,11 @@ export function createCompanyPageProvider() {
         sources,
         async (source) => {
           try {
+            await context.throwIfCanceled?.();
             const config = toCompanyPageSourceConfig(source);
 
             if (config.type === "json_feed") {
+              await context.throwIfCanceled?.();
               const jobs = await crawlJsonFeed(
                 config,
                 context.fetchImpl,
@@ -91,6 +94,7 @@ export function createCompanyPageProvider() {
               };
             }
 
+            await context.throwIfCanceled?.();
             const jobs = await crawlHtmlPage(
               config,
               context.fetchImpl,

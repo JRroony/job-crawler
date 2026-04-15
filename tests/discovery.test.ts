@@ -15,11 +15,14 @@ import {
   discoverSupplementalSourcesDetailed,
   discoverSources,
   discoverSourcesDetailed,
+  refreshSourceInventory,
   resolvePublicSearchExecutionOptions,
 } from "@/lib/server/discovery/service";
+import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { buildUsDiscoveryLocationTokens } from "@/lib/server/locations/us";
 import { capSourcesWithPlatformDiversity } from "@/lib/server/crawler/source-capper";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
+import { FakeDb } from "@/tests/helpers/fake-db";
 
 const discoveryEnvDefaults = {
   greenhouseBoardTokens: ["openai"],
@@ -1754,5 +1757,71 @@ describe("source capping with platform diversity", () => {
   it("returns empty array for empty input", () => {
     const result = capSourcesWithPlatformDiversity([], 10);
     expect(result).toEqual([]);
+  });
+
+  it("refreshes a persistent source inventory with Greenhouse-priority coverage without dropping Lever or Ashby", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+
+    const inventory = await refreshSourceInventory({
+      repository,
+      now: new Date("2026-04-14T00:00:00.000Z"),
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: ["openai", "datadog"],
+        leverSiteTokens: ["figma", "plaid"],
+        ashbyBoardTokens: ["notion", "ramp"],
+      },
+    });
+
+    expect(inventory.length).toBeGreaterThanOrEqual(20);
+    expect(inventory[0]).toMatchObject({
+      platform: "greenhouse",
+      inventoryOrigin: "greenhouse_registry",
+    });
+    expect(inventory.some((record) => record.platform === "lever" && record.token === "figma")).toBe(
+      true,
+    );
+    expect(inventory.some((record) => record.platform === "ashby" && record.token === "notion")).toBe(
+      true,
+    );
+  });
+
+  it("uses persistent source inventory in the baseline stage before falling back to configured seeds", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    await refreshSourceInventory({
+      repository,
+      now: new Date("2026-04-14T00:00:00.000Z"),
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: ["openai"],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+      },
+    });
+
+    const baseline = await discoverBaselineSourcesDetailed({
+      filters: {
+        title: "Software Engineer",
+        platforms: ["greenhouse"],
+      },
+      now: new Date("2026-04-14T00:00:00.000Z"),
+      repository,
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
+      },
+    });
+
+    expect(baseline.diagnostics).toMatchObject({
+      inventorySources: expect.any(Number),
+      configuredSources: 0,
+    });
+    expect(baseline.sources.some((source) => source.discoveryMethod === "source_inventory")).toBe(
+      true,
+    );
+    expect(baseline.sources.some((source) => source.platform === "greenhouse")).toBe(true);
   });
 });

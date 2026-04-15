@@ -1,10 +1,15 @@
 import "server-only";
 
 import { slugToLabel } from "@/lib/server/crawler/helpers";
+import type { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import { expandCompanyPageSources } from "@/lib/server/discovery/company-page-expansion";
 import { lookupGreenhouseCompanyHint } from "@/lib/server/discovery/greenhouse-registry";
+import {
+  buildSourceInventorySeeds,
+  toDiscoveredSourceFromInventory,
+} from "@/lib/server/discovery/inventory";
 import { discoverSourcesFromPublicSearchDetailed } from "@/lib/server/discovery/public-search";
 import { resolveOperationalCrawlerPlatforms, type CrawlMode } from "@/lib/types";
 import type {
@@ -30,50 +35,69 @@ type DiscoveryEnvSnapshot = Pick<
   | "GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES"
 >;
 
-export const defaultDiscoveryService: DiscoveryService = {
-  async discover(input) {
-    const result = await discoverSourcesDetailed({
-      ...input,
-      env: getEnv(),
-    });
-    return result.sources;
-  },
-  async discoverWithDiagnostics(input) {
-    return discoverSourcesDetailed({
-      ...input,
-      env: getEnv(),
-    });
-  },
-  async discoverInStages(input) {
-    return discoverSourcesInStages({
-      ...input,
-      env: getEnv(),
-    });
-  },
-  async discoverBaseline(input) {
-    return discoverBaselineSourcesDetailed({
-      ...input,
-      env: getEnv(),
-    });
-  },
-  async discoverSupplemental(input, context) {
-    return discoverSupplementalSourcesDetailed(
-      {
-        ...input,
-        env: getEnv(),
-      },
-      context,
-    );
-  },
+type DiscoveryRuntime = {
+  repository?: JobCrawlerRepository;
+  env?: DiscoveryEnvSnapshot;
 };
 
-export async function discoverSources(input: DiscoveryInput & { env: DiscoveryEnvSnapshot }) {
+export function createDiscoveryService(runtime: DiscoveryRuntime = {}): DiscoveryService {
+  return {
+    async discover(input) {
+      const result = await discoverSourcesDetailed({
+        ...input,
+        env: runtime.env ?? getEnv(),
+        repository: runtime.repository,
+      });
+      return result.sources;
+    },
+    async discoverWithDiagnostics(input) {
+      return discoverSourcesDetailed({
+        ...input,
+        env: runtime.env ?? getEnv(),
+        repository: runtime.repository,
+      });
+    },
+    async discoverInStages(input) {
+      return discoverSourcesInStages({
+        ...input,
+        env: runtime.env ?? getEnv(),
+        repository: runtime.repository,
+      });
+    },
+    async discoverBaseline(input) {
+      return discoverBaselineSourcesDetailed({
+        ...input,
+        env: runtime.env ?? getEnv(),
+        repository: runtime.repository,
+      });
+    },
+    async discoverSupplemental(input, context) {
+      return discoverSupplementalSourcesDetailed(
+        {
+          ...input,
+          env: runtime.env ?? getEnv(),
+          repository: runtime.repository,
+        },
+        context,
+      );
+    },
+  };
+}
+
+export const defaultDiscoveryService: DiscoveryService = createDiscoveryService();
+
+type DiscoveryExecutionInput = DiscoveryInput & {
+  env: DiscoveryEnvSnapshot;
+  repository?: JobCrawlerRepository;
+};
+
+export async function discoverSources(input: DiscoveryExecutionInput) {
   const result = await discoverSourcesDetailed(input);
   return result.sources;
 }
 
 export async function discoverSourcesDetailed(
-  input: DiscoveryInput & { env: DiscoveryEnvSnapshot },
+  input: DiscoveryExecutionInput,
 ): Promise<DiscoveryExecution> {
   const stages = await discoverSourcesInStages(input);
   const finalStage = stages[stages.length - 1];
@@ -84,6 +108,7 @@ export async function discoverSourcesDetailed(
     sources: allSources,
     jobs: allJobs,
     diagnostics: finalStage?.diagnostics ?? {
+      inventorySources: 0,
       configuredSources: 0,
       curatedSources: 0,
       publicSources: 0,
@@ -97,7 +122,7 @@ export async function discoverSourcesDetailed(
 }
 
 export async function discoverSourcesInStages(
-  input: DiscoveryInput & { env: DiscoveryEnvSnapshot },
+  input: DiscoveryExecutionInput,
 ): Promise<DiscoveryExecutionStage[]> {
   const baseline = await discoverBaselineSourcesDetailed(input);
   const supplemental = await discoverSupplementalSourcesDetailed(input, {
@@ -108,11 +133,12 @@ export async function discoverSourcesInStages(
 }
 
 export async function discoverBaselineSourcesDetailed(
-  input: DiscoveryInput & { env: DiscoveryEnvSnapshot },
+  input: DiscoveryExecutionInput,
 ): Promise<DiscoveryExecutionStage> {
   const selectedPlatforms = input.filters.platforms
     ? new Set<string>(resolveOperationalCrawlerPlatforms(input.filters.platforms))
     : null;
+  const inventorySources = await loadInventorySources(input, selectedPlatforms);
   const unfilteredConfiguredSources = buildConfiguredSources(input);
   const configuredSources = filterDiscoveredSources(
     unfilteredConfiguredSources,
@@ -123,7 +149,7 @@ export async function discoverBaselineSourcesDetailed(
     selectedPlatforms,
   );
   const sources = filterDiscoveredSources(
-    dedupeDiscoveredSources([...configuredSources, ...curatedSources]),
+    dedupeDiscoveredSources([...inventorySources, ...configuredSources, ...curatedSources]),
     selectedPlatforms,
   );
 
@@ -131,17 +157,29 @@ export async function discoverBaselineSourcesDetailed(
     label: "baseline",
     sources,
     jobs: [],
+    diagnostics: {
+      inventorySources: inventorySources.length,
+      configuredSources: configuredSources.length,
+      curatedSources: curatedSources.length,
+      publicSources: 0,
+      publicJobs: 0,
+      discoveredBeforeFiltering: sources.length,
+      discoveredAfterFiltering: sources.length,
+      platformCounts: summarizePlatformCounts(sources),
+      publicJobPlatformCounts: {},
+    },
   };
 }
 
 export async function discoverSupplementalSourcesDetailed(
-  input: DiscoveryInput & { env: DiscoveryEnvSnapshot },
+  input: DiscoveryExecutionInput,
   context: { baselineSources: DiscoveredSource[] },
 ): Promise<DiscoveryExecutionStage> {
   const discoveryStartedMs = Date.now();
   const selectedPlatforms = input.filters.platforms
     ? new Set<string>(resolveOperationalCrawlerPlatforms(input.filters.platforms))
     : null;
+  const inventorySources = await loadInventorySources(input, selectedPlatforms);
   const unfilteredConfiguredSources = buildConfiguredSources(input);
   const configuredSources = filterDiscoveredSources(
     unfilteredConfiguredSources,
@@ -156,6 +194,7 @@ export async function discoverSupplementalSourcesDetailed(
     selectedPlatforms,
   );
   const expansionCandidates = dedupeDiscoveredSources([
+    ...inventorySources,
     ...unfilteredConfiguredSources,
     ...curatedSources,
   ]);
@@ -175,7 +214,11 @@ export async function discoverSupplementalSourcesDetailed(
   const publicSearchSkippedReason = input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED
     ? resolvePublicSearchSkippedReason(
         input.filters.crawlMode,
-        configuredSources.length + curatedSources.length + companyPageExpandedSources.length > 0,
+        inventorySources.length +
+          configuredSources.length +
+          curatedSources.length +
+          companyPageExpandedSources.length >
+          0,
         input.filters.platforms,
       )
     : undefined;
@@ -217,6 +260,7 @@ export async function discoverSupplementalSourcesDetailed(
   );
 
   logDiscoveryTrace(input.filters, {
+    inventorySources,
     configuredSources,
     curatedSources,
     companyPageExpandedSources,
@@ -239,6 +283,7 @@ export async function discoverSupplementalSourcesDetailed(
     sources: publicSourcesOnly,
     jobs: publicJobs,
     diagnostics: {
+      inventorySources: inventorySources.length,
       configuredSources: configuredSources.length,
       curatedSources: curatedSources.length,
       publicSources: publicSources.length,
@@ -360,6 +405,36 @@ export function discoverConfiguredSources(input: DiscoveryInput & { env: Discove
   return filterDiscoveredSources(discoveredSources, selectedPlatforms);
 }
 
+export async function refreshSourceInventory(input: {
+  repository: JobCrawlerRepository;
+  now: Date;
+  env?: DiscoveryEnvSnapshot;
+}) {
+  const env = input.env ?? getEnv();
+  const now = input.now.toISOString();
+  const records = buildSourceInventorySeeds(env).map((record) => ({
+    ...record,
+    firstSeenAt: now,
+    lastSeenAt: now,
+    lastRefreshedAt: now,
+  }));
+
+  const persisted = await input.repository.upsertSourceInventory(records);
+
+  console.info("[discovery:inventory-refresh]", {
+    persistedCount: persisted.length,
+    platformCounts: persisted.reduce<Record<string, number>>((counts, record) => {
+      counts[record.platform] = (counts[record.platform] ?? 0) + 1;
+      return counts;
+    }, {}),
+    greenhouseCount: persisted.filter((record) => record.platform === "greenhouse").length,
+    leverCount: persisted.filter((record) => record.platform === "lever").length,
+    ashbyCount: persisted.filter((record) => record.platform === "ashby").length,
+  });
+
+  return persisted;
+}
+
 function buildConfiguredSources(input: DiscoveryInput & { env: DiscoveryEnvSnapshot }) {
   const candidates = [
     ...input.env.greenhouseBoardTokens.map((token) =>
@@ -403,6 +478,36 @@ function buildConfiguredSources(input: DiscoveryInput & { env: DiscoveryEnvSnaps
   return dedupeDiscoveredSources(candidates);
 }
 
+async function loadInventorySources(
+  input: DiscoveryExecutionInput,
+  selectedPlatforms: Set<string> | null,
+) {
+  if (!input.repository) {
+    return [] as DiscoveredSource[];
+  }
+
+  const selectedInventoryPlatforms = selectedPlatforms
+    ? Array.from(selectedPlatforms).filter(isInventoryPlatform)
+    : undefined;
+  const records = await input.repository.listSourceInventory(
+    selectedInventoryPlatforms,
+  );
+
+  return records.map(toDiscoveredSourceFromInventory);
+}
+
+function isInventoryPlatform(
+  platform: string,
+): platform is Awaited<ReturnType<JobCrawlerRepository["listSourceInventory"]>>[number]["platform"] {
+  return (
+    platform === "greenhouse" ||
+    platform === "lever" ||
+    platform === "ashby" ||
+    platform === "company_page" ||
+    platform === "workday"
+  );
+}
+
 function dedupeDiscoveredSources(sources: DiscoveredSource[]) {
   const deduped = new Map<string, DiscoveredSource>();
 
@@ -429,6 +534,7 @@ function filterDiscoveredSources(
 function logDiscoveryTrace(
   filters: DiscoveryInput["filters"],
   trace: {
+    inventorySources: DiscoveredSource[];
     configuredSources: DiscoveredSource[];
     curatedSources: DiscoveredSource[];
     companyPageExpandedSources: DiscoveredSource[];
@@ -450,6 +556,7 @@ function logDiscoveryTrace(
 ) {
   console.info("[discovery:summary]", {
     filters,
+    inventoryCount: trace.inventorySources.length,
     configuredCount: trace.configuredSources.length,
     curatedCount: trace.curatedSources.length,
     companyPageExpandedCount: trace.companyPageExpandedSources.length,
@@ -509,6 +616,6 @@ function resolveZeroCoverageReason(input: {
   return input.discoveredBeforeFiltering.length > 0
     ? "Selected platforms filtered every discovered source before provider routing."
     : input.publicSearchEnabled
-      ? "Registry-backed seeds, supplemental catalog sources, and public ATS search all returned zero runnable sources."
-      : "Registry-backed seeds and supplemental catalog sources returned zero runnable sources while public ATS search was disabled.";
+      ? "Inventory-backed sources, registry-backed seeds, supplemental catalog sources, and public ATS search all returned zero runnable sources."
+      : "Inventory-backed sources, registry-backed seeds, and supplemental catalog sources returned zero runnable sources while public ATS search was disabled.";
 }

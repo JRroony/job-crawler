@@ -7,6 +7,10 @@ import { dedupeJobs, dedupeStoredJobs } from "@/lib/server/crawler/dedupe";
 import { buildSourceLookupKey, createId } from "@/lib/server/crawler/helpers";
 import { collectionNames } from "@/lib/server/db/indexes";
 import { getMemoryDb } from "@/lib/server/db/memory";
+import {
+  sourceInventoryRecordSchema,
+  type SourceInventoryRecord,
+} from "@/lib/server/discovery/inventory";
 import { getMongoDb } from "@/lib/server/mongodb";
 import type {
   CrawlDiagnostics,
@@ -78,6 +82,10 @@ export type DatabaseAdapter = {
 };
 
 export type PersistableJob = PersistableJobDocument;
+export type CrawlRunControlState = Pick<
+  CrawlRun,
+  "_id" | "searchId" | "status" | "cancelRequestedAt" | "cancelReason" | "lastHeartbeatAt" | "finishedAt"
+>;
 
 type CrawlRunJobEvent = {
   _id: string;
@@ -157,6 +165,88 @@ export class JobCrawlerRepository {
   async getCrawlRun(crawlRunId: string) {
     const document = await this.crawlRuns().findOne({ _id: crawlRunId });
     return document ? parseStoredCrawlRun(document) : null;
+  }
+
+  async requestCrawlRunCancellation(
+    crawlRunId: string,
+    payload: {
+      reason?: string;
+      requestedAt?: string;
+    } = {},
+  ) {
+    const existing = await this.getCrawlRun(crawlRunId);
+    if (!existing) {
+      return null;
+    }
+
+    if (existing.finishedAt || existing.status !== "running") {
+      return existing;
+    }
+
+    const requestedAt = payload.requestedAt ?? new Date().toISOString();
+    await this.crawlRuns().updateOne(
+      { _id: crawlRunId },
+      {
+        $set: {
+          cancelRequestedAt: requestedAt,
+          cancelReason: payload.reason ?? existing.cancelReason ?? "The crawl was canceled.",
+        },
+      },
+    );
+
+    return this.getCrawlRun(crawlRunId);
+  }
+
+  async getCrawlRunControlState(crawlRunId: string): Promise<CrawlRunControlState | null> {
+    const crawlRun = await this.getCrawlRun(crawlRunId);
+    if (!crawlRun) {
+      return null;
+    }
+
+    const {
+      _id,
+      searchId,
+      status,
+      cancelRequestedAt,
+      cancelReason,
+      lastHeartbeatAt,
+      finishedAt,
+    } = crawlRun;
+
+    return {
+      _id,
+      searchId,
+      status,
+      cancelRequestedAt,
+      cancelReason,
+      lastHeartbeatAt,
+      finishedAt,
+    };
+  }
+
+  async heartbeatCrawlRun(
+    crawlRunId: string,
+    heartbeatAt = new Date().toISOString(),
+  ) {
+    const existing = await this.getCrawlRun(crawlRunId);
+    if (!existing) {
+      return null;
+    }
+
+    if (existing.finishedAt || existing.status !== "running") {
+      return existing;
+    }
+
+    await this.crawlRuns().updateOne(
+      { _id: crawlRunId },
+      {
+        $set: {
+          lastHeartbeatAt: heartbeatAt,
+        },
+      },
+    );
+
+    return this.getCrawlRun(crawlRunId);
   }
 
   async finalizeCrawlRun(
@@ -401,6 +491,48 @@ export class JobCrawlerRepository {
     await this.linkValidations().insertOne(linkValidationResultSchema.parse(result));
   }
 
+  async upsertSourceInventory(records: SourceInventoryRecord[]) {
+    const normalizedRecords = records.map((record) => sourceInventoryRecordSchema.parse(record));
+
+    for (const record of normalizedRecords) {
+      const existing = await this.sourceInventory().findOne({ _id: record._id });
+      if (existing) {
+        const merged = sourceInventoryRecordSchema.parse({
+          ...existing,
+          ...record,
+          firstSeenAt: parseStoredSourceInventory(existing).firstSeenAt,
+          lastSeenAt: record.lastSeenAt,
+          lastRefreshedAt: record.lastRefreshedAt,
+        });
+        const { _id, ...updateFields } = merged;
+        await this.sourceInventory().updateOne({ _id }, { $set: updateFields });
+        continue;
+      }
+
+      await this.sourceInventory().insertOne(record);
+    }
+
+    return this.listSourceInventory();
+  }
+
+  async listSourceInventory(platforms?: SourceInventoryRecord["platform"][]) {
+    const documents = await this.sourceInventory()
+      .find(
+        platforms && platforms.length > 0 ? { platform: { $in: platforms } } : {},
+        {
+          sort: {
+            inventoryRank: 1,
+            platform: 1,
+            companyHint: 1,
+            url: 1,
+          },
+        },
+      )
+      .toArray();
+
+    return documents.map((document) => parseStoredSourceInventory(document));
+  }
+
   async getFreshValidation(applyUrl: string, checkedAfter: string) {
     const validations = await this.linkValidations()
       .find({ applyUrl }, { sort: { checkedAt: -1 } })
@@ -463,6 +595,10 @@ export class JobCrawlerRepository {
 
   private linkValidations() {
     return this.db.collection<LinkValidationResult>(collectionNames.linkValidations);
+  }
+
+  private sourceInventory() {
+    return this.db.collection<SourceInventoryRecord>(collectionNames.sourceInventory);
   }
 
   private async appendCrawlRunJobEvents(crawlRunId: string, jobIds: string[]) {
@@ -531,6 +667,10 @@ function mergeJobRecords(
     postingDate: latestDate(existing.postingDate, incoming.postingDate),
     postedAt: latestDate(existing.postedAt, incoming.postedAt),
   };
+}
+
+function parseStoredSourceInventory(document: Record<string, unknown>) {
+  return sourceInventoryRecordSchema.parse(document);
 }
 
 function selectPrimaryRecord(existing: JobListing, incoming: PersistableJob) {
@@ -785,9 +925,12 @@ function parseStoredCrawlRun(document: Record<string, unknown>) {
   const normalizedDocument = normalizeLegacyStoredRecord(document);
   const diagnostics = normalizeCrawlDiagnostics(normalizedDocument.diagnostics);
 
-  return crawlRunDocumentSchema.parse({
+    return crawlRunDocumentSchema.parse({
     ...normalizedDocument,
     finishedAt: normalizeOptionalDocumentString(normalizedDocument.finishedAt),
+    cancelRequestedAt: normalizeOptionalDocumentString(normalizedDocument.cancelRequestedAt),
+    cancelReason: normalizeOptionalDocumentString(normalizedDocument.cancelReason),
+    lastHeartbeatAt: normalizeOptionalDocumentString(normalizedDocument.lastHeartbeatAt),
     errorMessage: normalizeOptionalDocumentString(normalizedDocument.errorMessage),
     stage:
       typeof normalizedDocument.stage === "string"
@@ -867,6 +1010,9 @@ function createStoredCrawlRunDocument(
     startedAt: now,
     status: "running",
     stage: stage ?? "queued",
+    cancelRequestedAt: undefined,
+    cancelReason: undefined,
+    lastHeartbeatAt: now,
     discoveredSourcesCount: diagnostics.discoveredSources,
     crawledSourcesCount: diagnostics.crawledSources,
     totalFetchedJobs: 0,

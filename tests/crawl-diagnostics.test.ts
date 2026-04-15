@@ -51,6 +51,7 @@ describe("crawl diagnostics", () => {
         discoveredSources: 0,
         crawledSources: 0,
         discovery: {
+          inventorySources: 0,
           configuredSources: 0,
           curatedSources: 0,
           publicSources: 0,
@@ -413,6 +414,7 @@ describe("crawl diagnostics", () => {
             }),
           ],
           diagnostics: {
+            inventorySources: 0,
             configuredSources: 20,
             curatedSources: 0,
             publicSources: 5,

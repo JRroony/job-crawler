@@ -359,6 +359,7 @@ export const publicSearchDiscoveryDiagnosticsSchema = z.object({
 });
 
 export const discoveryStageDiagnosticsSchema = z.object({
+  inventorySources: z.number().int().nonnegative().default(0),
   configuredSources: z.number().int().nonnegative().default(0),
   curatedSources: z.number().int().nonnegative().default(0),
   publicSources: z.number().int().nonnegative().default(0),
@@ -717,6 +718,9 @@ export const crawlRunDocumentSchema = z.object({
   finishedAt: nullableOptional(z.string().datetime()),
   status: crawlRunStatusSchema,
   stage: nullableOptional(crawlRunStageSchema),
+  cancelRequestedAt: nullableOptional(z.string().datetime()),
+  cancelReason: nullableOptional(z.string()),
+  lastHeartbeatAt: nullableOptional(z.string().datetime()),
   discoveredSourcesCount: z.number().int().nonnegative().default(0),
   crawledSourcesCount: z.number().int().nonnegative().default(0),
   totalFetchedJobs: z.number().int().nonnegative(),

@@ -5,6 +5,7 @@ type PendingRunRecord = {
   startedAt: string;
   controller: AbortController;
   ownerKey?: string;
+  crawlRunId?: string;
 };
 
 declare global {
@@ -39,6 +40,7 @@ export function queueSearchRun(
   task: (signal: AbortSignal) => Promise<void>,
   options: {
     ownerKey?: string;
+    crawlRunId?: string;
   } = {},
 ) {
   const pendingRuns = getPendingRuns();
@@ -71,6 +73,7 @@ export function queueSearchRun(
     startedAt: new Date().toISOString(),
     controller,
     ownerKey: options.ownerKey,
+    crawlRunId: options.crawlRunId,
   });
   if (options.ownerKey) {
     pendingRunOwners.set(options.ownerKey, searchId);
@@ -102,6 +105,10 @@ export async function abortSearchRun(
   }
 
   return true;
+}
+
+export function getPendingSearchRun(searchId: string) {
+  return getPendingRuns().get(searchId);
 }
 
 export async function abortOwnerSearchRun(

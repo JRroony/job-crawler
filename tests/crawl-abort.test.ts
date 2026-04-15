@@ -321,6 +321,79 @@ describe("abortable crawl runs", () => {
     const latest = await getSearchDetails(started.result.search._id, { repository });
     expect(latest.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
   });
+
+  it("honors persistent crawl-run cancellation and stops without saving later work", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-13T16:00:00.000Z");
+    const provider = createStubProvider("greenhouse", async (context, sources) => {
+      await context.onBatch?.({
+        provider: "greenhouse",
+        fetchedCount: 1,
+        sourceCount: sources.length,
+        jobs: [createProviderJob("Software Engineer", "persistent-batch", now)],
+      });
+
+      await waitForAbort(context.signal);
+
+      await context.onBatch?.({
+        provider: "greenhouse",
+        fetchedCount: 1,
+        sourceCount: sources.length,
+        jobs: [createProviderJob("Software Engineer II", "should-never-save", now)],
+      });
+
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: sources.length,
+        fetchedCount: 2,
+        matchedCount: 2,
+        warningCount: 0,
+        jobs: [],
+      };
+    });
+
+    const started = await startSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery: createDiscovery(),
+        now,
+        requestOwnerKey: "client-persistent-stop",
+        progressUpdateIntervalMs: 1,
+      },
+    );
+
+    const firstDelta = await waitForDeltaJobs(started.result.search._id, repository, 0, 1);
+    const latestRunId = started.result.search.latestCrawlRunId;
+    expect(latestRunId).toBeTruthy();
+
+    await repository.requestCrawlRunCancellation(latestRunId!, {
+      reason: "Persistently canceled for test coverage.",
+      requestedAt: "2026-04-13T16:00:01.000Z",
+    });
+    await waitForSearchStatus(started.result.search._id, repository, "aborted");
+
+    const afterCancelDelta = await getSearchJobDeltas(
+      started.result.search._id,
+      firstDelta.delivery.cursor,
+      { repository },
+    );
+    const latest = await getSearchDetails(started.result.search._id, { repository });
+
+    expect(afterCancelDelta.jobs).toHaveLength(0);
+    expect(afterCancelDelta.delivery.cursor).toBe(firstDelta.delivery.cursor);
+    expect(latest.crawlRun.status).toBe("aborted");
+    expect(latest.crawlRun.cancelReason).toBe("Persistently canceled for test coverage.");
+    expect(latest.crawlRun.cancelRequestedAt).toBe("2026-04-13T16:00:01.000Z");
+    expect(latest.crawlRun.lastHeartbeatAt).toBeTruthy();
+    expect(latest.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
+  });
 });
 
 async function waitForDeltaJobs(
@@ -341,6 +414,25 @@ async function waitForDeltaJobs(
   }
 
   throw new Error(`Timed out waiting for ${expectedCount} incremental job(s) after cursor ${afterCursor}.`);
+}
+
+async function waitForSearchStatus(
+  searchId: string,
+  repository: JobCrawlerRepository,
+  expectedStatus: "aborted" | "completed" | "partial" | "failed",
+) {
+  const deadline = Date.now() + 2_000;
+
+  while (Date.now() < deadline) {
+    const details = await getSearchDetails(searchId, { repository });
+    if (details.crawlRun.status === expectedStatus) {
+      return details;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error(`Timed out waiting for crawl ${searchId} to reach status ${expectedStatus}.`);
 }
 
 async function waitForAbort(signal?: AbortSignal) {

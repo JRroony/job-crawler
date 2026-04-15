@@ -174,6 +174,7 @@ async function crawlAshbySource(
   context: ProviderExecutionContext,
   source: AshbyDiscoveredSource,
 ) {
+  await context.throwIfCanceled?.();
   const warnings: string[] = [];
   const dropReasons: string[] = [];
   const discoveredAt = context.now.toISOString();
@@ -226,15 +227,18 @@ async function crawlAshbySource(
 
   const detailFallbackJob =
     jobs.length === 0 && companyToken && source.jobId
-      ? await extractAshbyJobFromDetailUrl({
+      ? await (async () => {
+          await context.throwIfCanceled?.();
+          return extractAshbyJobFromDetailUrl({
           detailUrl:
             parseAshbyUrl(source.url)?.canonicalJobUrl ??
-            buildCanonicalAshbyJobUrl(companyToken, source.jobId),
+            buildCanonicalAshbyJobUrl(companyToken, source.jobId!),
           companyToken,
           companyHint: source.companyHint,
           discoveredAt,
           fetchImpl: context.fetchImpl,
-        })
+          });
+        })()
       : undefined;
 
   if (extracted.length === 0 && !detailFallbackJob) {
@@ -254,6 +258,7 @@ async function crawlAshbySource(
   });
 
   if (normalizedJobs.length > 0) {
+    await context.throwIfCanceled?.();
     await context.onBatch?.({
       provider: "ashby",
       jobs: normalizedJobs,

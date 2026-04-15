@@ -26,7 +26,11 @@ import {
 import { sortJobsForPersistence, sortJobsWithDiagnostics } from "@/lib/server/crawler/sort";
 import { capSourcesWithPlatformDiversity } from "@/lib/server/crawler/source-capper";
 import { getEnv } from "@/lib/server/env";
-import type { JobCrawlerRepository, PersistableJob } from "@/lib/server/db/repository";
+import type {
+  CrawlRunControlState,
+  JobCrawlerRepository,
+  PersistableJob,
+} from "@/lib/server/db/repository";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
 import type { CrawlProvider, NormalizedJobSeed } from "@/lib/server/providers/types";
 import type { TitleMatchResult } from "@/lib/server/title-retrieval";
@@ -102,6 +106,102 @@ function mergeAbortSignals(signals: Array<AbortSignal | undefined>): AbortSignal
   return controller.signal;
 }
 
+const cancellationHeartbeatIntervalMs = 1_000;
+const cancellationPollIntervalMs = 250;
+
+function resolveAbortMessage(reason: unknown, fallback = "The crawl was aborted.") {
+  if (reason instanceof Error && reason.message.trim().length > 0) {
+    return reason.message;
+  }
+
+  if (typeof reason === "string" && reason.trim().length > 0) {
+    return reason;
+  }
+
+  return fallback;
+}
+
+async function createPersistentCancellationController(input: {
+  repository: JobCrawlerRepository;
+  crawlRunId: string;
+  signal?: AbortSignal;
+}) {
+  const controller = new AbortController();
+  let lastHeartbeatAtMs = 0;
+  let lastControlState: CrawlRunControlState | null = null;
+
+  const abortFromReason = (reason: unknown) => {
+    if (!controller.signal.aborted) {
+      controller.abort(new CrawlAbortedError(resolveAbortMessage(reason)));
+    }
+  };
+
+  if (input.signal) {
+    if (input.signal.aborted) {
+      abortFromReason(input.signal.reason);
+    } else {
+      input.signal.addEventListener("abort", () => abortFromReason(input.signal?.reason), {
+        once: true,
+      });
+    }
+  }
+
+  const refreshControlState = async () => {
+    lastControlState = await input.repository.getCrawlRunControlState(input.crawlRunId);
+    return lastControlState;
+  };
+
+  const pollHandle = setInterval(() => {
+    void refreshControlState()
+      .then((controlState) => {
+        if (controlState?.cancelRequestedAt) {
+          abortFromReason(controlState.cancelReason ?? "The crawl was canceled.");
+        }
+      })
+      .catch(() => undefined);
+  }, cancellationPollIntervalMs);
+
+  await refreshControlState();
+
+  return {
+    signal: controller.signal,
+    abort: abortFromReason,
+    async throwIfCanceled(options: { heartbeat?: boolean } = {}) {
+      if (controller.signal.aborted) {
+        throw new CrawlAbortedError(resolveAbortMessage(controller.signal.reason));
+      }
+
+      const controlState = lastControlState;
+      if (!controlState) {
+        abortFromReason("The crawl run could not be found.");
+        throw new CrawlAbortedError("The crawl run could not be found.");
+      }
+
+      if (controlState.cancelRequestedAt) {
+        const cancelMessage = controlState.cancelReason ?? "The crawl was canceled.";
+        abortFromReason(cancelMessage);
+        throw new CrawlAbortedError(cancelMessage);
+      }
+
+      if (
+        options.heartbeat &&
+        controlState.status === "running" &&
+        !controlState.finishedAt &&
+        Date.now() - lastHeartbeatAtMs >= cancellationHeartbeatIntervalMs
+      ) {
+        await input.repository.heartbeatCrawlRun(input.crawlRunId, new Date().toISOString());
+        lastHeartbeatAtMs = Date.now();
+      }
+    },
+    getLastControlState() {
+      return lastControlState;
+    },
+    cleanup() {
+      clearInterval(pollHandle);
+    },
+  };
+}
+
 export async function executeCrawlPipeline(
   input: ExecuteCrawlPipelineInput,
 ): Promise<CrawlResponse> {
@@ -137,10 +237,6 @@ export async function executeCrawlPipeline(
     );
   }, globalTimeoutMs);
 
-  // Merge global timeout with input signal
-  const mergedSignal = mergeAbortSignals([input.signal, globalTimeoutController.signal]);
-
-  const abortableFetchImpl = createAbortableFetch(input.fetchImpl, mergedSignal);
   const crawlRun =
     input.crawlRun ??
     (await input.repository.createCrawlRun(search._id, input.now.toISOString(), {
@@ -155,6 +251,28 @@ export async function executeCrawlPipeline(
       input.now.toISOString(),
     );
   }
+
+  const persistentCancellation = await createPersistentCancellationController({
+    repository: input.repository,
+    crawlRunId: crawlRun._id,
+    signal: input.signal,
+  });
+
+  // Merge global timeout with request aborts and persistent cancellation.
+  const mergedSignal = mergeAbortSignals([
+    persistentCancellation.signal,
+    input.signal,
+    globalTimeoutController.signal,
+  ]);
+
+  const abortableFetchImpl = createAbortableFetch(
+    input.fetchImpl,
+    async () => {
+      await persistentCancellation.throwIfCanceled({ heartbeat: true });
+      throwIfAborted(mergedSignal);
+    },
+    mergedSignal,
+  );
 
   const stageTimingsMs = {
     discovery: 0,
@@ -198,6 +316,7 @@ export async function executeCrawlPipeline(
 
     const queueMutation = <T,>(task: () => Promise<T>) => {
       const wrappedTask = async () => {
+        await persistentCancellation.throwIfCanceled({ heartbeat: true });
         throwIfAborted(mergedSignal);
         return task();
       };
@@ -218,6 +337,7 @@ export async function executeCrawlPipeline(
       stage: CrawlRunStage,
       now = new Date().toISOString(),
     ) => {
+      await persistentCancellation.throwIfCanceled({ heartbeat: true });
       throwIfAborted(mergedSignal);
       progressUpdateCount += 1;
       syncPerformanceDiagnostics({
@@ -315,6 +435,7 @@ export async function executeCrawlPipeline(
       accumulateProviderTotals?: boolean;
       onFirstVisibleSaved?: () => void;
     }) => {
+      await persistentCancellation.throwIfCanceled({ heartbeat: true });
       throwIfAborted(mergedSignal);
       const filteringStartedMs = Date.now();
       persistenceBatchCount += 1;
@@ -347,6 +468,7 @@ export async function executeCrawlPipeline(
       stageTimingsMs.dedupe += Date.now() - dedupeStartedMs;
 
       const persistenceStartedMs = Date.now();
+      await persistentCancellation.throwIfCanceled({ heartbeat: true });
       const savedJobs = await input.repository.persistJobs(crawlRun._id, dedupedJobs);
       stageTimingsMs.persistence += Date.now() - persistenceStartedMs;
 
@@ -463,6 +585,7 @@ export async function executeCrawlPipeline(
         onFirstVisibleSaved?: () => void;
       } = {},
     ) => {
+      await persistentCancellation.throwIfCanceled({ heartbeat: true });
       throwIfAborted(mergedSignal);
       if (sourcesForProvider.length === 0) {
         return;
@@ -487,40 +610,58 @@ export async function executeCrawlPipeline(
 
       try {
         const result = await runProviderWithTimeout(
-          provider.crawlSources(
-            {
-              fetchImpl: abortableFetchImpl,
-              now: input.now,
-              filters: normalizedFilters,
-              signal: mergedSignal,
-              onBatch: async (batch) => {
-                emittedLiveBatch = true;
-                totalFetchedJobs += batch.fetchedCount;
-                void queueMutation(() =>
-                  persistSeedBatch({
-                    batchLabel: `${batch.provider}:batch`,
-                    provider: batch.provider,
-                    seeds: batch.jobs,
-                    fetchedCount: batch.fetchedCount,
-                    sourceCount: batch.sourceCount ?? sourcesForProvider.length,
-                    status: "running",
-                    startedAt,
-                    finishedAt: new Date().toISOString(),
-                    accumulateProviderTotals: true,
-                    onFirstVisibleSaved: options.onFirstVisibleSaved,
-                  }),
-                ).catch((error) => {
-                  mutationErrors.push(error);
-                });
+          async (providerSignal) =>
+            provider.crawlSources(
+              {
+                fetchImpl: createAbortableFetch(
+                  input.fetchImpl,
+                  async () => {
+                    await persistentCancellation.throwIfCanceled({ heartbeat: true });
+                    if (providerSignal.aborted) {
+                      throw new CrawlAbortedError(resolveAbortMessage(providerSignal.reason));
+                    }
+                  },
+                  providerSignal,
+                ),
+                now: input.now,
+                filters: normalizedFilters,
+                signal: providerSignal,
+                throwIfCanceled: async () => {
+                  await persistentCancellation.throwIfCanceled({ heartbeat: true });
+                  if (providerSignal.aborted) {
+                    throw new CrawlAbortedError(resolveAbortMessage(providerSignal.reason));
+                  }
+                },
+                onBatch: async (batch) => {
+                  emittedLiveBatch = true;
+                  totalFetchedJobs += batch.fetchedCount;
+                  void queueMutation(() =>
+                    persistSeedBatch({
+                      batchLabel: `${batch.provider}:batch`,
+                      provider: batch.provider,
+                      seeds: batch.jobs,
+                      fetchedCount: batch.fetchedCount,
+                      sourceCount: batch.sourceCount ?? sourcesForProvider.length,
+                      status: "running",
+                      startedAt,
+                      finishedAt: new Date().toISOString(),
+                      accumulateProviderTotals: true,
+                      onFirstVisibleSaved: options.onFirstVisibleSaved,
+                    }),
+                  ).catch((error) => {
+                    mutationErrors.push(error);
+                  });
+                },
               },
-            },
-            sourcesForProvider,
-          ),
+              sourcesForProvider,
+            ),
           provider.provider,
           providerTimeoutMs,
+          mergedSignal,
         );
 
         const finishedAt = new Date().toISOString();
+        await persistentCancellation.throwIfCanceled({ heartbeat: true });
         throwIfAborted(mergedSignal);
         const durationMs = Date.now() - startedMs;
         providerDurationsMs.push({
@@ -624,6 +765,7 @@ export async function executeCrawlPipeline(
       diagnostics?: CrawlDiagnostics["discovery"];
       onFirstVisibleSaved?: () => void;
     }) => {
+      await persistentCancellation.throwIfCanceled({ heartbeat: true });
       throwIfAborted(mergedSignal);
       const newSources = payload.sources.filter((source) => {
         if (discoveredSourceIds.has(source.id)) {
@@ -755,6 +897,7 @@ export async function executeCrawlPipeline(
     Object.assign(diagnostics, createEmptyDiagnostics());
 
     if (input.discovery.discoverBaseline && input.discovery.discoverSupplemental) {
+      await persistentCancellation.throwIfCanceled({ heartbeat: true });
       throwIfAborted(mergedSignal);
       const baselineVisibility = createDeferred<void>();
       let baselineVisibilityResolved = false;
@@ -806,6 +949,7 @@ export async function executeCrawlPipeline(
       }));
       await Promise.all([baselineProcessingPromise, supplementalProcessingPromise]);
     } else if (input.discovery.discoverInStages) {
+      await persistentCancellation.throwIfCanceled({ heartbeat: true });
       throwIfAborted(mergedSignal);
       const stagedDiscoveryStartedMs = Date.now();
       const discoveryStages = await input.discovery.discoverInStages({
@@ -823,6 +967,7 @@ export async function executeCrawlPipeline(
         });
       }
     } else {
+      await persistentCancellation.throwIfCanceled({ heartbeat: true });
       throwIfAborted(mergedSignal);
       const fullDiscoveryStartedMs = Date.now();
       const discoveryExecution = input.discovery.discoverWithDiagnostics
@@ -856,6 +1001,7 @@ export async function executeCrawlPipeline(
     if (mutationErrors.length > 0) {
       throw mutationErrors[0];
     }
+    await persistentCancellation.throwIfCanceled({ heartbeat: true });
     throwIfAborted(mergedSignal);
     
     // Early termination: check if we've reached the target job count
@@ -945,6 +1091,7 @@ export async function executeCrawlPipeline(
     if (validationStrategy.mode === "deferred") {
       diagnostics.validationDeferred = savedJobs.length;
     } else if (savedJobs.length > 0) {
+      await persistentCancellation.throwIfCanceled({ heartbeat: true });
       throwIfAborted(mergedSignal);
       await flushProgressUpdate(true);
       await updateRunProgress("validating");
@@ -959,6 +1106,10 @@ export async function executeCrawlPipeline(
         input.repository,
         abortableFetchImpl,
         input.now,
+        async () => {
+          await persistentCancellation.throwIfCanceled({ heartbeat: true });
+          throwIfAborted(mergedSignal);
+        },
       );
       diagnostics.validationDeferred = deferredCount;
       const validatedJobs = await input.repository.persistJobs(crawlRun._id, jobsReadyToPersist);
@@ -981,6 +1132,7 @@ export async function executeCrawlPipeline(
       await updateRunProgress("validating");
     }
 
+    await persistentCancellation.throwIfCanceled({ heartbeat: true });
     throwIfAborted(mergedSignal);
     await flushProgressUpdate(true);
     await updateRunProgress("finalizing");
@@ -1090,7 +1242,13 @@ export async function executeCrawlPipeline(
   } catch (error) {
     const aborted = isAbortError(error) || mergedSignal?.aborted === true;
     const isTimeout = error instanceof Error && error.message.includes("global timeout");
-    const message = error instanceof Error ? error.message : "Crawl failed unexpectedly.";
+    const cancellationState = persistentCancellation.getLastControlState();
+    const message =
+      aborted && cancellationState?.cancelReason
+        ? cancellationState.cancelReason
+        : error instanceof Error
+          ? error.message
+          : "Crawl failed unexpectedly.";
     const finishedAt = new Date().toISOString();
     
     // Clear the global timeout handle to prevent further execution
@@ -1253,6 +1411,8 @@ export async function executeCrawlPipeline(
     }
 
     throw aborted ? toAbortError(error) : error;
+  } finally {
+    persistentCancellation.cleanup();
   }
 }
 
@@ -1838,6 +1998,7 @@ async function applyInlineValidationStrategy(
   repository: JobCrawlerRepository,
   fetchImpl: typeof fetch,
   now: Date,
+  beforeValidate?: () => Promise<void>,
 ) {
   const jobsToPersist = [...jobs];
   const indexesToValidate = pickInlineValidationIndexes(jobsToPersist, strategy);
@@ -1857,6 +2018,7 @@ async function applyInlineValidationStrategy(
   const validations = await runWithConcurrency(
     indexesToValidate,
     async (jobIndex) => {
+      await beforeValidate?.();
       const job = jobsToPersist[jobIndex];
       const cachedValidation = await repository.getFreshValidation(job.applyUrl, checkedAfter);
       const validation = cachedValidation
@@ -2309,13 +2471,18 @@ function toAbortError(error: unknown) {
 
 function createAbortableFetch(
   fetchImpl: typeof fetch,
+  beforeFetch?: () => Promise<void>,
   signal?: AbortSignal,
 ): typeof fetch {
   if (!signal) {
-    return fetchImpl;
+    return async (input, init) => {
+      await beforeFetch?.();
+      return fetchImpl(input, init);
+    };
   }
 
   return async (input, init) => {
+    await beforeFetch?.();
     throwIfAborted(signal);
     const controller = new AbortController();
     const cleanup = linkAbortSignals(controller, [signal, init?.signal]);
@@ -2371,27 +2538,49 @@ function linkAbortSignals(
 }
 
 async function runProviderWithTimeout<P>(
-  task: Promise<P>,
+  task: (signal: AbortSignal) => Promise<P>,
   provider: CrawlSourceResult["provider"],
   timeoutMs: number,
+  parentSignal?: AbortSignal,
 ) {
+  const controller = new AbortController();
+  const cleanup = linkAbortSignals(controller, [parentSignal]);
+  let didTimeout = false;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
+    if (timeoutMs <= 0) {
+      return;
+    }
+
     timeoutHandle = setTimeout(() => {
-      reject(
-        new Error(
-          `Provider ${provider} exceeded the ${timeoutMs}ms crawl budget and was failed fast.`,
-        ),
+      didTimeout = true;
+      const timeoutError = new Error(
+        `Provider ${provider} exceeded the ${timeoutMs}ms crawl budget and was failed fast.`,
       );
+      controller.abort(timeoutError);
+      reject(timeoutError);
     }, timeoutMs);
   });
 
   try {
-    return await Promise.race([task, timeoutPromise]);
+    return await Promise.race([task(controller.signal), timeoutPromise]);
+  } catch (error) {
+    if (didTimeout) {
+      throw new Error(
+        `Provider ${provider} exceeded the ${timeoutMs}ms crawl budget and was failed fast.`,
+      );
+    }
+
+    if (controller.signal.aborted) {
+      throw toAbortError(error ?? controller.signal.reason);
+    }
+
+    throw error;
   } finally {
     if (timeoutHandle) {
       clearTimeout(timeoutHandle);
     }
+    cleanup();
   }
 }
 

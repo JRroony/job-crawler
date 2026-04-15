@@ -7,7 +7,9 @@ import {
   isLatestClientRequest,
   mergeCrawlDeltaIntoResult,
   normalizeSearchFiltersForClient,
+  resolveQueuedSearchPollIntervalMs,
   resolveViewState,
+  shouldApplyQueuedResultImmediately,
 } from "@/components/job-crawler-app";
 import type { CrawlDeltaResponse, CrawlResponse, SearchFilters } from "@/lib/types";
 import { queueSearchRun, isSearchRunPending, abortSearchRun } from "@/lib/server/crawler/background-runs";
@@ -254,6 +256,34 @@ describe("job crawler app result state", () => {
   it("treats stale client responses as superseded", () => {
     expect(isLatestClientRequest(3, 3)).toBe(true);
     expect(isLatestClientRequest(2, 3)).toBe(false);
+  });
+
+  it("uses queued search responses immediately once jobs are already visible or the run is settled", () => {
+    expect(
+      shouldApplyQueuedResultImmediately({
+        crawlRun: createResult("running").crawlRun,
+        jobs: [createTestJob("job-1")],
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldApplyQueuedResultImmediately({
+        crawlRun: createResult("completed").crawlRun,
+        jobs: [],
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldApplyQueuedResultImmediately({
+        crawlRun: createResult("running").crawlRun,
+        jobs: [],
+      }),
+    ).toBe(false);
+  });
+
+  it("polls more aggressively before the first visible jobs arrive", () => {
+    expect(resolveQueuedSearchPollIntervalMs(0)).toBe(250);
+    expect(resolveQueuedSearchPollIntervalMs(1)).toBe(750);
   });
 
   it("merges incremental jobs into the active result without dropping earlier saved jobs", () => {

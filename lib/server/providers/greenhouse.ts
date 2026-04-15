@@ -33,7 +33,6 @@ import {
   analyzeTitle,
   buildTitleQueryVariants,
   containsNormalizedPhrase,
-  getTitleMatchResult,
   normalizeTitleText,
 } from "@/lib/server/title-retrieval";
 
@@ -73,7 +72,6 @@ declare global {
 
 const greenhouseStructuredExperiencePattern =
   /\b(intern(ship)?|co op|cooperative education|apprentice(ship)?|working student|student(?: program| opportunity| role| position)?|for students|new grad|new graduate|recent grad|recent graduate|entry level|early career|junior|associate|mid level|senior|staff|principal|distinguished|fellow|member of technical staff|mts|lead|architect|manager|director|level [2-5]|ii|iii|iv|v|\d+(?:\.\d+)?\s*(?:\+|plus)?\s*(?:-|to|–|—)?\s*\d*(?:\.\d+)?\s*(?:years?|yrs?|yoe))\b/i;
-const greenhouseSmallBoardFallbackThreshold = 12;
 const greenhouseBoardCacheTtlMs = 5 * 60_000;
 const greenhouseBoardFailureCacheTtlMs = 30_000;
 
@@ -178,6 +176,7 @@ async function crawlGreenhouseSource(
   context: ProviderExecutionContext,
   source: GreenhouseDiscoveredSource,
 ) {
+  await context.throwIfCanceled?.();
   const warnings: string[] = [];
   const dropReasons: string[] = [];
   const discoveredAt = context.now.toISOString();
@@ -236,13 +235,9 @@ async function crawlGreenhouseSource(
     titlePreselector.matches(readGreenhouseText(job.title)),
   );
   const preselectionMs = Date.now() - preselectionStartedMs;
-  const shouldFallbackToSmallBoard =
-    preselectedRawJobs.length === 0 &&
-    rawJobs.length > 0 &&
-    rawJobs.length <= greenhouseSmallBoardFallbackThreshold;
   const normalizedCompanyToken =
     companyToken ?? buildProviderCompanyToken(source.companyHint) ?? "greenhouse";
-  const normalizationInput = shouldFallbackToSmallBoard ? rawJobs : preselectedRawJobs;
+  const normalizationInput = rawJobs;
   const normalizationStartedMs = Date.now();
   const jobs = normalizationInput.map((job) =>
     normalizeGreenhouseJob({
@@ -257,24 +252,25 @@ async function crawlGreenhouseSource(
 
   const detailFallbackJob =
     jobs.length === 0 && source.jobId && companyToken
-      ? await extractGreenhouseJobFromDetailUrl({
+      ? await (async () => {
+          await context.throwIfCanceled?.();
+          return extractGreenhouseJobFromDetailUrl({
           detailUrl:
             parseGreenhouseUrl(source.url)?.canonicalJobUrl ??
             `https://job-boards.greenhouse.io/${companyToken}/jobs/${source.jobId}`,
           boardSlug: companyToken,
-          jobId: source.jobId,
+          jobId: source.jobId!,
           companyHint: source.companyHint,
           discoveredAt,
           fetchImpl: context.fetchImpl,
-        })
+          });
+        })()
       : undefined;
 
   if (source.jobId && !detailFallbackJob && jobs.length === 0) {
     dropReasons.push("detail_fallback_failed");
   } else if (rawJobs.length === 0 && !source.jobId) {
     dropReasons.push("empty_board_payload");
-  } else if (rawJobs.length > 0 && preselectedRawJobs.length === 0 && !shouldFallbackToSmallBoard) {
-    dropReasons.push("title_preselection_filtered");
   }
 
   const normalizedJobs = detailFallbackJob ? [detailFallbackJob] : jobs;
@@ -288,7 +284,7 @@ async function crawlGreenhouseSource(
     normalizationInputCount: normalizationInput.length,
     normalizedCount: normalizedJobs.length,
     preselectionSkippedCount: Math.max(0, rawJobs.length - preselectedRawJobs.length),
-    usedSmallBoardFallback: shouldFallbackToSmallBoard,
+    preselectionWouldHaveDroppedBoard: rawJobs.length > 0 && preselectedRawJobs.length === 0,
     usedDetailFallback: Boolean(detailFallbackJob),
     dropReasons,
     timingMs: {
@@ -300,6 +296,7 @@ async function crawlGreenhouseSource(
   });
 
   if (normalizedJobs.length > 0) {
+    await context.throwIfCanceled?.();
     await context.onBatch?.({
       provider: "greenhouse",
       jobs: normalizedJobs,
@@ -334,13 +331,8 @@ function buildGreenhouseRawTitlePreselector(
         .filter((value) => value.length > 0),
     ),
   ).sort((left, right) => right.length - left.length || left.localeCompare(right));
-  const scoredVariants = queryVariants
-    .map((variant) => variant.query)
-    .filter(Boolean)
-    .slice(0, Math.min(maxTitleVariants, 12));
   const modifierTokens = queryAnalysis.modifierTokens.filter(Boolean);
   const headWord = queryAnalysis.headWord;
-  const discoveryMatchMode = queryAnalysis.family === "software_engineering" ? "broad" : "balanced";
 
   return {
     variantCount: normalizedPhrases.length,
@@ -356,15 +348,6 @@ function buildGreenhouseRawTitlePreselector(
           containsNormalizedPhrase(normalizedTitle, phrase),
         )
       ) {
-        return true;
-      }
-
-      const bestVariantMatch = scoredVariants.find((queryVariant) =>
-        getTitleMatchResult(rawTitle ?? normalizedTitle, queryVariant, {
-          mode: discoveryMatchMode,
-        }).matches,
-      );
-      if (bestVariantMatch) {
         return true;
       }
 

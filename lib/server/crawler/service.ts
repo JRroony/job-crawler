@@ -28,8 +28,12 @@ import {
 } from "@/lib/server/crawler/link-validation";
 import { sortJobsWithDiagnostics } from "@/lib/server/crawler/sort";
 import { getRepository, JobCrawlerRepository } from "@/lib/server/db/repository";
-import { defaultDiscoveryService } from "@/lib/server/discovery/service";
+import {
+  createDiscoveryService,
+  refreshSourceInventory,
+} from "@/lib/server/discovery/service";
 import type { DiscoveryService } from "@/lib/server/discovery/types";
+import { getEnv } from "@/lib/server/env";
 import { createDefaultProviders } from "@/lib/server/providers";
 import type { CrawlProvider } from "@/lib/server/providers/types";
 import {
@@ -74,9 +78,13 @@ type Runtime = {
   inlineValidationTopN?: number;
   providerTimeoutMs?: number;
   progressUpdateIntervalMs?: number;
+  earlyVisibleTarget?: number;
+  initialVisibleWaitMs?: number;
   requestOwnerKey?: string;
   signal?: AbortSignal;
 };
+
+const initialVisiblePollIntervalMs = 75;
 
 export async function runSearchFromFilters(
   rawFilters: unknown,
@@ -104,7 +112,7 @@ export async function runSearchFromFilters(
     search,
     crawlRun,
     repository,
-    discovery: runtime.discovery ?? defaultDiscoveryService,
+    discovery: runtime.discovery ?? createDiscoveryService({ repository }),
     providers: runtime.providers ?? createDefaultProviders(),
     fetchImpl: runtime.fetchImpl ?? fetch,
     now,
@@ -136,7 +144,7 @@ export async function rerunSearch(searchId: string, runtime: Runtime = {}) {
     search,
     crawlRun,
     repository,
-    discovery: runtime.discovery ?? defaultDiscoveryService,
+    discovery: runtime.discovery ?? createDiscoveryService({ repository }),
     providers: runtime.providers ?? createDefaultProviders(),
     fetchImpl: runtime.fetchImpl ?? fetch,
     now,
@@ -183,7 +191,7 @@ export async function startSearchFromFilters(
         search,
         crawlRun,
         repository,
-        discovery: runtime.discovery ?? defaultDiscoveryService,
+        discovery: runtime.discovery ?? createDiscoveryService({ repository }),
         providers: runtime.providers ?? createDefaultProviders(),
         fetchImpl: runtime.fetchImpl ?? fetch,
         now,
@@ -196,12 +204,13 @@ export async function startSearchFromFilters(
       });
     }, {
       ownerKey: requestOwnerKey,
+      crawlRunId: crawlRun._id,
     }) || isSearchRunPending(search._id);
 
   // If the client disconnects before the background crawl finishes, abort it
   if (runtime.signal) {
     const onAbort = () => {
-      void abortSearchRun(search._id, {
+      void requestSearchCancellation(search._id, repository, {
         reason: "The client disconnected before the crawl completed.",
       });
     };
@@ -210,10 +219,13 @@ export async function startSearchFromFilters(
 
   return {
     queued,
-    result: await getSearchDetails(search._id, {
+    result: await getInitialSearchResult(search._id, crawlRun._id, {
       repository,
       fetchImpl: runtime.fetchImpl ?? fetch,
       now,
+      earlyVisibleTarget: runtime.earlyVisibleTarget,
+      initialVisibleWaitMs: runtime.initialVisibleWaitMs,
+      signal: runtime.signal,
     }),
   };
 }
@@ -233,7 +245,7 @@ export async function startSearchRerun(searchId: string, runtime: Runtime = {}) 
       awaitCompletion: true,
     });
   } else {
-    await abortSearchRun(search._id, {
+    await requestSearchCancellation(search._id, repository, {
       reason: "The crawl was superseded by a rerun request.",
       awaitCompletion: true,
     });
@@ -251,7 +263,7 @@ export async function startSearchRerun(searchId: string, runtime: Runtime = {}) 
         search,
         crawlRun,
         repository,
-        discovery: runtime.discovery ?? defaultDiscoveryService,
+        discovery: runtime.discovery ?? createDiscoveryService({ repository }),
         providers: runtime.providers ?? createDefaultProviders(),
         fetchImpl: runtime.fetchImpl ?? fetch,
         now,
@@ -264,14 +276,18 @@ export async function startSearchRerun(searchId: string, runtime: Runtime = {}) 
       });
     }, {
       ownerKey: requestOwnerKey,
+      crawlRunId: crawlRun._id,
     }) || isSearchRunPending(search._id);
 
   return {
     queued,
-    result: await getSearchDetails(searchId, {
+    result: await getInitialSearchResult(searchId, crawlRun._id, {
       repository,
       fetchImpl: runtime.fetchImpl ?? fetch,
       now,
+      earlyVisibleTarget: runtime.earlyVisibleTarget,
+      initialVisibleWaitMs: runtime.initialVisibleWaitMs,
+      signal: runtime.signal,
     }),
   };
 }
@@ -364,7 +380,7 @@ export async function abortSearch(searchId: string, runtime: Runtime = {}) {
     throw new ResourceNotFoundError(`Search ${searchId} was not found.`);
   }
 
-  const aborted = await abortSearchRun(searchId, {
+  const aborted = await requestSearchCancellation(searchId, repository, {
     reason: "The crawl was stopped by the user.",
     awaitCompletion: true,
   });
@@ -443,6 +459,91 @@ type ExecuteCrawlInput = {
 
 async function executeCrawl(input: ExecuteCrawlInput) {
   return executeCrawlPipeline(input);
+}
+
+async function requestSearchCancellation(
+  searchId: string,
+  repository: JobCrawlerRepository,
+  options: {
+    reason: string;
+    awaitCompletion?: boolean;
+  },
+) {
+  const search = await repository.getSearch(searchId);
+  if (!search?.latestCrawlRunId) {
+    return false;
+  }
+
+  const runState = await repository.getCrawlRun(search.latestCrawlRunId);
+  const shouldRequestPersistentCancel = runState?.status === "running" && !runState.finishedAt;
+
+  if (shouldRequestPersistentCancel) {
+    await repository.requestCrawlRunCancellation(search.latestCrawlRunId, {
+      reason: options.reason,
+    });
+  }
+
+  const abortedInMemory = await abortSearchRun(searchId, {
+    reason: options.reason,
+    awaitCompletion: options.awaitCompletion,
+  });
+
+  return shouldRequestPersistentCancel || abortedInMemory;
+}
+
+async function getInitialSearchResult(
+  searchId: string,
+  crawlRunId: string,
+  runtime: Pick<
+    Runtime,
+    "repository" | "fetchImpl" | "now" | "earlyVisibleTarget" | "initialVisibleWaitMs" | "signal"
+  >,
+) {
+  const repository = await resolveRepository(runtime.repository);
+  const env = getEnv();
+  const earlyTarget = Math.max(1, Math.floor(runtime.earlyVisibleTarget ?? env.CRAWL_EARLY_VISIBLE_TARGET));
+  const maxWaitMs = Math.max(
+    0,
+    Math.floor(runtime.initialVisibleWaitMs ?? env.CRAWL_INITIAL_VISIBLE_WAIT_MS),
+  );
+  const deadline = Date.now() + maxWaitMs;
+
+  while (true) {
+    throwIfClientAborted(runtime.signal);
+
+    const [crawlRun, deliveryCursor] = await Promise.all([
+      repository.getCrawlRun(crawlRunId),
+      repository.getCrawlRunDeliveryCursor(crawlRunId),
+    ]);
+
+    if (!crawlRun) {
+      break;
+    }
+
+    const runFinished = crawlRun.status !== "running" || Boolean(crawlRun.finishedAt);
+    if (deliveryCursor >= earlyTarget || runFinished || Date.now() >= deadline) {
+      break;
+    }
+
+    await delay(initialVisiblePollIntervalMs, runtime.signal);
+  }
+
+  return getSearchDetails(searchId, {
+    repository,
+    fetchImpl: runtime.fetchImpl ?? fetch,
+    now: runtime.now,
+  });
+}
+
+export async function refreshPersistentSourceInventory(runtime: {
+  repository?: JobCrawlerRepository;
+  now?: Date;
+} = {}) {
+  const repository = await resolveRepository(runtime.repository);
+  return refreshSourceInventory({
+    repository,
+    now: runtime.now ?? new Date(),
+  });
 }
 
 async function resolveRepository(repository?: JobCrawlerRepository) {
@@ -526,6 +627,48 @@ function buildSyntheticCrawlResponse(
       mode: "full",
       cursor: 0,
     },
+  });
+}
+
+function throwIfClientAborted(signal?: AbortSignal) {
+  if (!signal?.aborted) {
+    return;
+  }
+
+  const error =
+    signal.reason instanceof Error
+      ? signal.reason
+      : new Error("The request was aborted before the initial visible result batch was ready.");
+  error.name = "AbortError";
+  throw error;
+}
+
+async function delay(ms: number, signal?: AbortSignal) {
+  if (ms <= 0) {
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(
+        signal?.reason instanceof Error
+          ? signal.reason
+          : Object.assign(new Error("The request was aborted."), { name: "AbortError" }),
+      );
+    };
+
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

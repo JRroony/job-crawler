@@ -49,6 +49,7 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
     provider: definition.provider,
     supportsSource: definition.supportsSource,
     async crawlSources(context, sources) {
+      await context.throwIfCanceled?.();
       if (sources.length === 0) {
         return unsupportedProviderResult(
           definition.provider,
@@ -67,7 +68,10 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
 
       const sourceRuns = await runWithConcurrency(
         adapterSources,
-        async (source) => definition.crawlSource(context, source),
+        async (source) => {
+          await context.throwIfCanceled?.();
+          return definition.crawlSource(context, source);
+        },
         concurrency,
       );
 

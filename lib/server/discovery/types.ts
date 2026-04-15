@@ -17,6 +17,7 @@ export const discoveredPlatforms = [
 export const discoveryConfidenceLevels = ["high", "medium", "low"] as const;
 
 export const discoveryMethods = [
+  "source_inventory",
   "platform_registry",
   "configured_env",
   "manual_config",
