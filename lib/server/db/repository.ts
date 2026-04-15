@@ -8,12 +8,17 @@ import { buildSourceLookupKey, createId } from "@/lib/server/crawler/helpers";
 import { collectionNames } from "@/lib/server/db/indexes";
 import { getMemoryDb } from "@/lib/server/db/memory";
 import {
+  inventoryOriginFromDiscoveryMethod,
   sourceInventoryRecordSchema,
+  toSourceInventoryRecord,
   type SourceInventoryRecord,
 } from "@/lib/server/discovery/inventory";
 import { getMongoDb } from "@/lib/server/mongodb";
+import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import type {
+  CrawlControlDocument,
   CrawlDiagnostics,
+  CrawlQueueDocument,
   CrawlProviderSummary,
   CrawlRun,
   CrawlRunStage,
@@ -24,12 +29,16 @@ import type {
   LinkValidationResult,
   PersistableJobDocument,
   SearchDocument,
+  SearchSessionDocument,
+  SearchSessionJobEvent,
   SearchFilters,
   SourceProvenance,
 } from "@/lib/types";
 import {
+  crawlControlDocumentSchema,
   crawlDiagnosticsSchema,
   crawlProviderSummarySchema,
+  crawlQueueDocumentSchema,
   crawlRunDocumentSchema,
   crawlSourceResultSchema,
   employmentTypeSchema,
@@ -42,6 +51,8 @@ import {
   salaryInfoSchema,
   sanitizeSearchFiltersInput,
   searchDocumentSchema,
+  searchSessionDocumentSchema,
+  searchSessionJobEventSchema,
   sourceProvenanceSchema,
   sponsorshipHintSchema,
 } from "@/lib/types";
@@ -83,8 +94,26 @@ export type DatabaseAdapter = {
 
 export type PersistableJob = PersistableJobDocument;
 export type CrawlRunControlState = Pick<
-  CrawlRun,
-  "_id" | "searchId" | "status" | "cancelRequestedAt" | "cancelReason" | "lastHeartbeatAt" | "finishedAt"
+  CrawlControlDocument,
+  "_id" | "crawlRunId" | "searchId" | "status" | "cancelRequestedAt" | "cancelReason" | "lastHeartbeatAt" | "finishedAt"
+>;
+
+export type CrawlQueueState = Pick<
+  CrawlQueueDocument,
+  | "_id"
+  | "crawlRunId"
+  | "searchId"
+  | "searchSessionId"
+  | "ownerKey"
+  | "status"
+  | "queuedAt"
+  | "startedAt"
+  | "updatedAt"
+  | "finishedAt"
+  | "cancelRequestedAt"
+  | "cancelReason"
+  | "lastHeartbeatAt"
+  | "workerId"
 >;
 
 type CrawlRunJobEvent = {
@@ -93,6 +122,20 @@ type CrawlRunJobEvent = {
   jobId: string;
   sequence: number;
   savedAt: string;
+};
+
+export type SearchSessionControlState = Pick<
+  SearchSessionDocument,
+  "_id" | "searchId" | "latestCrawlRunId" | "status" | "finishedAt" | "lastEventSequence" | "lastEventAt"
+>;
+
+export type SourceInventoryObservation = {
+  sourceId: string;
+  observedAt: string;
+  status?: SourceInventoryRecord["status"];
+  health?: SourceInventoryRecord["health"];
+  lastFailureReason?: string;
+  succeeded?: boolean;
 };
 
 let hasWarnedMemoryFallback = false;
@@ -125,6 +168,98 @@ export class JobCrawlerRepository {
     return document ? parseStoredSearch(document) : null;
   }
 
+  async createSearchSession(
+    searchId: string,
+    now = new Date().toISOString(),
+    options: {
+      status?: CrawlRunStatus;
+      latestCrawlRunId?: string;
+    } = {},
+  ) {
+    const document = searchSessionDocumentSchema.parse({
+      _id: createId(),
+      searchId,
+      latestCrawlRunId: options.latestCrawlRunId,
+      status: options.status ?? "running",
+      createdAt: now,
+      updatedAt: now,
+      finishedAt: undefined,
+      lastEventSequence: 0,
+      lastEventAt: undefined,
+    });
+
+    await this.searchSessions().insertOne(document);
+    return document;
+  }
+
+  async getSearchSession(searchSessionId: string) {
+    const document = await this.searchSessions().findOne({ _id: searchSessionId });
+    return document ? parseStoredSearchSession(document) : null;
+  }
+
+  async updateSearchLatestSession(
+    searchId: string,
+    searchSessionId: string,
+    status: CrawlRunStatus,
+    now = new Date().toISOString(),
+  ) {
+    await this.searches().updateOne(
+      { _id: searchId },
+      {
+        $set: {
+          latestSearchSessionId: searchSessionId,
+          lastStatus: status,
+          updatedAt: now,
+        },
+      },
+    );
+  }
+
+  async updateSearchSession(
+    searchSessionId: string,
+    payload: {
+      status?: CrawlRunStatus;
+      latestCrawlRunId?: string;
+      finishedAt?: string;
+      updatedAt?: string;
+      lastEventSequence?: number;
+      lastEventAt?: string;
+    },
+  ) {
+    const updateFields: Record<string, unknown> = {};
+
+    if (typeof payload.status !== "undefined") {
+      updateFields.status = payload.status;
+    }
+
+    if (typeof payload.latestCrawlRunId !== "undefined") {
+      updateFields.latestCrawlRunId = payload.latestCrawlRunId;
+    }
+
+    if (typeof payload.finishedAt !== "undefined") {
+      updateFields.finishedAt = payload.finishedAt;
+    }
+
+    if (typeof payload.lastEventSequence === "number") {
+      updateFields.lastEventSequence = payload.lastEventSequence;
+    }
+
+    if (typeof payload.lastEventAt !== "undefined") {
+      updateFields.lastEventAt = payload.lastEventAt;
+    }
+
+    updateFields.updatedAt = payload.updatedAt ?? new Date().toISOString();
+
+    await this.searchSessions().updateOne(
+      { _id: searchSessionId },
+      {
+        $set: updateFields,
+      },
+    );
+
+    return this.getSearchSession(searchSessionId);
+  }
+
   async updateSearchLatestRun(
     searchId: string,
     crawlRunId: string,
@@ -149,6 +284,7 @@ export class JobCrawlerRepository {
     options: {
       validationMode?: CrawlValidationMode;
       stage?: CrawlRunStage;
+      searchSessionId?: string;
     } = {},
   ) {
     const document = createStoredCrawlRunDocument(
@@ -156,9 +292,13 @@ export class JobCrawlerRepository {
       now,
       options.validationMode,
       options.stage,
+      options.searchSessionId,
     );
 
     await this.crawlRuns().insertOne(document);
+    await this.crawlControls().insertOne(
+      createStoredCrawlControlDocument(document, now),
+    );
     return document;
   }
 
@@ -193,35 +333,38 @@ export class JobCrawlerRepository {
         },
       },
     );
+    await this.crawlControls().updateOne(
+      { crawlRunId },
+      {
+        $set: {
+          status: existing.status,
+          updatedAt: requestedAt,
+          cancelRequestedAt: requestedAt,
+          cancelReason: payload.reason ?? existing.cancelReason ?? "The crawl was canceled.",
+        },
+      },
+    );
+    await this.crawlQueue().updateOne(
+      { crawlRunId },
+      {
+        $set: {
+          updatedAt: requestedAt,
+          cancelRequestedAt: requestedAt,
+          cancelReason: payload.reason ?? existing.cancelReason ?? "The crawl was canceled.",
+        },
+      },
+    );
 
     return this.getCrawlRun(crawlRunId);
   }
 
   async getCrawlRunControlState(crawlRunId: string): Promise<CrawlRunControlState | null> {
-    const crawlRun = await this.getCrawlRun(crawlRunId);
-    if (!crawlRun) {
+    const document = await this.crawlControls().findOne({ crawlRunId });
+    if (!document) {
       return null;
     }
 
-    const {
-      _id,
-      searchId,
-      status,
-      cancelRequestedAt,
-      cancelReason,
-      lastHeartbeatAt,
-      finishedAt,
-    } = crawlRun;
-
-    return {
-      _id,
-      searchId,
-      status,
-      cancelRequestedAt,
-      cancelReason,
-      lastHeartbeatAt,
-      finishedAt,
-    };
+    return parseStoredCrawlControl(document);
   }
 
   async heartbeatCrawlRun(
@@ -245,8 +388,171 @@ export class JobCrawlerRepository {
         },
       },
     );
+    await this.crawlControls().updateOne(
+      { crawlRunId },
+      {
+        $set: {
+          status: existing.status,
+          updatedAt: heartbeatAt,
+          lastHeartbeatAt: heartbeatAt,
+        },
+      },
+    );
+    await this.crawlQueue().updateOne(
+      { crawlRunId },
+      {
+        $set: {
+          status: existing.status,
+          updatedAt: heartbeatAt,
+          lastHeartbeatAt: heartbeatAt,
+        },
+      },
+    );
 
     return this.getCrawlRun(crawlRunId);
+  }
+
+  async enqueueCrawlRun(
+    payload: {
+      crawlRunId: string;
+      searchId: string;
+      searchSessionId?: string;
+      ownerKey?: string;
+      queuedAt?: string;
+    },
+  ) {
+    const existing = await this.getCrawlQueueEntryByRunId(payload.crawlRunId);
+    if (existing) {
+      return existing;
+    }
+
+    const queuedAt = payload.queuedAt ?? new Date().toISOString();
+    const document = crawlQueueDocumentSchema.parse({
+      _id: createId(),
+      crawlRunId: payload.crawlRunId,
+      searchId: payload.searchId,
+      searchSessionId: payload.searchSessionId,
+      ownerKey: payload.ownerKey,
+      status: "queued",
+      queuedAt,
+      startedAt: undefined,
+      updatedAt: queuedAt,
+      finishedAt: undefined,
+      cancelRequestedAt: undefined,
+      cancelReason: undefined,
+      lastHeartbeatAt: undefined,
+      workerId: undefined,
+    });
+
+    await this.crawlQueue().insertOne(document);
+    await this.crawlControls().updateOne(
+      { crawlRunId: payload.crawlRunId },
+      {
+        $set: {
+          ownerKey: payload.ownerKey,
+          updatedAt: queuedAt,
+        },
+      },
+    );
+
+    return document;
+  }
+
+  async markCrawlRunStarted(
+    crawlRunId: string,
+    payload: {
+      startedAt?: string;
+      workerId?: string;
+      ownerKey?: string;
+    } = {},
+  ) {
+    const existing = await this.getCrawlQueueEntryByRunId(crawlRunId);
+    if (!existing) {
+      return null;
+    }
+
+    const startedAt = payload.startedAt ?? new Date().toISOString();
+    await this.crawlQueue().updateOne(
+      { crawlRunId },
+      {
+        $set: {
+          status: "running",
+          startedAt,
+          updatedAt: startedAt,
+          lastHeartbeatAt: startedAt,
+          workerId: payload.workerId ?? existing.workerId,
+          ownerKey: payload.ownerKey ?? existing.ownerKey,
+        },
+      },
+    );
+    await this.crawlControls().updateOne(
+      { crawlRunId },
+      {
+        $set: {
+          status: "running",
+          updatedAt: startedAt,
+          lastHeartbeatAt: startedAt,
+          workerId: payload.workerId,
+          ownerKey: payload.ownerKey ?? existing.ownerKey,
+        },
+      },
+    );
+
+    return this.getCrawlQueueEntryByRunId(crawlRunId);
+  }
+
+  async finalizeCrawlQueueEntry(
+    crawlRunId: string,
+    payload: {
+      status: CrawlRunStatus;
+      finishedAt?: string;
+    },
+  ) {
+    const existing = await this.getCrawlQueueEntryByRunId(crawlRunId);
+    if (!existing) {
+      return null;
+    }
+
+    const finishedAt = payload.finishedAt ?? new Date().toISOString();
+    await this.crawlQueue().updateOne(
+      { crawlRunId },
+      {
+        $set: {
+          status: payload.status,
+          updatedAt: finishedAt,
+          finishedAt,
+        },
+      },
+    );
+
+    return this.getCrawlQueueEntryByRunId(crawlRunId);
+  }
+
+  async getCrawlQueueEntryByRunId(crawlRunId: string) {
+    const document = await this.crawlQueue().findOne({ crawlRunId });
+    return document ? parseStoredCrawlQueue(document) : null;
+  }
+
+  async getActiveCrawlQueueEntryForSearch(searchId: string) {
+    const document = await this.crawlQueue().findOne(
+      { searchId, status: { $in: ["queued", "running"] } },
+      { sort: { updatedAt: -1 } },
+    );
+
+    return document ? parseStoredCrawlQueue(document) : null;
+  }
+
+  async getActiveCrawlQueueEntryForOwner(ownerKey: string) {
+    const document = await this.crawlQueue().findOne(
+      { ownerKey, status: { $in: ["queued", "running"] } },
+      { sort: { updatedAt: -1 } },
+    );
+
+    return document ? parseStoredCrawlQueue(document) : null;
+  }
+
+  async hasActiveCrawlQueueEntryForSearch(searchId: string) {
+    return Boolean(await this.getActiveCrawlQueueEntryForSearch(searchId));
   }
 
   async finalizeCrawlRun(
@@ -278,6 +584,18 @@ export class JobCrawlerRepository {
           validationMode: payload.validationMode ?? "deferred",
           providerSummary: normalizeProviderSummary(payload.providerSummary),
           finishedAt: payload.finishedAt ?? new Date().toISOString(),
+        },
+      },
+    );
+    await this.crawlControls().updateOne(
+      { crawlRunId },
+      {
+        $set: {
+          status: payload.status,
+          updatedAt: payload.finishedAt ?? new Date().toISOString(),
+          finishedAt: payload.finishedAt ?? new Date().toISOString(),
+          lastHeartbeatAt: payload.finishedAt ?? new Date().toISOString(),
+          cancelReason: payload.status === "aborted" ? payload.errorMessage : undefined,
         },
       },
     );
@@ -351,6 +669,23 @@ export class JobCrawlerRepository {
       { _id: crawlRunId },
       {
         $set: updateFields,
+      },
+    );
+    await this.crawlControls().updateOne(
+      { crawlRunId },
+      {
+        $set: {
+          ...(typeof payload.status !== "undefined"
+            ? { status: payload.status }
+            : {}),
+          updatedAt: payload.finishedAt ?? new Date().toISOString(),
+          ...(typeof payload.finishedAt !== "undefined"
+            ? {
+                finishedAt: payload.finishedAt,
+                lastHeartbeatAt: payload.finishedAt,
+              }
+            : {}),
+        },
       },
     );
   }
@@ -438,12 +773,111 @@ export class JobCrawlerRepository {
     };
   }
 
+  async getSearchSessionDeliveryCursor(searchSessionId: string) {
+    const searchSession = await this.getSearchSession(searchSessionId);
+    return searchSession?.lastEventSequence ?? 0;
+  }
+
+  async appendExistingJobsToSearchSession(
+    searchSessionId: string,
+    crawlRunId: string,
+    jobIds: string[],
+  ) {
+    if (jobIds.length === 0) {
+      return this.updateSearchSession(searchSessionId, {
+        latestCrawlRunId: crawlRunId,
+      });
+    }
+
+    await this.appendSearchSessionJobEvents(searchSessionId, crawlRunId, jobIds);
+    return this.getSearchSession(searchSessionId);
+  }
+
+  async getJobsBySearchSession(searchSessionId: string) {
+    const events = (await this.searchSessionJobEvents()
+      .find({ searchSessionId }, { sort: { sequence: 1 } })
+      .toArray())
+      .map((document) => parseStoredSearchSessionJobEvent(document));
+
+    if (events.length === 0) {
+      return [] as JobListing[];
+    }
+
+    const jobDocuments = await this.jobs()
+      .find({ _id: { $in: events.map((event) => event.jobId) } })
+      .toArray();
+    const jobsById = new Map(
+      jobDocuments.map((document) => {
+        const job = parseStoredJob(document);
+        return [job._id, job] as const;
+      }),
+    );
+
+    return dedupeStoredJobs(
+      events
+        .map((event) => jobsById.get(event.jobId))
+        .filter((job): job is JobListing => Boolean(job)),
+    );
+  }
+
+  async getJobsBySearchSessionAfterSequence(searchSessionId: string, afterSequence = 0) {
+    const allEvents = (await this.searchSessionJobEvents()
+      .find({ searchSessionId }, { sort: { sequence: 1 } })
+      .toArray())
+      .map((document) => parseStoredSearchSessionJobEvent(document));
+    const nextEvents = allEvents.filter((event) => event.sequence > afterSequence);
+    const cursor = allEvents[allEvents.length - 1]?.sequence ?? 0;
+
+    if (nextEvents.length === 0) {
+      return {
+        cursor,
+        jobs: [] as JobListing[],
+      };
+    }
+
+    const jobDocuments = await this.jobs()
+      .find({ _id: { $in: nextEvents.map((event) => event.jobId) } })
+      .toArray();
+    const jobsById = new Map(
+      jobDocuments.map((document) => {
+        const job = parseStoredJob(document);
+        return [job._id, job] as const;
+      }),
+    );
+
+    return {
+      cursor,
+      jobs: dedupeStoredJobs(
+        nextEvents
+          .map((event) => jobsById.get(event.jobId))
+          .filter((job): job is JobListing => Boolean(job)),
+      ),
+    };
+  }
+
   async getJob(jobId: string) {
     const document = await this.jobs().findOne({ _id: jobId });
     return document ? parseStoredJob(document) : null;
   }
 
-  async persistJobs(crawlRunId: string, jobs: PersistableJob[]) {
+  async listJobs() {
+    const documents = await this.jobs()
+      .find(
+        {},
+        { sort: { postingDate: -1, crawledAt: -1, discoveredAt: -1, title: 1 } },
+      )
+      .toArray();
+
+    return dedupeStoredJobs(documents.map((document) => parseStoredJob(document)));
+  }
+
+  async persistJobs(
+    crawlRunId: string,
+    jobs: PersistableJob[],
+    options: {
+      searchSessionId?: string;
+    } = {},
+  ) {
     const savedJobsById = new Map<string, JobListing>();
     const sanitizedJobs = dedupeJobs(jobs.map((job) => sanitizePersistableJob(job)));
     const existingJobs = await this.findExistingJobsForBatch(sanitizedJobs);
@@ -482,6 +916,13 @@ export class JobCrawlerRepository {
 
     if (newToRunJobIds.size > 0) {
       await this.appendCrawlRunJobEvents(crawlRunId, Array.from(newToRunJobIds));
+      if (options.searchSessionId) {
+        await this.appendSearchSessionJobEvents(
+          options.searchSessionId,
+          crawlRunId,
+          Array.from(newToRunJobIds),
+        );
+      }
     }
 
     return dedupeStoredJobs(Array.from(savedJobsById.values()));
@@ -501,8 +942,21 @@ export class JobCrawlerRepository {
           ...existing,
           ...record,
           firstSeenAt: parseStoredSourceInventory(existing).firstSeenAt,
+          status: parseStoredSourceInventory(existing).status,
+          health: parseStoredSourceInventory(existing).health,
+          crawlPriority: Math.min(
+            parseStoredSourceInventory(existing).crawlPriority,
+            record.crawlPriority,
+          ),
+          failureCount: parseStoredSourceInventory(existing).failureCount,
+          consecutiveFailures: parseStoredSourceInventory(existing).consecutiveFailures,
+          lastFailureReason:
+            parseStoredSourceInventory(existing).lastFailureReason ?? record.lastFailureReason,
           lastSeenAt: record.lastSeenAt,
           lastRefreshedAt: record.lastRefreshedAt,
+          lastCrawledAt: parseStoredSourceInventory(existing).lastCrawledAt,
+          lastSucceededAt: parseStoredSourceInventory(existing).lastSucceededAt,
+          lastFailedAt: parseStoredSourceInventory(existing).lastFailedAt,
         });
         const { _id, ...updateFields } = merged;
         await this.sourceInventory().updateOne({ _id }, { $set: updateFields });
@@ -515,12 +969,29 @@ export class JobCrawlerRepository {
     return this.listSourceInventory();
   }
 
+  async upsertDiscoveredSourcesIntoInventory(
+    sources: DiscoveredSource[],
+    observedAt: string,
+  ) {
+    const records = sources.map((source, index) =>
+      toSourceInventoryRecord(source, {
+        now: observedAt,
+        inventoryOrigin: inventoryOriginFromDiscoveryMethod(source.discoveryMethod),
+        inventoryRank: index,
+      }),
+    );
+
+    return this.upsertSourceInventory(records);
+  }
+
   async listSourceInventory(platforms?: SourceInventoryRecord["platform"][]) {
     const documents = await this.sourceInventory()
       .find(
         platforms && platforms.length > 0 ? { platform: { $in: platforms } } : {},
         {
           sort: {
+            status: 1,
+            crawlPriority: 1,
             inventoryRank: 1,
             platform: 1,
             companyHint: 1,
@@ -531,6 +1002,58 @@ export class JobCrawlerRepository {
       .toArray();
 
     return documents.map((document) => parseStoredSourceInventory(document));
+  }
+
+  async recordSourceInventoryObservations(observations: SourceInventoryObservation[]) {
+    for (const observation of observations) {
+      const existing = await this.sourceInventory().findOne({ _id: observation.sourceId });
+      if (!existing) {
+        continue;
+      }
+
+      const parsedExisting = parseStoredSourceInventory(existing);
+      const hasOutcome = typeof observation.succeeded === "boolean";
+      const succeeded = observation.succeeded === true;
+      const nextFailureCount = !hasOutcome
+        ? parsedExisting.failureCount
+        : succeeded
+          ? parsedExisting.failureCount
+          : parsedExisting.failureCount + 1;
+      const nextConsecutiveFailures = !hasOutcome
+        ? parsedExisting.consecutiveFailures
+        : succeeded
+          ? 0
+          : parsedExisting.consecutiveFailures + 1;
+      const health =
+        observation.health ??
+        (!hasOutcome
+          ? parsedExisting.health
+          : succeeded
+          ? "healthy"
+          : nextConsecutiveFailures >= 3
+            ? "failing"
+            : "degraded");
+      const status = observation.status ?? parsedExisting.status;
+      const merged = sourceInventoryRecordSchema.parse({
+        ...parsedExisting,
+        status,
+        health,
+        failureCount: nextFailureCount,
+        consecutiveFailures: nextConsecutiveFailures,
+        lastFailureReason: !hasOutcome || succeeded
+          ? undefined
+          : observation.lastFailureReason ?? parsedExisting.lastFailureReason,
+        lastSeenAt: observation.observedAt,
+        lastCrawledAt: observation.observedAt,
+        lastSucceededAt: succeeded ? observation.observedAt : parsedExisting.lastSucceededAt,
+        lastFailedAt:
+          hasOutcome && !succeeded ? observation.observedAt : parsedExisting.lastFailedAt,
+      });
+      const { _id, ...updateFields } = merged;
+      await this.sourceInventory().updateOne({ _id }, { $set: updateFields });
+    }
+
+    return this.listSourceInventory();
   }
 
   async getFreshValidation(applyUrl: string, checkedAfter: string) {
@@ -577,6 +1100,10 @@ export class JobCrawlerRepository {
     return this.db.collection<SearchDocument>(collectionNames.searches);
   }
 
+  private searchSessions() {
+    return this.db.collection<SearchSessionDocument>(collectionNames.searchSessions);
+  }
+
   private jobs() {
     return this.db.collection<JobListing>(collectionNames.jobs);
   }
@@ -585,12 +1112,24 @@ export class JobCrawlerRepository {
     return this.db.collection<CrawlRun>(collectionNames.crawlRuns);
   }
 
+  private crawlControls() {
+    return this.db.collection<CrawlControlDocument>(collectionNames.crawlControls);
+  }
+
+  private crawlQueue() {
+    return this.db.collection<CrawlQueueDocument>(collectionNames.crawlQueue);
+  }
+
   private crawlSourceResults() {
     return this.db.collection<CrawlSourceResult>(collectionNames.crawlSourceResults);
   }
 
   private crawlRunJobEvents() {
     return this.db.collection<CrawlRunJobEvent>(collectionNames.crawlRunJobEvents);
+  }
+
+  private searchSessionJobEvents() {
+    return this.db.collection<SearchSessionJobEvent>(collectionNames.searchSessionJobEvents);
   }
 
   private linkValidations() {
@@ -615,6 +1154,49 @@ export class JobCrawlerRepository {
         savedAt,
       })),
       updates: [],
+    });
+  }
+
+  private async appendSearchSessionJobEvents(
+    searchSessionId: string,
+    crawlRunId: string,
+    jobIds: string[],
+  ) {
+    const existingEvents = (await this.searchSessionJobEvents()
+      .find({ searchSessionId }, { sort: { sequence: 1 } })
+      .toArray())
+      .map((document) => parseStoredSearchSessionJobEvent(document));
+    const existingJobIds = new Set(existingEvents.map((event) => event.jobId));
+    const newJobIds = jobIds.filter((jobId) => !existingJobIds.has(jobId));
+
+    if (newJobIds.length === 0) {
+      return this.updateSearchSession(searchSessionId, {
+        latestCrawlRunId: crawlRunId,
+      });
+    }
+
+    const latestSequence = existingEvents[existingEvents.length - 1]?.sequence ?? 0;
+    const createdAt = new Date().toISOString();
+    const inserts = newJobIds.map((jobId, index) =>
+      searchSessionJobEventSchema.parse({
+        _id: createId(),
+        searchSessionId,
+        crawlRunId,
+        jobId,
+        sequence: latestSequence + index + 1,
+        createdAt,
+      }),
+    );
+
+    await persistBatchMutations(this.searchSessionJobEvents(), {
+      inserts,
+      updates: [],
+    });
+
+    await this.updateSearchSession(searchSessionId, {
+      latestCrawlRunId: crawlRunId,
+      lastEventSequence: inserts[inserts.length - 1]?.sequence ?? latestSequence,
+      lastEventAt: createdAt,
     });
   }
 }
@@ -917,7 +1499,23 @@ function parseStoredSearch(document: Record<string, unknown>) {
     ...document,
     filters: sanitizeSearchFiltersInput(document.filters),
     latestCrawlRunId: normalizeOptionalDocumentString(document.latestCrawlRunId),
+    latestSearchSessionId: normalizeOptionalDocumentString(document.latestSearchSessionId),
     lastStatus: document.lastStatus == null ? undefined : document.lastStatus,
+  });
+}
+
+function parseStoredSearchSession(document: Record<string, unknown>) {
+  const normalizedDocument = normalizeLegacyStoredRecord(document);
+
+  return searchSessionDocumentSchema.parse({
+    ...normalizedDocument,
+    latestCrawlRunId: normalizeOptionalDocumentString(normalizedDocument.latestCrawlRunId),
+    finishedAt: normalizeOptionalDocumentString(normalizedDocument.finishedAt),
+    lastEventSequence:
+      typeof normalizedDocument.lastEventSequence === "number"
+        ? normalizedDocument.lastEventSequence
+        : 0,
+    lastEventAt: normalizeOptionalDocumentString(normalizedDocument.lastEventAt),
   });
 }
 
@@ -927,6 +1525,7 @@ function parseStoredCrawlRun(document: Record<string, unknown>) {
 
     return crawlRunDocumentSchema.parse({
     ...normalizedDocument,
+    searchSessionId: normalizeOptionalDocumentString(normalizedDocument.searchSessionId),
     finishedAt: normalizeOptionalDocumentString(normalizedDocument.finishedAt),
     cancelRequestedAt: normalizeOptionalDocumentString(normalizedDocument.cancelRequestedAt),
     cancelReason: normalizeOptionalDocumentString(normalizedDocument.cancelReason),
@@ -953,6 +1552,37 @@ function parseStoredCrawlRun(document: Record<string, unknown>) {
   });
 }
 
+function parseStoredCrawlControl(document: Record<string, unknown>) {
+  const normalizedDocument = normalizeLegacyStoredRecord(document);
+
+  return crawlControlDocumentSchema.parse({
+    ...normalizedDocument,
+    searchSessionId: normalizeOptionalDocumentString(normalizedDocument.searchSessionId),
+    ownerKey: normalizeOptionalDocumentString(normalizedDocument.ownerKey),
+    finishedAt: normalizeOptionalDocumentString(normalizedDocument.finishedAt),
+    cancelRequestedAt: normalizeOptionalDocumentString(normalizedDocument.cancelRequestedAt),
+    cancelReason: normalizeOptionalDocumentString(normalizedDocument.cancelReason),
+    lastHeartbeatAt: normalizeOptionalDocumentString(normalizedDocument.lastHeartbeatAt),
+    workerId: normalizeOptionalDocumentString(normalizedDocument.workerId),
+  });
+}
+
+function parseStoredCrawlQueue(document: Record<string, unknown>) {
+  const normalizedDocument = normalizeLegacyStoredRecord(document);
+
+  return crawlQueueDocumentSchema.parse({
+    ...normalizedDocument,
+    searchSessionId: normalizeOptionalDocumentString(normalizedDocument.searchSessionId),
+    ownerKey: normalizeOptionalDocumentString(normalizedDocument.ownerKey),
+    startedAt: normalizeOptionalDocumentString(normalizedDocument.startedAt),
+    finishedAt: normalizeOptionalDocumentString(normalizedDocument.finishedAt),
+    cancelRequestedAt: normalizeOptionalDocumentString(normalizedDocument.cancelRequestedAt),
+    cancelReason: normalizeOptionalDocumentString(normalizedDocument.cancelReason),
+    lastHeartbeatAt: normalizeOptionalDocumentString(normalizedDocument.lastHeartbeatAt),
+    workerId: normalizeOptionalDocumentString(normalizedDocument.workerId),
+  });
+}
+
 function parseStoredCrawlSourceResult(document: Record<string, unknown>) {
   const normalizedDocument = normalizeLegacyStoredRecord(document);
 
@@ -972,6 +1602,19 @@ function parseStoredCrawlRunJobEvent(document: Record<string, unknown>): CrawlRu
     sequence: Number(normalizedDocument.sequence),
     savedAt: String(normalizedDocument.savedAt),
   };
+}
+
+function parseStoredSearchSessionJobEvent(document: Record<string, unknown>): SearchSessionJobEvent {
+  const normalizedDocument = normalizeLegacyStoredRecord(document);
+
+  return searchSessionJobEventSchema.parse({
+    _id: String(normalizedDocument._id),
+    searchSessionId: String(normalizedDocument.searchSessionId),
+    crawlRunId: String(normalizedDocument.crawlRunId),
+    jobId: String(normalizedDocument.jobId),
+    sequence: Number(normalizedDocument.sequence),
+    createdAt: String(normalizedDocument.createdAt),
+  });
 }
 
 function parseStoredJob(document: Record<string, unknown>) {
@@ -1001,12 +1644,14 @@ function createStoredCrawlRunDocument(
   now: string,
   validationMode: CrawlValidationMode | undefined,
   stage: CrawlRunStage | undefined,
+  searchSessionId: string | undefined,
 ) {
   const diagnostics = normalizeCrawlDiagnostics();
 
   return crawlRunDocumentSchema.parse({
     _id: createId(),
     searchId,
+    searchSessionId,
     startedAt: now,
     status: "running",
     stage: stage ?? "queued",
@@ -1021,6 +1666,27 @@ function createStoredCrawlRunDocument(
     validationMode: validationMode ?? "deferred",
     providerSummary: [],
     diagnostics,
+  });
+}
+
+function createStoredCrawlControlDocument(
+  crawlRun: CrawlRun,
+  now: string,
+) {
+  return crawlControlDocumentSchema.parse({
+    _id: crawlRun._id,
+    crawlRunId: crawlRun._id,
+    searchId: crawlRun.searchId,
+    searchSessionId: crawlRun.searchSessionId,
+    ownerKey: undefined,
+    status: crawlRun.status,
+    startedAt: crawlRun.startedAt,
+    updatedAt: now,
+    finishedAt: crawlRun.finishedAt,
+    cancelRequestedAt: crawlRun.cancelRequestedAt,
+    cancelReason: crawlRun.cancelReason,
+    lastHeartbeatAt: crawlRun.lastHeartbeatAt,
+    workerId: undefined,
   });
 }
 

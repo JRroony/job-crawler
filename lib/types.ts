@@ -305,6 +305,13 @@ export const crawlRunStatuses = [
 
 export const crawlRunStatusSchema = z.enum(crawlRunStatuses);
 
+export const crawlQueueStatuses = [
+  "queued",
+  ...crawlRunStatuses,
+] as const;
+
+export const crawlQueueStatusSchema = z.enum(crawlQueueStatuses);
+
 export const crawlRunStages = [
   "queued",
   "discovering",
@@ -706,14 +713,28 @@ export const searchDocumentSchema = z.object({
   _id: z.string().min(1),
   filters: searchFiltersSchema,
   latestCrawlRunId: nullableOptional(z.string()),
+  latestSearchSessionId: nullableOptional(z.string()),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   lastStatus: nullableOptional(crawlRunStatusSchema),
 });
 
+export const searchSessionDocumentSchema = z.object({
+  _id: z.string().min(1),
+  searchId: z.string().min(1),
+  latestCrawlRunId: nullableOptional(z.string()),
+  status: crawlRunStatusSchema,
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  finishedAt: nullableOptional(z.string().datetime()),
+  lastEventSequence: z.number().int().nonnegative().default(0),
+  lastEventAt: nullableOptional(z.string().datetime()),
+});
+
 export const crawlRunDocumentSchema = z.object({
   _id: z.string().min(1),
   searchId: z.string().min(1),
+  searchSessionId: nullableOptional(z.string()),
   startedAt: z.string().datetime(),
   finishedAt: nullableOptional(z.string().datetime()),
   status: crawlRunStatusSchema,
@@ -732,6 +753,39 @@ export const crawlRunDocumentSchema = z.object({
   diagnostics: crawlDiagnosticsSchema.default({}),
 });
 
+export const crawlControlDocumentSchema = z.object({
+  _id: z.string().min(1),
+  crawlRunId: z.string().min(1),
+  searchId: z.string().min(1),
+  searchSessionId: nullableOptional(z.string()),
+  ownerKey: nullableOptional(z.string()),
+  status: crawlRunStatusSchema,
+  startedAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  finishedAt: nullableOptional(z.string().datetime()),
+  cancelRequestedAt: nullableOptional(z.string().datetime()),
+  cancelReason: nullableOptional(z.string()),
+  lastHeartbeatAt: nullableOptional(z.string().datetime()),
+  workerId: nullableOptional(z.string()),
+});
+
+export const crawlQueueDocumentSchema = z.object({
+  _id: z.string().min(1),
+  crawlRunId: z.string().min(1),
+  searchId: z.string().min(1),
+  searchSessionId: nullableOptional(z.string()),
+  ownerKey: nullableOptional(z.string()),
+  status: crawlQueueStatusSchema,
+  queuedAt: z.string().datetime(),
+  startedAt: nullableOptional(z.string().datetime()),
+  updatedAt: z.string().datetime(),
+  finishedAt: nullableOptional(z.string().datetime()),
+  cancelRequestedAt: nullableOptional(z.string().datetime()),
+  cancelReason: nullableOptional(z.string()),
+  lastHeartbeatAt: nullableOptional(z.string().datetime()),
+  workerId: nullableOptional(z.string()),
+});
+
 export const crawlSourceResultSchema = z.object({
   _id: z.string().min(1),
   crawlRunId: z.string().min(1),
@@ -746,6 +800,15 @@ export const crawlSourceResultSchema = z.object({
   errorMessage: nullableOptional(z.string()),
   startedAt: z.string().datetime(),
   finishedAt: z.string().datetime(),
+});
+
+export const searchSessionJobEventSchema = z.object({
+  _id: z.string().min(1),
+  searchSessionId: z.string().min(1),
+  crawlRunId: z.string().min(1),
+  jobId: z.string().min(1),
+  sequence: z.number().int().nonnegative(),
+  createdAt: z.string().datetime(),
 });
 
 export const linkValidationResultSchema = z.object({
@@ -782,6 +845,7 @@ export const companyPageSourceConfigSchema = z.discriminatedUnion("type", [
 
 export const crawlResponseSchema = z.object({
   search: searchDocumentSchema,
+  searchSession: searchSessionDocumentSchema.optional(),
   crawlRun: crawlRunDocumentSchema,
   sourceResults: z.array(crawlSourceResultSchema),
   jobs: z.array(jobListingSchema),
@@ -794,6 +858,7 @@ export const crawlResponseSchema = z.object({
 
 export const crawlDeltaResponseSchema = z.object({
   search: searchDocumentSchema,
+  searchSession: searchSessionDocumentSchema.optional(),
   crawlRun: crawlRunDocumentSchema,
   sourceResults: z.array(crawlSourceResultSchema),
   jobs: z.array(jobListingSchema),
@@ -835,13 +900,18 @@ export type ResolvedLocation = z.infer<typeof resolvedLocationSchema>;
 export type JobListing = z.infer<typeof jobListingSchema>;
 export type PersistableJobDocument = z.infer<typeof persistableJobSchema>;
 export type SearchDocument = z.infer<typeof searchDocumentSchema>;
+export type SearchSessionDocument = z.infer<typeof searchSessionDocumentSchema>;
 export type CrawlRun = z.infer<typeof crawlRunDocumentSchema>;
+export type CrawlControlDocument = z.infer<typeof crawlControlDocumentSchema>;
+export type CrawlQueueDocument = z.infer<typeof crawlQueueDocumentSchema>;
 export type CrawlSourceResult = z.infer<typeof crawlSourceResultSchema>;
+export type SearchSessionJobEvent = z.infer<typeof searchSessionJobEventSchema>;
 export type CrawlProviderSummary = z.infer<typeof crawlProviderSummarySchema>;
 export type LinkValidationResult = z.infer<typeof linkValidationResultSchema>;
 export type SourceProvenance = z.infer<typeof sourceProvenanceSchema>;
 export type ProviderPlatform = z.infer<typeof providerPlatformSchema>;
 export type CrawlRunStatus = z.infer<typeof crawlRunStatusSchema>;
+export type CrawlQueueStatus = z.infer<typeof crawlQueueStatusSchema>;
 export type CrawlRunStage = z.infer<typeof crawlRunStageSchema>;
 export type CrawlSourceStatus = z.infer<typeof crawlSourceStatusSchema>;
 export type LinkStatus = z.infer<typeof linkStatusSchema>;

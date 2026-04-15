@@ -1823,5 +1823,11 @@ describe("source capping with platform diversity", () => {
       true,
     );
     expect(baseline.sources.some((source) => source.platform === "greenhouse")).toBe(true);
+    expect(
+      baseline.sources.some(
+        (source) =>
+          source.platform === "greenhouse" && source.discoveryMethod !== "source_inventory",
+      ),
+    ).toBe(false);
   });
 });

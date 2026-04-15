@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { runSearchFromFilters } from "@/lib/server/crawler/service";
+import { runSearchIngestionFromFilters } from "@/lib/server/crawler/service";
 import { collectionNames } from "@/lib/server/db/indexes";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
@@ -81,7 +81,7 @@ describe("crawl orchestration", () => {
       },
     };
 
-    await runSearchFromFilters(
+    await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
       },
@@ -134,7 +134,7 @@ describe("crawl orchestration", () => {
       },
     };
 
-    await runSearchFromFilters(
+    await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         platforms: ["lever"],
@@ -196,7 +196,7 @@ describe("crawl orchestration", () => {
       },
     };
 
-    await runSearchFromFilters(
+    await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",
@@ -228,7 +228,7 @@ describe("crawl orchestration", () => {
       },
     };
 
-    await runSearchFromFilters(
+    await runSearchIngestionFromFilters(
       {
         title: "Greenhouse software engineer jobs in the US",
       },
@@ -260,7 +260,7 @@ describe("crawl orchestration", () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const now = new Date("2026-04-14T12:00:00.000Z");
     let supplementalFetchStarted = false;
-    let inventoryRoutedBeforeSupplemental = false;
+    let inventorySourceRouted = false;
 
     await refreshSourceInventory({
       repository,
@@ -302,8 +302,8 @@ describe("crawl orchestration", () => {
     });
 
     const provider = createStubProvider("greenhouse", async (_context, sources) => {
-      if (sources.some((source) => source.token === "openai") && !supplementalFetchStarted) {
-        inventoryRoutedBeforeSupplemental = true;
+      if (sources.some((source) => source.token === "openai")) {
+        inventorySourceRouted = true;
       }
       const datadogSource = sources.find((source) => source.token === "datadog");
       if (datadogSource) {
@@ -349,7 +349,7 @@ describe("crawl orchestration", () => {
       );
     }) as unknown as typeof fetch;
 
-    const runPromise = runSearchFromFilters(
+    const runPromise = runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",
@@ -367,7 +367,8 @@ describe("crawl orchestration", () => {
 
     const result = await runPromise;
 
-    expect(inventoryRoutedBeforeSupplemental).toBe(true);
+    expect(inventorySourceRouted).toBe(true);
+    expect(supplementalFetchStarted).toBe(true);
     expect(result.jobs.map((job) => job.title)).toEqual(
       expect.arrayContaining([
         "Inventory Software Engineer",
@@ -375,6 +376,90 @@ describe("crawl orchestration", () => {
       ]),
     );
   }, 10000);
+
+  it("updates Greenhouse inventory health after inventory-backed crawl execution", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-14T12:00:00.000Z");
+
+    await refreshSourceInventory({
+      repository,
+      now,
+      env: {
+        greenhouseBoardTokens: ["openai"],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
+        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
+        PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 20,
+        PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 12,
+        PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: 2,
+        GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 8,
+      },
+    });
+
+    const provider = createStubProvider("greenhouse", async (_context, sources) => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: sources.length,
+      fetchedCount: 1,
+      matchedCount: 1,
+      jobs: [
+        {
+          title: "Inventory Software Engineer",
+          company: "OpenAI",
+          locationText: "Remote, United States",
+          sourcePlatform: "greenhouse" as const,
+          sourceJobId: "inventory-job",
+          sourceUrl: "https://example.com/jobs/inventory-job",
+          applyUrl: "https://example.com/jobs/inventory-job/apply",
+          canonicalUrl: "https://example.com/jobs/inventory-job",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+      ],
+    }));
+
+    await runSearchIngestionFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery: createDiscoveryService({
+          repository,
+          env: {
+            greenhouseBoardTokens: [],
+            leverSiteTokens: [],
+            ashbyBoardTokens: [],
+            companyPageSources: [],
+            PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
+            PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
+            PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 20,
+            PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 12,
+            PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: 2,
+            GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 8,
+          },
+        }),
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    const inventory = await repository.listSourceInventory(["greenhouse"]);
+
+    expect(inventory.some((record) => record.token === "openai")).toBe(true);
+    expect(inventory.find((record) => record.token === "openai")).toMatchObject({
+      health: "healthy",
+      failureCount: 0,
+      consecutiveFailures: 0,
+      lastCrawledAt: expect.any(String),
+      lastSucceededAt: expect.any(String),
+    });
+  });
 
   it("returns jobs in the crawl response when registry-backed Greenhouse sources are available", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
@@ -439,7 +524,7 @@ describe("crawl orchestration", () => {
       );
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",
@@ -481,7 +566,7 @@ describe("crawl orchestration", () => {
       };
     });
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
       },
@@ -534,7 +619,7 @@ describe("crawl orchestration", () => {
       };
     });
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
       },
@@ -603,7 +688,7 @@ describe("crawl orchestration", () => {
       });
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         experienceLevel: "intern",
@@ -703,7 +788,7 @@ describe("crawl orchestration", () => {
         };
       });
 
-      const result = await runSearchFromFilters(
+      const result = await runSearchIngestionFromFilters(
         {
           title: "Software Engineer",
           experienceLevel: currentCase.level,
@@ -799,7 +884,7 @@ describe("crawl orchestration", () => {
       });
     }) as unknown as typeof fetch;
 
-    const midResult = await runSearchFromFilters(
+    const midResult = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         experienceLevel: "mid",
@@ -816,7 +901,7 @@ describe("crawl orchestration", () => {
     expect(midResult.jobs[0]?.sourceJobId).toBe("software-engineer-mid");
     expect(midResult.jobs[0]?.experienceLevel).toBe("mid");
 
-    const internResult = await runSearchFromFilters(
+    const internResult = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         experienceLevel: "intern",
@@ -917,7 +1002,7 @@ describe("crawl orchestration", () => {
       });
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         experienceLevels: ["intern", "senior"],
@@ -994,7 +1079,7 @@ describe("crawl orchestration", () => {
       });
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         experienceLevel: "senior",
@@ -1096,7 +1181,7 @@ describe("crawl orchestration", () => {
       });
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         experienceLevel: "intern",
@@ -1235,7 +1320,7 @@ describe("crawl orchestration", () => {
       });
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
       },
@@ -1305,7 +1390,7 @@ describe("crawl orchestration", () => {
       });
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Backend Engineer",
         country: "United States",
@@ -1400,7 +1485,7 @@ describe("crawl orchestration", () => {
       });
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Backend Engineer",
         country: "United States",
@@ -1520,7 +1605,7 @@ describe("crawl orchestration", () => {
       });
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Backend Engineer",
         country: "US",
@@ -1598,7 +1683,7 @@ describe("crawl orchestration", () => {
       } as Response;
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Backend Engineer",
       },
@@ -1701,7 +1786,7 @@ describe("crawl orchestration", () => {
       } as Response;
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Backend Engineer",
       },
@@ -1792,7 +1877,7 @@ describe("crawl orchestration", () => {
       } as Response;
     }) as unknown as typeof fetch;
 
-    await runSearchFromFilters(
+    await runSearchIngestionFromFilters(
       {
         title: "Backend Engineer",
       },
@@ -1870,7 +1955,7 @@ describe("crawl orchestration", () => {
       });
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Backend Engineer",
       },

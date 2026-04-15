@@ -1,5 +1,8 @@
 import "server-only";
 
+import { createId } from "@/lib/server/crawler/helpers";
+import type { JobCrawlerRepository } from "@/lib/server/db/repository";
+
 type PendingRunRecord = {
   promise: Promise<void>;
   startedAt: string;
@@ -31,49 +34,99 @@ function getPendingRunOwners() {
   return globalThis.__jobCrawlerPendingRunOwners;
 }
 
-export function isSearchRunPending(searchId: string) {
-  return getPendingRuns().has(searchId);
+export async function isSearchRunPending(
+  searchId: string,
+  repository: JobCrawlerRepository,
+) {
+  if (getPendingRuns().has(searchId)) {
+    return true;
+  }
+
+  return repository.hasActiveCrawlQueueEntryForSearch(searchId);
 }
 
-export function queueSearchRun(
+export async function queueSearchRun(
   searchId: string,
+  repository: JobCrawlerRepository,
   task: (signal: AbortSignal) => Promise<void>,
   options: {
     ownerKey?: string;
     crawlRunId?: string;
+    searchSessionId?: string;
+    queuedAt?: string;
   } = {},
 ) {
+  const crawlRunId = options.crawlRunId;
+  if (!crawlRunId) {
+    throw new Error("queueSearchRun requires a crawlRunId for durable task control.");
+  }
+
   const pendingRuns = getPendingRuns();
   if (pendingRuns.has(searchId)) {
     return false;
   }
 
+  const activeQueueEntry = await repository.getActiveCrawlQueueEntryForSearch(searchId);
+  if (activeQueueEntry && activeQueueEntry.crawlRunId !== crawlRunId) {
+    return false;
+  }
+
+  await repository.enqueueCrawlRun({
+    crawlRunId,
+    searchId,
+    searchSessionId: options.searchSessionId,
+    ownerKey: options.ownerKey,
+    queuedAt: options.queuedAt,
+  });
+
   const pendingRunOwners = getPendingRunOwners();
   const controller = new AbortController();
-  const promise = task(controller.signal)
-    .catch((error) => {
-      if (isAbortLikeError(error)) {
-        return;
-      }
+  const startedAt = new Date().toISOString();
+  const workerId = `worker:${createId()}`;
+  const promise = (async () => {
+    await repository.markCrawlRunStarted(crawlRunId, {
+      startedAt,
+      workerId,
+      ownerKey: options.ownerKey,
+    });
 
-      console.error("[crawl:background-run]", {
-        searchId,
-        message: error instanceof Error ? error.message : "Background crawl failed unexpectedly.",
+    try {
+      await task(controller.signal);
+    } catch (error) {
+      if (!isAbortLikeError(error)) {
+        console.error("[crawl:background-run]", {
+          searchId,
+          crawlRunId,
+          message:
+            error instanceof Error
+              ? error.message
+              : "Background crawl failed unexpectedly.",
+        });
+      }
+    } finally {
+      const controlState = await repository.getCrawlRunControlState(crawlRunId);
+      const finalizedStatus =
+        controlState && controlState.status !== "running"
+          ? controlState.status
+          : controller.signal.aborted || controlState?.cancelRequestedAt
+            ? "aborted"
+            : "completed";
+      await repository.finalizeCrawlQueueEntry(crawlRunId, {
+        status: finalizedStatus,
       });
-    })
-    .finally(() => {
       pendingRuns.delete(searchId);
       if (options.ownerKey && pendingRunOwners.get(options.ownerKey) === searchId) {
         pendingRunOwners.delete(options.ownerKey);
       }
-    });
+    }
+  })();
 
   pendingRuns.set(searchId, {
     promise,
-    startedAt: new Date().toISOString(),
+    startedAt,
     controller,
     ownerKey: options.ownerKey,
-    crawlRunId: options.crawlRunId,
+    crawlRunId,
   });
   if (options.ownerKey) {
     pendingRunOwners.set(options.ownerKey, searchId);
@@ -84,24 +137,31 @@ export function queueSearchRun(
 
 export async function abortSearchRun(
   searchId: string,
+  repository: JobCrawlerRepository,
   options: {
     reason?: string;
     awaitCompletion?: boolean;
   } = {},
 ) {
+  const activeQueueEntry = await repository.getActiveCrawlQueueEntryForSearch(searchId);
   const record = getPendingRuns().get(searchId);
-  if (!record) {
+  const crawlRunId = activeQueueEntry?.crawlRunId ?? record?.crawlRunId;
+
+  if (!crawlRunId) {
     return false;
   }
 
-  if (!record.controller.signal.aborted) {
-    const abortError = new Error(options.reason ?? "The crawl was aborted.");
-    abortError.name = "AbortError";
-    record.controller.abort(abortError);
-  }
+  await repository.requestCrawlRunCancellation(crawlRunId, {
+    reason: options.reason,
+  });
+  abortPendingRecord(record, options.reason);
 
   if (options.awaitCompletion) {
-    await record.promise;
+    if (record) {
+      await record.promise;
+    }
+
+    await waitForRunToSettle(crawlRunId, repository);
   }
 
   return true;
@@ -113,17 +173,52 @@ export function getPendingSearchRun(searchId: string) {
 
 export async function abortOwnerSearchRun(
   ownerKey: string,
+  repository: JobCrawlerRepository,
   options: {
     reason?: string;
     awaitCompletion?: boolean;
   } = {},
 ) {
-  const searchId = getPendingRunOwners().get(ownerKey);
+  const activeQueueEntry = await repository.getActiveCrawlQueueEntryForOwner(ownerKey);
+  const searchId = activeQueueEntry?.searchId ?? getPendingRunOwners().get(ownerKey);
+
   if (!searchId) {
     return false;
   }
 
-  return abortSearchRun(searchId, options);
+  return abortSearchRun(searchId, repository, options);
+}
+
+async function waitForRunToSettle(
+  crawlRunId: string,
+  repository: JobCrawlerRepository,
+  timeoutMs = 5_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const queueState = await repository.getCrawlQueueEntryByRunId(crawlRunId);
+    if (!queueState || queueState.finishedAt || !["queued", "running"].includes(queueState.status)) {
+      return;
+    }
+
+    const controlState = await repository.getCrawlRunControlState(crawlRunId);
+    if (!controlState || controlState.finishedAt || controlState.status !== "running") {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+function abortPendingRecord(record: PendingRunRecord | undefined, reason?: string) {
+  if (!record || record.controller.signal.aborted) {
+    return;
+  }
+
+  const abortError = new Error(reason ?? "The crawl was aborted.");
+  abortError.name = "AbortError";
+  record.controller.abort(abortError);
 }
 
 function isAbortLikeError(error: unknown) {

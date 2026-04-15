@@ -1,0 +1,26 @@
+import type { CrawlLinkValidationMode } from "@/lib/server/crawler/pipeline";
+import type { JobCrawlerRepository } from "@/lib/server/db/repository";
+import { getRepository } from "@/lib/server/db/repository";
+import type { DiscoveryService } from "@/lib/server/discovery/types";
+import type { CrawlProvider } from "@/lib/server/providers/types";
+
+export type JobCrawlerRuntime = {
+  repository?: JobCrawlerRepository;
+  providers?: CrawlProvider[];
+  discovery?: DiscoveryService;
+  fetchImpl?: typeof fetch;
+  now?: Date;
+  deepExperienceInference?: boolean;
+  linkValidationMode?: CrawlLinkValidationMode;
+  inlineValidationTopN?: number;
+  providerTimeoutMs?: number;
+  progressUpdateIntervalMs?: number;
+  earlyVisibleTarget?: number;
+  initialVisibleWaitMs?: number;
+  requestOwnerKey?: string;
+  signal?: AbortSignal;
+};
+
+export async function resolveRepository(repository?: JobCrawlerRepository) {
+  return repository ?? getRepository();
+}

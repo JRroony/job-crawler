@@ -3,6 +3,7 @@
 import { useMemo, useRef, useState } from "react";
 
 import {
+  BackgroundSupplementIndicator,
   LoadingPanel,
   MessageBanner,
   StatePanel,
@@ -499,8 +500,8 @@ export function JobCrawlerApp({
       refreshRecentSearch(payload.search);
       setMessage(
         payload.aborted
-          ? "The crawl was stopped. No more results will be saved for that run."
-          : "That crawl was already finished.",
+          ? "Background work was stopped. Your visible results are preserved."
+          : "That search already finished refining results.",
       );
     } catch (error) {
       if (!isLatestClientRequest(pollToken, pollSequenceRef.current) || isAbortLikeClientError(error)) {
@@ -609,6 +610,8 @@ export function JobCrawlerApp({
     setErrorKind(null);
     // Reset poll token so a new search gets its own sequence
     pollSequenceRef.current = 0;
+    // Clear the form so the new search feels fresh and independent
+    clearSearchForm();
   }
 
   const visibleJobs = useMemo(
@@ -698,7 +701,8 @@ export function JobCrawlerApp({
         </div>
 
         <div className="mt-4 space-y-4">
-          {viewState === "loading" ? (
+          {/* Initial loading panel: shown while waiting for first results */}
+          {viewState === "loading" && (!activeResult || activeResult.jobs.length === 0) ? (
             <LoadingPanel
               stage={activeResult?.crawlRun.stage}
               foundCount={activeResult?.jobs.length}
@@ -712,22 +716,38 @@ export function JobCrawlerApp({
                     onClick={() => void stopActiveSearch(activeResult.search._id)}
                     className="inline-flex items-center justify-center rounded-full border border-ink/15 bg-white px-3 py-1.5 text-xs font-semibold text-ink transition hover:border-red-300 hover:bg-red-50"
                   >
-                    Stop crawl
+                    Stop
                   </button>
                 ) : undefined
               }
               actionButton={
-                activeResult?.crawlRun.status === "running" ? (
-                  <button
-                    type="button"
-                    onClick={() => void startNewSearch()}
-                    className="inline-flex items-center justify-center rounded-full border border-ink/15 bg-white px-3 py-1.5 text-xs font-semibold text-ink transition hover:border-sand hover:bg-sand/20"
-                  >
-                    New Search
-                  </button>
-                ) : undefined
+                <button
+                  type="button"
+                  onClick={() => void startNewSearch()}
+                  className="inline-flex items-center justify-center rounded-full border border-ink/15 bg-white px-3 py-1.5 text-xs font-semibold text-ink transition hover:border-sand hover:bg-sand/20"
+                >
+                  New Search
+                </button>
               }
             />
+          ) : null}
+
+          {/* Background supplement indicator: shown when results are visible but work continues */}
+          {viewState === "loading" && activeResult && activeResult.jobs.length > 0 ? (
+            <div className="flex items-center justify-between gap-3">
+              <BackgroundSupplementIndicator
+                stage={activeResult.crawlRun.stage}
+                foundCount={activeResult.jobs.length}
+                onStop={() => void stopActiveSearch(activeResult.search._id)}
+              />
+              <button
+                type="button"
+                onClick={() => void startNewSearch()}
+                className="inline-flex items-center justify-center rounded-full border border-ink/15 bg-white px-3 py-1.5 text-xs font-semibold text-ink transition hover:border-sand hover:bg-sand/20"
+              >
+                New Search
+              </button>
+            </div>
           ) : null}
 
           {backgroundCrawlNotice ? (
@@ -799,7 +819,7 @@ export function JobCrawlerApp({
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                   <div>
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
-                      Active search
+                      Search results
                     </div>
                     <h2 className="mt-1 text-xl font-semibold tracking-tight text-ink">
                       {activeResult.search.filters.title}
@@ -821,15 +841,24 @@ export function JobCrawlerApp({
                     ) : null}
                   </div>
                   <div className="space-y-3 lg:min-w-[320px]">
+                    {/* Stop button only shown while supplemental work is running */}
                     {activeResult.crawlRun.status === "running" ? (
                       <button
                         type="button"
                         onClick={() => void stopActiveSearch(activeResult.search._id)}
-                        className="inline-flex w-full items-center justify-center rounded-full border border-ink/15 bg-white px-4 py-2 text-sm font-semibold text-ink transition hover:border-sand hover:bg-sand/20"
+                        className="inline-flex w-full items-center justify-center rounded-full border border-ink/15 bg-white px-4 py-2 text-sm font-semibold text-ink transition hover:border-red-300 hover:bg-red-50"
                       >
-                        Stop crawl
+                        Stop background work
                       </button>
                     ) : null}
+                    {/* New Search always available in results view */}
+                    <button
+                      type="button"
+                      onClick={() => void startNewSearch()}
+                      className="inline-flex w-full items-center justify-center rounded-full border border-ink/15 bg-white px-4 py-2 text-sm font-semibold text-ink transition hover:border-sand hover:bg-sand/20"
+                    >
+                      New Search
+                    </button>
                     <div className="grid gap-3 sm:grid-cols-2">
                     <div className="rounded-[18px] border border-ink/8 bg-mist/30 px-4 py-3">
                       <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate/60">
@@ -1047,28 +1076,28 @@ export function describeResultNotice(result: CrawlResponse): ResultNotice | null
     const crawlMode = resolveCrawlMode(result.search.filters.crawlMode);
     const modeHighlight =
       crawlMode === "fast"
-        ? "Fast mode keeps heavier recall work behind the first visible batch."
+        ? "Fast mode shows your first results quickly while refinement continues."
         : crawlMode === "balanced"
-          ? "Balanced mode starts supplemental recall while the first batch is already visible."
-          : "Deep mode keeps widening recall while the visible batch is already available.";
+          ? "Balanced mode refines results in the background while you review what's already visible."
+          : "Deep mode keeps exploring more sources while your current results stay available.";
 
     return {
-      title: "Initial jobs are visible while supplemental recall keeps running",
+      title: "Results are arriving while background work continues",
       description:
-        "You can review and filter the saved jobs now. The crawler is still exploring slower sources and public discovery paths in the same run.",
+        "Browse these jobs now — more may appear as the search finishes exploring additional sources.",
       tone: "tide",
       highlights: [
         modeHighlight,
-        `Saved ${result.jobs.length} job${result.jobs.length === 1 ? "" : "s"} so far while the crawl continues.`,
+        `${result.jobs.length} job${result.jobs.length === 1 ? "" : "s"} saved so far.`,
       ],
     };
   }
 
   if (result.crawlRun.status === "aborted") {
     return {
-      title: "This crawl was stopped before it finished",
+      title: "This search was stopped before refinement finished",
       description:
-        "The currently visible jobs were saved before cancellation, so the result set may be incomplete.",
+        "Your visible results are preserved. Some potential matches may not have been explored yet.",
       tone: "amber",
       highlights: buildOperationalHighlights(diagnostics, { includeFilters: false }),
     };

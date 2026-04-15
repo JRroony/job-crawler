@@ -17,6 +17,7 @@ import {
   runWithConcurrency,
 } from "@/lib/server/crawler/helpers";
 import { parseGreenhouseUrl } from "@/lib/server/discovery/greenhouse-url";
+import type { SourceInventoryObservation } from "@/lib/server/db/repository";
 import type { LocationMatchResult } from "@/lib/server/location-resolution";
 import {
   toStoredValidation,
@@ -53,6 +54,7 @@ import {
   type CrawlValidationMode,
   type JobListing,
   type SearchDocument,
+  type SearchSessionDocument,
 } from "@/lib/types";
 
 export type CrawlLinkValidationMode = CrawlValidationMode;
@@ -64,6 +66,7 @@ const defaultBalancedInlineValidationTopN = 5;
 
 type ExecuteCrawlPipelineInput = {
   search: SearchDocument;
+  searchSession: SearchSessionDocument;
   crawlRun?: CrawlRun;
   repository: JobCrawlerRepository;
   discovery: DiscoveryService;
@@ -216,6 +219,7 @@ export async function executeCrawlPipeline(
     ...input.search,
     filters: normalizedFilters,
   };
+  let searchSession = input.searchSession;
   const validationStrategy = resolveValidationStrategy(
     input.linkValidationMode,
     input.inlineValidationTopN,
@@ -251,6 +255,12 @@ export async function executeCrawlPipeline(
       input.now.toISOString(),
     );
   }
+  searchSession =
+    (await input.repository.updateSearchSession(searchSession._id, {
+      latestCrawlRunId: crawlRun._id,
+      status: "running",
+      updatedAt: input.now.toISOString(),
+    })) ?? searchSession;
 
   const persistentCancellation = await createPersistentCancellationController({
     repository: input.repository,
@@ -469,7 +479,9 @@ export async function executeCrawlPipeline(
 
       const persistenceStartedMs = Date.now();
       await persistentCancellation.throwIfCanceled({ heartbeat: true });
-      const savedJobs = await input.repository.persistJobs(crawlRun._id, dedupedJobs);
+      const savedJobs = await input.repository.persistJobs(crawlRun._id, dedupedJobs, {
+        searchSessionId: searchSession._id,
+      });
       stageTimingsMs.persistence += Date.now() - persistenceStartedMs;
 
       let newVisibleJobCount = 0;
@@ -694,6 +706,28 @@ export async function executeCrawlPipeline(
               onFirstVisibleSaved: options.onFirstVisibleSaved,
             }),
           );
+          await queueMutation(() =>
+            recordInventoryObservations(
+              sourcesForProvider,
+              buildSourceInventoryObservations(sourcesForProvider, {
+                observedAt: finishedAt,
+                status: "active",
+                health:
+                  result.status === "failed"
+                    ? "failing"
+                    : result.status === "partial"
+                      ? "degraded"
+                      : "healthy",
+                lastFailureReason: result.errorMessage,
+                succeeded:
+                  result.status === "success"
+                    ? true
+                    : result.status === "failed"
+                      ? false
+                      : undefined,
+              }),
+            ),
+          );
           return;
         }
 
@@ -713,6 +747,26 @@ export async function executeCrawlPipeline(
           });
           sourceResultsByProvider.set(result.provider, updated);
           await input.repository.updateCrawlSourceResult(updated);
+          await recordInventoryObservations(
+            sourcesForProvider,
+            buildSourceInventoryObservations(sourcesForProvider, {
+              observedAt: finishedAt,
+              status: "active",
+              health:
+                result.status === "failed"
+                  ? "failing"
+                  : result.status === "partial"
+                    ? "degraded"
+                    : "healthy",
+              lastFailureReason: result.errorMessage,
+              succeeded:
+                result.status === "success"
+                  ? true
+                  : result.status === "failed"
+                    ? false
+                    : undefined,
+            }),
+          );
           await updateRunProgress("crawling", finishedAt);
         });
       } catch (reason) {
@@ -753,9 +807,33 @@ export async function executeCrawlPipeline(
           });
           sourceResultsByProvider.set(provider.provider, failedResult);
           await input.repository.updateCrawlSourceResult(failedResult);
+          await recordInventoryObservations(
+            sourcesForProvider,
+            buildSourceInventoryObservations(sourcesForProvider, {
+              observedAt: finishedAt,
+              status: "active",
+              health: "failing",
+              lastFailureReason:
+                reason instanceof Error
+                  ? reason.message
+                  : `Provider ${provider.provider} failed unexpectedly.`,
+              succeeded: false,
+            }),
+          );
           await updateRunProgress("crawling", finishedAt);
         });
       }
+    };
+
+    const recordInventoryObservations = async (
+      sources: readonly DiscoveredSource[],
+      observations: SourceInventoryObservation[],
+    ) => {
+      if (sources.length === 0 || observations.length === 0) {
+        return;
+      }
+
+      await input.repository.recordSourceInventoryObservations(observations);
     };
 
     const processDiscoveryStage = async (payload: {
@@ -816,6 +894,13 @@ export async function executeCrawlPipeline(
       const providerSources = selectedProviders.map((provider) =>
         cappedSources.filter((source) => provider.supportsSource(source)),
       );
+
+      if (cappedSources.length > 0) {
+        await input.repository.upsertDiscoveredSourcesIntoInventory(
+          cappedSources,
+          input.now.toISOString(),
+        );
+      }
 
       diagnostics.discoveredSources = discoveredSourceIds.size;
       diagnostics.crawledSources += providerSources.reduce((total, sources) => total + sources.length, 0);
@@ -1038,16 +1123,26 @@ export async function executeCrawlPipeline(
         finishedAt,
       });
       await input.repository.updateSearchLatestRun(search._id, crawlRun._id, status, finishedAt);
+      searchSession =
+        (await input.repository.updateSearchSession(searchSession._id, {
+          latestCrawlRunId: crawlRun._id,
+          status,
+          finishedAt,
+          updatedAt: finishedAt,
+        })) ?? searchSession;
       
       const responseAssemblyStartedMs = Date.now();
       const finalizedRun = (await input.repository.getCrawlRun(crawlRun._id)) as CrawlRun;
+      const sessionCursor = await input.repository.getSearchSessionDeliveryCursor(searchSession._id);
       const response = crawlResponseSchema.parse({
         search: {
           ...search,
           latestCrawlRunId: crawlRun._id,
+          latestSearchSessionId: searchSession._id,
           lastStatus: status,
           updatedAt: finishedAt,
         },
+        searchSession,
         crawlRun: finalizedRun,
         sourceResults,
         jobs: sortJobsWithDiagnostics(
@@ -1058,7 +1153,7 @@ export async function executeCrawlPipeline(
         diagnostics: finalizedRun.diagnostics,
         delivery: {
           mode: "full",
-          cursor: currentSavedJobs.length,
+          cursor: sessionCursor,
         },
       });
       stageTimingsMs.responseAssembly = Date.now() - responseAssemblyStartedMs;
@@ -1112,7 +1207,9 @@ export async function executeCrawlPipeline(
         },
       );
       diagnostics.validationDeferred = deferredCount;
-      const validatedJobs = await input.repository.persistJobs(crawlRun._id, jobsReadyToPersist);
+      const validatedJobs = await input.repository.persistJobs(crawlRun._id, jobsReadyToPersist, {
+        searchSessionId: searchSession._id,
+      });
       stageTimingsMs.validation = Date.now() - validationStartedMs;
 
       const validationJobIds = resolveValidationJobIds(validatedJobs, jobsReadyToPersist, inlineValidations);
@@ -1153,16 +1250,26 @@ export async function executeCrawlPipeline(
       finishedAt,
     });
     await input.repository.updateSearchLatestRun(search._id, crawlRun._id, status, finishedAt);
+    searchSession =
+      (await input.repository.updateSearchSession(searchSession._id, {
+        latestCrawlRunId: crawlRun._id,
+        status,
+        finishedAt,
+        updatedAt: finishedAt,
+      })) ?? searchSession;
 
     const responseAssemblyStartedMs = Date.now();
     const finalizedRun = (await input.repository.getCrawlRun(crawlRun._id)) as CrawlRun;
+    const sessionCursor = await input.repository.getSearchSessionDeliveryCursor(searchSession._id);
     const response = crawlResponseSchema.parse({
       search: {
         ...search,
         latestCrawlRunId: crawlRun._id,
+        latestSearchSessionId: searchSession._id,
         lastStatus: status,
         updatedAt: finishedAt,
       },
+      searchSession,
       crawlRun: finalizedRun,
       sourceResults,
       jobs: sortJobsWithDiagnostics(
@@ -1173,7 +1280,7 @@ export async function executeCrawlPipeline(
       diagnostics: finalizedRun.diagnostics,
       delivery: {
         mode: "full",
-        cursor: savedJobIds.size,
+        cursor: sessionCursor,
       },
     });
     stageTimingsMs.responseAssembly = Date.now() - responseAssemblyStartedMs;
@@ -1318,17 +1425,29 @@ export async function executeCrawlPipeline(
         timeoutStatus,
         finishedAt,
       );
+      searchSession =
+        (await input.repository.updateSearchSession(searchSession._id, {
+          latestCrawlRunId: crawlRun._id,
+          status: timeoutStatus,
+          finishedAt,
+          updatedAt: finishedAt,
+        })) ?? searchSession;
       
       const responseAssemblyStartedMs = Date.now();
-      const savedJobs = await input.repository.getJobsByCrawlRun(crawlRun._id);
+      const [savedJobs, sessionCursor] = await Promise.all([
+        input.repository.getJobsBySearchSession(searchSession._id),
+        input.repository.getSearchSessionDeliveryCursor(searchSession._id),
+      ]);
       const finalizedRun = (await input.repository.getCrawlRun(crawlRun._id)) as CrawlRun;
       const response = crawlResponseSchema.parse({
         search: {
           ...search,
           latestCrawlRunId: crawlRun._id,
+          latestSearchSessionId: searchSession._id,
           lastStatus: timeoutStatus,
           updatedAt: finishedAt,
         },
+        searchSession,
         crawlRun: finalizedRun,
         sourceResults,
         jobs: sortJobsWithDiagnostics(
@@ -1339,7 +1458,7 @@ export async function executeCrawlPipeline(
         diagnostics: finalizedRun.diagnostics,
         delivery: {
           mode: "full",
-          cursor: savedJobIds.size,
+          cursor: sessionCursor,
         },
       });
       stageTimingsMs.responseAssembly = Date.now() - responseAssemblyStartedMs;
@@ -1367,18 +1486,30 @@ export async function executeCrawlPipeline(
       recoveredStatus,
       finishedAt,
     );
+    searchSession =
+      (await input.repository.updateSearchSession(searchSession._id, {
+        latestCrawlRunId: crawlRun._id,
+        status: recoveredStatus,
+        finishedAt,
+        updatedAt: finishedAt,
+      })) ?? searchSession;
 
     if (recoveredStatus === "partial") {
       const responseAssemblyStartedMs = Date.now();
-      const savedJobs = await input.repository.getJobsByCrawlRun(crawlRun._id);
+      const [savedJobs, sessionCursor] = await Promise.all([
+        input.repository.getJobsBySearchSession(searchSession._id),
+        input.repository.getSearchSessionDeliveryCursor(searchSession._id),
+      ]);
       const finalizedRun = (await input.repository.getCrawlRun(crawlRun._id)) as CrawlRun;
       const response = crawlResponseSchema.parse({
         search: {
           ...search,
           latestCrawlRunId: crawlRun._id,
+          latestSearchSessionId: searchSession._id,
           lastStatus: recoveredStatus,
           updatedAt: finishedAt,
         },
+        searchSession,
         crawlRun: finalizedRun,
         sourceResults,
         jobs: sortJobsWithDiagnostics(
@@ -1389,7 +1520,7 @@ export async function executeCrawlPipeline(
         diagnostics: finalizedRun.diagnostics,
         delivery: {
           mode: "full",
-          cursor: savedJobIds.size,
+          cursor: sessionCursor,
         },
       });
       stageTimingsMs.responseAssembly = Date.now() - responseAssemblyStartedMs;
@@ -1414,6 +1545,20 @@ export async function executeCrawlPipeline(
   } finally {
     persistentCancellation.cleanup();
   }
+}
+
+function buildSourceInventoryObservations(
+  sources: readonly DiscoveredSource[],
+  input: Omit<SourceInventoryObservation, "sourceId">,
+) {
+  return sources.map((source) => ({
+    sourceId: source.id,
+    observedAt: input.observedAt,
+    status: input.status,
+    health: input.health,
+    lastFailureReason: input.lastFailureReason,
+    succeeded: input.succeeded,
+  }));
 }
 
 export async function refreshStaleJobs(

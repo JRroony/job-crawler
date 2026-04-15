@@ -8,6 +8,7 @@ const {
   listRecentSearchesMock,
   resourceNotFoundErrorClass,
   startSearchFromFiltersMock,
+  startSearchRerunMock,
 } = vi.hoisted(() => ({
   abortSearchMock: vi.fn(),
   getSearchDetailsMock: vi.fn(),
@@ -16,16 +17,24 @@ const {
   listRecentSearchesMock: vi.fn(),
   resourceNotFoundErrorClass: class ResourceNotFoundError extends Error {},
   startSearchFromFiltersMock: vi.fn(),
+  startSearchRerunMock: vi.fn(),
 }));
 
-vi.mock("@/lib/server/crawler/service", () => ({
+vi.mock("@/lib/server/search/service", () => ({
+  isInputValidationError: isInputValidationErrorMock,
+  listRecentSearches: listRecentSearchesMock,
+  startSearchFromFilters: startSearchFromFiltersMock,
+  startSearchRerun: startSearchRerunMock,
+}));
+
+vi.mock("@/lib/server/search/session-service", () => ({
   abortSearch: abortSearchMock,
   getSearchDetails: getSearchDetailsMock,
   getSearchJobDeltas: getSearchJobDeltasMock,
-  isInputValidationError: isInputValidationErrorMock,
-  listRecentSearches: listRecentSearchesMock,
+}));
+
+vi.mock("@/lib/server/search/errors", () => ({
   ResourceNotFoundError: resourceNotFoundErrorClass,
-  startSearchFromFilters: startSearchFromFiltersMock,
 }));
 
 import { DELETE, GET } from "@/app/api/searches/[id]/route";
@@ -39,6 +48,7 @@ describe("search API normalization", () => {
     isInputValidationErrorMock.mockReturnValue(false);
     listRecentSearchesMock.mockReset();
     startSearchFromFiltersMock.mockReset();
+    startSearchRerunMock.mockReset();
   });
 
   it("strips null optional filters and legacy experienceClassification before starting the crawl", async () => {

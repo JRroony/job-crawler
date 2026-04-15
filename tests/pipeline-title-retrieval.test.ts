@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { runSearchFromFilters } from "@/lib/server/crawler/service";
+import { runSearchIngestionFromFilters } from "@/lib/server/crawler/service";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
@@ -90,7 +90,7 @@ describe("pipeline title retrieval", () => {
       },
     };
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Integration Engineer",
         country: "United States",
@@ -189,7 +189,7 @@ describe("pipeline title retrieval", () => {
       },
     };
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Product Manager",
         country: "United States",
@@ -299,7 +299,7 @@ describe("pipeline title retrieval", () => {
       },
     };
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Data Engineer",
         country: "United States",
@@ -402,7 +402,7 @@ describe("pipeline title retrieval", () => {
       },
     };
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Cloud Platform Engineer",
         country: "United States",
@@ -534,7 +534,7 @@ describe("pipeline title retrieval", () => {
       },
     };
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Data Engineer",
         country: "United States",
@@ -624,7 +624,7 @@ describe("pipeline title retrieval", () => {
       );
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",
@@ -751,7 +751,7 @@ describe("pipeline title retrieval", () => {
       },
     };
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",
@@ -830,7 +830,7 @@ describe("pipeline title retrieval", () => {
       },
     };
 
-    const runPromise = runSearchFromFilters(
+    const runPromise = runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",
@@ -925,7 +925,7 @@ describe("pipeline title retrieval", () => {
       },
     };
 
-    const runPromise = runSearchFromFilters(
+    const runPromise = runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",
@@ -1045,7 +1045,7 @@ describe("pipeline title retrieval", () => {
       },
     };
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",
@@ -1139,7 +1139,7 @@ describe("pipeline title retrieval", () => {
         },
       };
 
-      const result = await runSearchFromFilters(
+      const result = await runSearchIngestionFromFilters(
         {
           title: "Software Engineer",
           country: "United States",
@@ -1233,7 +1233,7 @@ describe("pipeline title retrieval", () => {
       },
     };
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",
@@ -1343,7 +1343,7 @@ describe("pipeline title retrieval", () => {
       },
     };
 
-    const runPromise = runSearchFromFilters(
+    const runPromise = runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",
@@ -1437,7 +1437,7 @@ describe("pipeline title retrieval", () => {
     };
 
     const startedAt = Date.now();
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",
@@ -1567,7 +1567,7 @@ describe("pipeline title retrieval", () => {
       },
     };
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: query,
         country: "United States",
@@ -1695,7 +1695,7 @@ describe("pipeline title retrieval", () => {
       },
     };
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title,
         country: "United States",
@@ -1909,7 +1909,7 @@ describe("pipeline title retrieval", () => {
       );
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title,
         country: "United States",
@@ -1985,7 +1985,7 @@ describe("pipeline title retrieval", () => {
       },
     };
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Product Manager",
         country: "United States",

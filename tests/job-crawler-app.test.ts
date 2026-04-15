@@ -11,8 +11,11 @@ import {
   resolveViewState,
   shouldApplyQueuedResultImmediately,
 } from "@/components/job-crawler-app";
+import { BackgroundSupplementIndicator } from "@/components/job-crawler/status-panels";
+import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import type { CrawlDeltaResponse, CrawlResponse, SearchFilters } from "@/lib/types";
 import { queueSearchRun, isSearchRunPending, abortSearchRun } from "@/lib/server/crawler/background-runs";
+import { FakeDb } from "@/tests/helpers/fake-db";
 
 function createResult(
   status: CrawlResponse["crawlRun"]["status"],
@@ -319,7 +322,7 @@ describe("job crawler app result state", () => {
     expect(merged.delivery?.cursor).toBe(2);
   });
 
-  it("explains that visible jobs can arrive before supplemental recall finishes", () => {
+  it("explains that results arrive while background work continues", () => {
     const result = {
       ...createResult("running"),
       jobs: [createTestJob("job-1")],
@@ -332,12 +335,23 @@ describe("job crawler app result state", () => {
       },
     } satisfies CrawlResponse;
 
-    expect(describeResultNotice(result)).toMatchObject({
-      title: "Initial jobs are visible while supplemental recall keeps running",
-      highlights: expect.arrayContaining([
-        "Fast mode keeps heavier recall work behind the first visible batch.",
-      ]),
-    });
+    const notice = describeResultNotice(result);
+    expect(notice?.title).toBe("Results are arriving while background work continues");
+    expect(notice?.description).toContain("Browse these jobs now");
+    expect(notice?.highlights).toContain(
+      "Fast mode shows your first results quickly while refinement continues.",
+    );
+  });
+
+  it("explains that stopping preserves visible results", () => {
+    const result = {
+      ...createResult("aborted"),
+      jobs: [createTestJob("job-1")],
+    } satisfies CrawlResponse;
+
+    const notice = describeResultNotice(result);
+    expect(notice?.title).toBe("This search was stopped before refinement finished");
+    expect(notice?.description).toContain("Your visible results are preserved");
   });
 });
 
@@ -367,9 +381,11 @@ describe("UI state transitions for parallel search support", () => {
 describe("abort signal propagation in background runs", () => {
   it("queueSearchRun registers a pending run", async () => {
     const searchId = `test-abort-queue-${Date.now()}`;
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const crawlRun = await repository.createCrawlRun(searchId);
     let executed = false;
 
-    const queued = queueSearchRun(searchId, async (signal) => {
+    const queued = await queueSearchRun(searchId, repository, async (signal) => {
       executed = true;
       // Wait briefly so we can test abort
       await new Promise<void>((resolve) => {
@@ -379,21 +395,26 @@ describe("abort signal propagation in background runs", () => {
           resolve();
         }, { once: true });
       });
+    }, {
+      crawlRunId: crawlRun._id,
     });
 
     expect(queued).toBe(true);
-    expect(isSearchRunPending(searchId)).toBe(true);
+    expect(await isSearchRunPending(searchId, repository)).toBe(true);
+    expect((await repository.getActiveCrawlQueueEntryForSearch(searchId))?.crawlRunId).toBe(crawlRun._id);
 
     // Clean up: abort to finish the test quickly
-    await abortSearchRun(searchId, { awaitCompletion: true });
+    await abortSearchRun(searchId, repository, { awaitCompletion: true });
     expect(executed).toBe(true);
   });
 
   it("abortSearchRun aborts the pending task", async () => {
     const searchId = `test-abort-signal-${Date.now()}`;
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const crawlRun = await repository.createCrawlRun(searchId);
     let aborted = false;
 
-    queueSearchRun(searchId, async (signal) => {
+    await queueSearchRun(searchId, repository, async (signal) => {
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, 30000);
         signal.addEventListener("abort", () => {
@@ -402,18 +423,145 @@ describe("abort signal propagation in background runs", () => {
           resolve();
         }, { once: true });
       });
+    }, {
+      crawlRunId: crawlRun._id,
     });
 
-    expect(isSearchRunPending(searchId)).toBe(true);
-    const result = await abortSearchRun(searchId, { awaitCompletion: true });
+    expect(await isSearchRunPending(searchId, repository)).toBe(true);
+    const result = await abortSearchRun(searchId, repository, { awaitCompletion: true });
     expect(result).toBe(true);
     expect(aborted).toBe(true);
-    expect(isSearchRunPending(searchId)).toBe(false);
+    expect(await isSearchRunPending(searchId, repository)).toBe(false);
   });
 
   it("abortSearchRun on non-existent run returns false", async () => {
     const searchId = `test-non-existent-${Date.now()}`;
-    const result = await abortSearchRun(searchId);
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const result = await abortSearchRun(searchId, repository);
     expect(result).toBe(false);
+  });
+});
+
+describe("Progressive index-first search UI behavior", () => {
+  it("resolveViewState returns loading when crawl is running even with jobs visible", () => {
+    const result = {
+      ...createResult("running"),
+      jobs: [createTestJob("job-1")],
+    };
+    // This ensures the UI shows results while indicating work continues
+    expect(resolveViewState(result)).toBe("loading");
+  });
+
+  it("resolveViewState returns success when crawl completes with jobs", () => {
+    const result = {
+      ...createResult("completed"),
+      jobs: [createTestJob("job-1")],
+    };
+    expect(resolveViewState(result)).toBe("success");
+  });
+
+  it("resolveViewState returns empty when crawl completes with no jobs", () => {
+    const result = createResult("completed");
+    expect(resolveViewState(result)).toBe("empty");
+  });
+
+  it("describeResultNotice uses search-session language for running state with jobs", () => {
+    const result = {
+      ...createResult("running"),
+      jobs: [createTestJob("job-1")],
+      search: {
+        ...createResult("running").search,
+        filters: {
+          title: "Data Analyst",
+          crawlMode: "balanced",
+        },
+      },
+    } satisfies CrawlResponse;
+
+    const notice = describeResultNotice(result);
+    expect(notice?.title).toBe("Results are arriving while background work continues");
+    expect(notice?.description).toContain("Browse these jobs now");
+    expect(notice?.highlights).toContain(
+      "Balanced mode refines results in the background while you review what's already visible.",
+    );
+  });
+
+  it("describeResultNotice for aborted state emphasizes preserved results", () => {
+    const result = {
+      ...createResult("aborted"),
+      jobs: [createTestJob("job-1"), createTestJob("job-2")],
+    } satisfies CrawlResponse;
+
+    const notice = describeResultNotice(result);
+    expect(notice?.title).toContain("stopped");
+    expect(notice?.description).toContain("visible results are preserved");
+  });
+
+  it("describeZeroResultState for aborted shows search-stopped language", () => {
+    const result = createResult("aborted");
+    const state = describeZeroResultState(result);
+    expect(state.title).toContain("stopped");
+    expect(state.description).toContain("incomplete");
+  });
+
+  it("BackgroundSupplementIndicator renders with stage and count", () => {
+    // This is a simple smoke test that the component exists and can be imported
+    expect(BackgroundSupplementIndicator).toBeDefined();
+    expect(typeof BackgroundSupplementIndicator).toBe("function");
+  });
+
+  it("mergeCrawlDeltaIntoResult preserves job identity across incremental updates", () => {
+    const base = {
+      ...createResult("running"),
+      jobs: [createTestJob("job-1")],
+      delivery: {
+        mode: "full" as const,
+        cursor: 1,
+      },
+    } satisfies CrawlResponse;
+
+    const delta = {
+      search: base.search,
+      crawlRun: base.crawlRun,
+      sourceResults: base.sourceResults,
+      diagnostics: base.diagnostics,
+      jobs: [createTestJob("job-2"), createTestJob("job-3")],
+      delivery: {
+        mode: "delta" as const,
+        previousCursor: 1,
+        cursor: 2,
+      },
+    } satisfies CrawlDeltaResponse;
+
+    const merged = mergeCrawlDeltaIntoResult(base, delta);
+
+    // All jobs should be present
+    expect(merged.jobs.length).toBe(3);
+    expect(merged.jobs.map((j) => j._id)).toContain("job-1");
+    expect(merged.jobs.map((j) => j._id)).toContain("job-2");
+    expect(merged.jobs.map((j) => j._id)).toContain("job-3");
+    // Cursor should be updated
+    expect(merged.delivery?.cursor).toBe(2);
+  });
+
+  it("shouldApplyQueuedResultImmediately returns true when jobs are visible during running state", () => {
+    const snapshot = {
+      crawlRun: createResult("running").crawlRun,
+      jobs: [createTestJob("job-1")],
+    };
+
+    // This enables the progressive index-first behavior:
+    // show results immediately rather than waiting for crawl to complete
+    expect(shouldApplyQueuedResultImmediately(snapshot)).toBe(true);
+  });
+
+  it("isLatestClientRequest prevents stale poll responses from overwriting new search state", () => {
+    const oldToken = 1;
+    const newToken = 2;
+
+    // Old token should be stale
+    expect(isLatestClientRequest(oldToken, newToken)).toBe(false);
+    // New token should be current
+    expect(isLatestClientRequest(newToken, newToken)).toBe(true);
   });
 });

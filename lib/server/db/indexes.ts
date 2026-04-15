@@ -17,10 +17,14 @@ export type DatabaseLike = {
 
 export const collectionNames = {
   searches: "searches",
+  searchSessions: "searchSessions",
   jobs: "jobs",
   crawlRuns: "crawlRuns",
+  crawlControls: "crawlControls",
+  crawlQueue: "crawlQueue",
   crawlSourceResults: "crawlSourceResults",
   crawlRunJobEvents: "crawlRunJobEvents",
+  searchSessionJobEvents: "searchSessionJobEvents",
   linkValidations: "linkValidations",
   sourceInventory: "sourceInventory",
 } as const;
@@ -41,6 +45,27 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
       key: { latestCrawlRunId: 1 },
       name: "searches_latestCrawlRunId",
       sparse: true,
+    },
+    {
+      key: { latestSearchSessionId: 1 },
+      name: "searches_latestSearchSessionId",
+      sparse: true,
+    },
+  ]);
+
+  await db.collection(collectionNames.searchSessions).createIndexes([
+    {
+      key: { searchId: 1, createdAt: -1 },
+      name: "searchSessions_searchId_createdAt_desc",
+    },
+    {
+      key: { latestCrawlRunId: 1 },
+      name: "searchSessions_latestCrawlRunId",
+      sparse: true,
+    },
+    {
+      key: { status: 1, updatedAt: -1 },
+      name: "searchSessions_status_updatedAt_desc",
     },
   ]);
 
@@ -91,12 +116,51 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
       name: "crawlRuns_searchId_startedAt_desc",
     },
     {
+      key: { searchSessionId: 1, startedAt: -1 },
+      name: "crawlRuns_searchSessionId_startedAt_desc",
+      sparse: true,
+    },
+    {
       key: { status: 1, startedAt: -1 },
       name: "crawlRuns_status_startedAt_desc",
     },
     {
       key: { validationMode: 1, startedAt: -1 },
       name: "crawlRuns_validationMode_startedAt_desc",
+    },
+  ]);
+
+  await db.collection(collectionNames.crawlControls).createIndexes([
+    {
+      key: { crawlRunId: 1 },
+      name: "crawlControls_crawlRunId",
+      unique: true,
+    },
+    {
+      key: { searchId: 1, status: 1, updatedAt: -1 },
+      name: "crawlControls_searchId_status_updatedAt_desc",
+    },
+    {
+      key: { ownerKey: 1, status: 1, updatedAt: -1 },
+      name: "crawlControls_ownerKey_status_updatedAt_desc",
+      sparse: true,
+    },
+  ]);
+
+  await db.collection(collectionNames.crawlQueue).createIndexes([
+    {
+      key: { crawlRunId: 1 },
+      name: "crawlQueue_crawlRunId",
+      unique: true,
+    },
+    {
+      key: { searchId: 1, status: 1, updatedAt: -1 },
+      name: "crawlQueue_searchId_status_updatedAt_desc",
+    },
+    {
+      key: { ownerKey: 1, status: 1, updatedAt: -1 },
+      name: "crawlQueue_ownerKey_status_updatedAt_desc",
+      sparse: true,
     },
   ]);
 
@@ -123,6 +187,22 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     },
   ]);
 
+  await db.collection(collectionNames.searchSessionJobEvents).createIndexes([
+    {
+      key: { searchSessionId: 1, sequence: 1 },
+      name: "searchSessionJobEvents_session_sequence",
+      unique: true,
+    },
+    {
+      key: { searchSessionId: 1, jobId: 1 },
+      name: "searchSessionJobEvents_session_job",
+    },
+    {
+      key: { searchSessionId: 1, crawlRunId: 1, sequence: 1 },
+      name: "searchSessionJobEvents_session_run_sequence",
+    },
+  ]);
+
   await db.collection(collectionNames.linkValidations).createIndexes([
     {
       key: { jobId: 1, checkedAt: -1 },
@@ -136,8 +216,8 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
 
   await db.collection(collectionNames.sourceInventory).createIndexes([
     {
-      key: { platform: 1, inventoryRank: 1, companyHint: 1 },
-      name: "sourceInventory_platform_rank_companyHint",
+      key: { platform: 1, status: 1, crawlPriority: 1, companyHint: 1 },
+      name: "sourceInventory_platform_status_priority_companyHint",
     },
     {
       key: { token: 1, platform: 1 },
@@ -147,6 +227,11 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     {
       key: { lastRefreshedAt: -1, platform: 1 },
       name: "sourceInventory_lastRefreshedAt_desc_platform",
+    },
+    {
+      key: { lastCrawledAt: -1, platform: 1, health: 1 },
+      name: "sourceInventory_lastCrawledAt_desc_platform_health",
+      sparse: true,
     },
   ]);
 

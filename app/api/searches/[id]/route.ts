@@ -4,8 +4,8 @@ import {
   abortSearch,
   getSearchDetails,
   getSearchJobDeltas,
-  ResourceNotFoundError,
-} from "@/lib/server/crawler/service";
+} from "@/lib/server/search/session-service";
+import { ResourceNotFoundError } from "@/lib/server/search/errors";
 
 export async function GET(
   request: Request,

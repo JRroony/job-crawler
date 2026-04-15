@@ -263,6 +263,35 @@ export function LoadingPanel(props: {
   );
 }
 
+// Compact indicator shown when supplemental background work is still running
+// but initial results are already visible to the user.
+export function BackgroundSupplementIndicator(props: {
+  stage?: CrawlResponse["crawlRun"]["stage"];
+  foundCount?: number;
+  onStop?: () => void;
+}) {
+  const stageLabel = describeStage(props.stage);
+
+  return (
+    <div className="flex items-center gap-2 rounded-full border border-ink/10 bg-white/80 px-3 py-1.5 text-xs text-slate">
+      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+      <span>
+        {stageLabel ?? "Refining results"} &middot; {props.foundCount ?? 0} saved
+      </span>
+      {props.onStop ? (
+        <button
+          type="button"
+          onClick={props.onStop}
+          className="ml-1 rounded-full px-1.5 py-0.5 text-[11px] font-medium text-slate/70 transition hover:bg-ink/5"
+          title="Stop background refinement"
+        >
+          Stop
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function describeStage(stage?: CrawlResponse["crawlRun"]["stage"]) {
   if (stage === "discovering") {
     return "Discovering runnable sources and recovering direct job URLs.";

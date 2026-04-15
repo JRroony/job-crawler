@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { revalidateJob, ResourceNotFoundError } from "@/lib/server/crawler/service";
+import { revalidateJob } from "@/lib/server/ingestion/service";
+import { ResourceNotFoundError } from "@/lib/server/search/errors";
 
 export async function POST(
   _request: Request,

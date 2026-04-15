@@ -139,13 +139,21 @@ export async function discoverBaselineSourcesDetailed(
     ? new Set<string>(resolveOperationalCrawlerPlatforms(input.filters.platforms))
     : null;
   const inventorySources = await loadInventorySources(input, selectedPlatforms);
-  const unfilteredConfiguredSources = buildConfiguredSources(input);
+  const inventoryBackedPlatforms = new Set(inventorySources.map((source) => source.platform));
+  const inventoryPrimaryPlatforms = new Set<string>(
+    Array.from(inventoryBackedPlatforms).filter((platform) => platform === "greenhouse"),
+  );
+  const unfilteredConfiguredSources = buildConfiguredSources(input).filter(
+    (source) => !inventoryPrimaryPlatforms.has(source.platform),
+  );
   const configuredSources = filterDiscoveredSources(
     unfilteredConfiguredSources,
     selectedPlatforms,
   );
   const curatedSources = filterDiscoveredSources(
-    discoverCatalogSources(input.filters.platforms),
+    discoverCatalogSources(input.filters.platforms).filter(
+      (source) => !inventoryPrimaryPlatforms.has(source.platform),
+    ),
     selectedPlatforms,
   );
   const sources = filterDiscoveredSources(
@@ -180,13 +188,21 @@ export async function discoverSupplementalSourcesDetailed(
     ? new Set<string>(resolveOperationalCrawlerPlatforms(input.filters.platforms))
     : null;
   const inventorySources = await loadInventorySources(input, selectedPlatforms);
-  const unfilteredConfiguredSources = buildConfiguredSources(input);
+  const inventoryBackedPlatforms = new Set(inventorySources.map((source) => source.platform));
+  const inventoryPrimaryPlatforms = new Set<string>(
+    Array.from(inventoryBackedPlatforms).filter((platform) => platform === "greenhouse"),
+  );
+  const unfilteredConfiguredSources = buildConfiguredSources(input).filter(
+    (source) => !inventoryPrimaryPlatforms.has(source.platform),
+  );
   const configuredSources = filterDiscoveredSources(
     unfilteredConfiguredSources,
     selectedPlatforms,
   );
   const curatedSources = filterDiscoveredSources(
-    discoverCatalogSources(input.filters.platforms),
+    discoverCatalogSources(input.filters.platforms).filter(
+      (source) => !inventoryPrimaryPlatforms.has(source.platform),
+    ),
     selectedPlatforms,
   );
   const baselineSources = filterDiscoveredSources(

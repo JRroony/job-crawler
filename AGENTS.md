@@ -34,6 +34,15 @@ For every non-trivial task:
 6. Inspect failures.
 7. Fix issues and rerun until green.
 
+## Architecture refactors
+For large architecture refactors in this repository:
+- follow an index-first search architecture, not a crawl-first search architecture
+- keep background ingestion responsible for source discovery and source crawling
+- make search requests query indexed jobs first
+- use request-time crawl only as supplemental recovery, never as the primary path
+- treat search sessions, incremental delivery, durable cancellation, and durable background control as required behavior
+- do not claim completion for code movement alone; validate actual behavior improvement
+
 ## Retrieval principles
 - Separate recall from precision.
 - Separate source discovery from job-detail harvesting.
@@ -45,6 +54,7 @@ For every non-trivial task:
 
 ## Specialized guidance
 Also follow:
+- `docs/skills/index-first-search-refactor.md`
 - `docs/skills/retrieval-architecture.md`
 - `docs/skills/title-relevance.md`
 - `docs/skills/us-location-resolution.md`

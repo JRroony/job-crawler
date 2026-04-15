@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { startSearchFromFilters } from "@/lib/server/search/service";
 import {
   abortSearch,
   getSearchDetails,
   getSearchJobDeltas,
-  startSearchFromFilters,
-} from "@/lib/server/crawler/service";
+} from "@/lib/server/search/session-service";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
@@ -62,10 +62,7 @@ async function waitForBackgroundRunToSettle() {
 
 describe("abortable crawl runs", () => {
   beforeEach(() => {
-    (globalThis as { __jobCrawlerPendingRuns?: Map<string, unknown> }).__jobCrawlerPendingRuns =
-      undefined;
-    (globalThis as { __jobCrawlerPendingRunOwners?: Map<string, unknown> }).__jobCrawlerPendingRunOwners =
-      undefined;
+    clearLocalBackgroundRunState();
   });
 
   it("aborts the previous in-flight crawl when the same client starts a new search", async () => {
@@ -141,6 +138,81 @@ describe("abortable crawl runs", () => {
     expect(secondResult.jobs.map((job) => job.title)).toEqual(["Data Analyst"]);
   });
 
+  it("supersedes the previous owner-scoped crawl even after local in-memory state is lost", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-13T12:30:00.000Z");
+    const provider = createStubProvider("greenhouse", async (context, sources) => {
+      if (context.filters.title === "Software Engineer") {
+        await waitForAbort(context.signal);
+      }
+
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: sources.length,
+        fetchedCount: sources.length,
+        matchedCount: sources.length,
+        warningCount: 0,
+        jobs: sources.map((source) => ({
+          title: context.filters.title,
+          company: source.companyHint ?? "Acme",
+          locationText: "Seattle, WA",
+          sourcePlatform: "greenhouse" as const,
+          sourceJobId: `${context.filters.title}-${source.token}`,
+          sourceUrl: `https://example.com/jobs/${context.filters.title}-${source.token}`,
+          applyUrl: `https://example.com/jobs/${context.filters.title}-${source.token}/apply`,
+          canonicalUrl: `https://example.com/jobs/${context.filters.title}-${source.token}`,
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        })),
+      };
+    });
+
+    const first = await startSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery: createDiscovery(),
+        now,
+        requestOwnerKey: "client-restart",
+        progressUpdateIntervalMs: 1,
+      },
+    );
+
+    clearLocalBackgroundRunState();
+
+    const second = await startSearchFromFilters(
+      {
+        title: "Product Manager",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery: createDiscovery(),
+        now: new Date("2026-04-13T12:30:01.000Z"),
+        requestOwnerKey: "client-restart",
+        progressUpdateIntervalMs: 1,
+      },
+    );
+
+    await waitForBackgroundRunToSettle();
+
+    const firstResult = await getSearchDetails(first.result.search._id, { repository });
+    const secondResult = await getSearchDetails(second.result.search._id, { repository });
+
+    expect(firstResult.crawlRun.status).toBe("aborted");
+    expect(firstResult.crawlRun.cancelReason).toBe("The crawl was superseded by a newer search request.");
+    expect(secondResult.crawlRun.status).toBe("completed");
+    expect(secondResult.jobs.map((job) => job.title)).toEqual(["Product Manager"]);
+  });
+
   it("stops the active crawl and prevents any further jobs from being saved", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const now = new Date("2026-04-13T13:00:00.000Z");
@@ -195,6 +267,65 @@ describe("abortable crawl runs", () => {
     const latest = await getSearchDetails(started.result.search._id, { repository });
     expect(latest.jobs).toHaveLength(0);
     expect(latest.crawlRun.status).toBe("aborted");
+  });
+
+  it("cancels a running crawl durably after local in-memory orchestration state is lost", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-13T13:30:00.000Z");
+    const provider = createStubProvider("greenhouse", async (context, sources) => {
+      await waitForAbort(context.signal);
+
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: sources.length,
+        fetchedCount: sources.length,
+        matchedCount: sources.length,
+        warningCount: 0,
+        jobs: sources.map((source) => ({
+          title: "Software Engineer",
+          company: source.companyHint ?? "Acme",
+          locationText: "Austin, TX",
+          sourcePlatform: "greenhouse" as const,
+          sourceJobId: `${source.token}-job`,
+          sourceUrl: `https://example.com/jobs/${source.token}-job`,
+          applyUrl: `https://example.com/jobs/${source.token}-job/apply`,
+          canonicalUrl: `https://example.com/jobs/${source.token}-job`,
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        })),
+      };
+    });
+
+    const started = await startSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery: createDiscovery(),
+        now,
+        requestOwnerKey: "client-stop-durable",
+        progressUpdateIntervalMs: 1,
+      },
+    );
+
+    clearLocalBackgroundRunState();
+
+    const stopped = await abortSearch(started.result.search._id, { repository });
+    await waitForBackgroundRunToSettle();
+
+    expect(stopped.aborted).toBe(true);
+    expect(stopped.result.crawlRun.status).toBe("aborted");
+    expect(stopped.result.crawlRun.cancelReason).toBe("The crawl was stopped by the user.");
+    expect(stopped.result.jobs).toHaveLength(0);
+
+    const latest = await getSearchDetails(started.result.search._id, { repository });
+    expect(latest.crawlRun.status).toBe("aborted");
+    expect(latest.crawlRun.cancelRequestedAt).toBeTruthy();
   });
 
   it("delivers newly saved jobs incrementally before the crawl completes", async () => {
@@ -457,4 +588,11 @@ function toAbortError(reason: unknown) {
   const error = new Error("The crawl was aborted.");
   error.name = "AbortError";
   return error;
+}
+
+function clearLocalBackgroundRunState() {
+  (globalThis as { __jobCrawlerPendingRuns?: Map<string, unknown> }).__jobCrawlerPendingRuns =
+    undefined;
+  (globalThis as { __jobCrawlerPendingRunOwners?: Map<string, unknown> }).__jobCrawlerPendingRunOwners =
+    undefined;
 }

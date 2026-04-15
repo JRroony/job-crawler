@@ -1,5 +1,5 @@
 import { JobCrawlerApp } from "@/components/job-crawler-app";
-import { listRecentSearches } from "@/lib/server/crawler/service";
+import { listRecentSearches } from "@/lib/server/search/service";
 
 export default async function Page() {
   try {

@@ -5,7 +5,7 @@ import {
   isInputValidationError,
   listRecentSearches,
   startSearchFromFilters,
-} from "@/lib/server/crawler/service";
+} from "@/lib/server/search/service";
 
 const searchRequestLogPrefix = "[searches:request]";
 const searchValidationLogPrefix = "[searches:validation]";

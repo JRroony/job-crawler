@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { resolveViewState } from "@/components/job-crawler-app";
 import { ResultsTable } from "@/components/results-table";
-import { runSearchFromFilters } from "@/lib/server/crawler/service";
+import { runSearchIngestionFromFilters } from "@/lib/server/crawler/service";
 import { collectionNames } from "@/lib/server/db/indexes";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
@@ -99,7 +99,7 @@ describe("Greenhouse end-to-end regression", () => {
       );
     }) as unknown as typeof fetch;
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",

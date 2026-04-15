@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { startSearchRerun, ResourceNotFoundError } from "@/lib/server/crawler/service";
+import { startSearchRerun } from "@/lib/server/search/service";
+import { ResourceNotFoundError } from "@/lib/server/search/errors";
 
 export async function POST(
   request: Request,

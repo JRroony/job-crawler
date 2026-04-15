@@ -15,14 +15,41 @@ export const sourceInventoryOrigins = [
   "configured_env",
   "manual_config",
   "curated_catalog",
+  "public_search",
 ] as const;
 
 export const sourceInventoryOriginSchema = z.enum(sourceInventoryOrigins);
+
+export const sourceInventorySourceTypes = [
+  "ats_board",
+  "job_detail",
+  "company_page",
+  "feed",
+  "career_site",
+  "unknown",
+] as const;
+
+export const sourceInventorySourceTypeSchema = z.enum(sourceInventorySourceTypes);
+
+export const sourceInventoryStatuses = ["active", "paused", "disabled"] as const;
+
+export const sourceInventoryStatusSchema = z.enum(sourceInventoryStatuses);
+
+export const sourceInventoryHealthStates = [
+  "healthy",
+  "degraded",
+  "failing",
+  "unknown",
+] as const;
+
+export const sourceInventoryHealthSchema = z.enum(sourceInventoryHealthStates);
 
 export const sourceInventoryRecordSchema = z.object({
   _id: z.string().min(1),
   platform: crawlerPlatformSchema,
   url: z.string().url(),
+  sourceType: sourceInventorySourceTypeSchema,
+  sourceKey: z.string().min(1),
   token: z.string().min(1).optional(),
   companyHint: z.string().min(1).optional(),
   confidence: z.enum(["high", "medium", "low"]),
@@ -35,10 +62,19 @@ export const sourceInventoryRecordSchema = z.object({
   pageType: z.enum(["json_feed", "json_ld_page", "html_page"]).optional(),
   sitePath: z.string().min(1).optional(),
   careerSitePath: z.string().min(1).optional(),
+  status: sourceInventoryStatusSchema.default("active"),
+  health: sourceInventoryHealthSchema.default("unknown"),
+  crawlPriority: z.number().int().nonnegative().default(0),
   inventoryRank: z.number().int().nonnegative().default(0),
+  failureCount: z.number().int().nonnegative().default(0),
+  consecutiveFailures: z.number().int().nonnegative().default(0),
+  lastFailureReason: z.string().min(1).optional(),
   firstSeenAt: z.string().datetime(),
   lastSeenAt: z.string().datetime(),
   lastRefreshedAt: z.string().datetime(),
+  lastCrawledAt: z.string().datetime().optional(),
+  lastSucceededAt: z.string().datetime().optional(),
+  lastFailedAt: z.string().datetime().optional(),
 });
 
 export type SourceInventoryRecord = z.infer<typeof sourceInventoryRecordSchema>;
@@ -173,6 +209,8 @@ export function toSourceInventoryRecord(
     _id: source.id,
     platform: source.platform,
     url: source.url,
+    sourceType: resolveSourceInventorySourceType(source),
+    sourceKey: resolveSourceInventorySourceKey(source),
     token: source.token,
     companyHint: source.companyHint,
     confidence: source.confidence,
@@ -185,7 +223,12 @@ export function toSourceInventoryRecord(
     pageType: "pageType" in source ? source.pageType : undefined,
     sitePath: "sitePath" in source ? source.sitePath : undefined,
     careerSitePath: "careerSitePath" in source ? source.careerSitePath : undefined,
+    status: "active",
+    health: "unknown",
+    crawlPriority: input.inventoryRank ?? 0,
     inventoryRank: input.inventoryRank ?? 0,
+    failureCount: 0,
+    consecutiveFailures: 0,
     firstSeenAt: input.now,
     lastSeenAt: input.now,
     lastRefreshedAt: input.now,
@@ -224,4 +267,62 @@ function dedupeSourceInventoryRecords(records: SourceInventoryRecord[]) {
   }
 
   return Array.from(deduped.values());
+}
+
+export function inventoryOriginFromDiscoveryMethod(
+  method: SourceInventoryRecord["originalDiscoveryMethod"],
+): SourceInventoryRecord["inventoryOrigin"] {
+  switch (method) {
+    case "platform_registry":
+      return "greenhouse_registry";
+    case "configured_env":
+      return "configured_env";
+    case "manual_config":
+      return "manual_config";
+    case "curated_catalog":
+      return "curated_catalog";
+    case "future_search":
+    case "source_inventory":
+      return "public_search";
+    default:
+      return "public_search";
+  }
+}
+
+function resolveSourceInventorySourceType(
+  source: DiscoveredSource,
+): SourceInventoryRecord["sourceType"] {
+  if (source.platform === "company_page") {
+    if (source.pageType === "json_feed") {
+      return "feed";
+    }
+
+    return "company_page";
+  }
+
+  if ("jobId" in source && source.jobId) {
+    return "job_detail";
+  }
+
+  if (source.platform === "workday") {
+    return source.careerSitePath ? "career_site" : "unknown";
+  }
+
+  if (source.platform === "greenhouse" || source.platform === "lever" || source.platform === "ashby") {
+    return "ats_board";
+  }
+
+  return "unknown";
+}
+
+function resolveSourceInventorySourceKey(source: DiscoveredSource) {
+  if (source.token) {
+    return source.token;
+  }
+
+  if (source.companyHint) {
+    return `${source.platform}:${source.companyHint.toLowerCase()}`;
+  }
+
+  return source.id;
 }

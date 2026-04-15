@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { getSearchDetails, runSearchFromFilters } from "@/lib/server/crawler/service";
+import { getSearchDetails, runSearchIngestionFromFilters } from "@/lib/server/crawler/service";
 import { collectionNames } from "@/lib/server/db/indexes";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
@@ -150,7 +150,7 @@ describe("crawl diagnostics", () => {
       },
     };
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",
@@ -274,7 +274,7 @@ describe("crawl diagnostics", () => {
       },
     };
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",
@@ -472,7 +472,7 @@ describe("crawl diagnostics", () => {
       },
     };
 
-    const result = await runSearchFromFilters(
+    const result = await runSearchIngestionFromFilters(
       {
         title: "Software Engineer",
         country: "United States",

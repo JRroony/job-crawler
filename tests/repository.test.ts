@@ -136,6 +136,191 @@ describe("JobCrawlerRepository", () => {
     expect(firstDelta.jobs.map((job) => job._id)).toEqual([savedJob._id]);
   });
 
+  it("creates durable search sessions and tracks session-scoped job deltas independently from crawl runs", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      {
+        title: "Software Engineer",
+      },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const searchSession = await repository.createSearchSession(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+      { status: "running" },
+    );
+    const crawlRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+      { searchSessionId: searchSession._id },
+    );
+
+    await repository.updateSearchLatestSession(
+      search._id,
+      searchSession._id,
+      "running",
+      "2026-03-29T00:00:00.000Z",
+    );
+    await repository.updateSearchSession(searchSession._id, {
+      latestCrawlRunId: crawlRun._id,
+      status: "running",
+      updatedAt: "2026-03-29T00:00:00.000Z",
+    });
+
+    const [firstSavedJob] = await repository.persistJobs(
+      crawlRun._id,
+      [createPersistableJob()],
+      { searchSessionId: searchSession._id },
+    );
+
+    const storedSession = await repository.getSearchSession(searchSession._id);
+    const firstDelta = await repository.getJobsBySearchSessionAfterSequence(searchSession._id, 0);
+
+    expect(storedSession?.latestCrawlRunId).toBe(crawlRun._id);
+    expect(storedSession?.lastEventSequence).toBe(1);
+    expect(await repository.getSearchSessionDeliveryCursor(searchSession._id)).toBe(1);
+    expect(firstDelta.cursor).toBe(1);
+    expect(firstDelta.jobs.map((job) => job._id)).toEqual([firstSavedJob._id]);
+
+    const secondRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-30T00:00:00.000Z",
+      { searchSessionId: searchSession._id },
+    );
+    await repository.updateSearchSession(searchSession._id, {
+      latestCrawlRunId: secondRun._id,
+      status: "running",
+      updatedAt: "2026-03-30T00:00:00.000Z",
+    });
+
+    await repository.persistJobs(
+      secondRun._id,
+      [
+        createPersistableJob({
+          sourceJobId: "role-2",
+          sourceUrl: "https://example.com/jobs/2",
+          applyUrl: "https://example.com/jobs/2/apply",
+          resolvedUrl: "https://example.com/jobs/2/apply",
+          canonicalUrl: "https://example.com/jobs/2",
+          sourceLookupKeys: ["greenhouse:role-2"],
+          sourceProvenance: [
+            {
+              sourcePlatform: "greenhouse",
+              sourceJobId: "role-2",
+              sourceUrl: "https://example.com/jobs/2",
+              applyUrl: "https://example.com/jobs/2/apply",
+              resolvedUrl: "https://example.com/jobs/2/apply",
+              canonicalUrl: "https://example.com/jobs/2",
+              discoveredAt: "2026-03-30T00:00:00.000Z",
+              rawSourceMetadata: {},
+            },
+          ],
+          dedupeFingerprint: "fingerprint-2",
+          contentFingerprint: "fingerprint-2",
+          discoveredAt: "2026-03-30T00:00:00.000Z",
+          crawledAt: "2026-03-30T00:00:00.000Z",
+        }),
+      ],
+      { searchSessionId: searchSession._id },
+    );
+
+    const secondDelta = await repository.getJobsBySearchSessionAfterSequence(searchSession._id, 1);
+
+    expect(secondDelta.cursor).toBe(2);
+    expect(secondDelta.jobs).toHaveLength(1);
+    expect(secondDelta.jobs[0]?.sourceJobId).toBe("role-2");
+  });
+
+  it("does not advance the session cursor when a later crawl run only rediscovers the same job", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      {
+        title: "Software Engineer",
+      },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const searchSession = await repository.createSearchSession(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+      { status: "running" },
+    );
+    const firstRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+      { searchSessionId: searchSession._id },
+    );
+    const secondRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-30T00:00:00.000Z",
+      { searchSessionId: searchSession._id },
+    );
+
+    await repository.persistJobs(firstRun._id, [createPersistableJob()], {
+      searchSessionId: searchSession._id,
+    });
+    await repository.persistJobs(secondRun._id, [createPersistableJob()], {
+      searchSessionId: searchSession._id,
+    });
+
+    const delta = await repository.getJobsBySearchSessionAfterSequence(searchSession._id, 1);
+
+    expect(await repository.getSearchSessionDeliveryCursor(searchSession._id)).toBe(1);
+    expect(delta.cursor).toBe(1);
+    expect(delta.jobs).toEqual([]);
+  });
+
+  it("can seed an existing indexed job into a search session before supplemental crawl events arrive", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      {
+        title: "Product Manager",
+      },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const indexedRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+    );
+    const [indexedJob] = await repository.persistJobs(indexedRun._id, [
+      createPersistableJob({
+        title: "Product Manager",
+        sourceJobId: "indexed-product-manager",
+        sourceUrl: "https://example.com/jobs/indexed-product-manager",
+        applyUrl: "https://example.com/jobs/indexed-product-manager/apply",
+        resolvedUrl: "https://example.com/jobs/indexed-product-manager/apply",
+        canonicalUrl: "https://example.com/jobs/indexed-product-manager",
+        sourceLookupKeys: ["greenhouse:indexed-product-manager"],
+        dedupeFingerprint: "fingerprint-indexed-product-manager",
+        contentFingerprint: "fingerprint-indexed-product-manager",
+      }),
+    ]);
+    const searchSession = await repository.createSearchSession(
+      search._id,
+      "2026-03-30T00:00:00.000Z",
+      { status: "running" },
+    );
+    const supplementalRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-30T00:00:00.000Z",
+      { searchSessionId: searchSession._id },
+    );
+
+    await repository.appendExistingJobsToSearchSession(
+      searchSession._id,
+      supplementalRun._id,
+      [indexedJob._id],
+    );
+
+    const seededDelta = await repository.getJobsBySearchSessionAfterSequence(searchSession._id, 0);
+
+    expect(seededDelta.cursor).toBe(1);
+    expect(seededDelta.jobs.map((job) => job._id)).toEqual([indexedJob._id]);
+    expect(await repository.getSearchSessionDeliveryCursor(searchSession._id)).toBe(1);
+  });
+
   it("persists crawl run cancellation requests and heartbeats", async () => {
     const db = new FakeDb();
     const repository = new JobCrawlerRepository(db);
@@ -162,6 +347,86 @@ describe("JobCrawlerRepository", () => {
     expect(controlState?.lastHeartbeatAt).toBe("2026-03-29T00:01:00.000Z");
     expect(controlState?.cancelRequestedAt).toBe("2026-03-29T00:02:00.000Z");
     expect(controlState?.cancelReason).toBe("Stopped by the user.");
+  });
+
+  it("creates durable crawl control records alongside crawl runs", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      {
+        title: "Software Engineer",
+      },
+      "2026-03-29T00:00:00.000Z",
+    );
+
+    const crawlRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+      {
+        searchSessionId: "session-1",
+      },
+    );
+
+    const controlState = await repository.getCrawlRunControlState(crawlRun._id);
+
+    expect(controlState).toMatchObject({
+      _id: crawlRun._id,
+      crawlRunId: crawlRun._id,
+      searchId: search._id,
+      status: "running",
+      cancelRequestedAt: undefined,
+      cancelReason: undefined,
+      lastHeartbeatAt: "2026-03-29T00:00:00.000Z",
+      finishedAt: undefined,
+    });
+  });
+
+  it("tracks durable crawl queue state and owner lookup independently of process-local memory", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      {
+        title: "Data Analyst",
+      },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const crawlRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+      {
+        searchSessionId: "session-queue",
+      },
+    );
+
+    await repository.enqueueCrawlRun({
+      crawlRunId: crawlRun._id,
+      searchId: search._id,
+      searchSessionId: "session-queue",
+      ownerKey: "client-queue",
+      queuedAt: "2026-03-29T00:00:01.000Z",
+    });
+    await repository.markCrawlRunStarted(crawlRun._id, {
+      startedAt: "2026-03-29T00:00:02.000Z",
+      workerId: "worker:test",
+      ownerKey: "client-queue",
+    });
+
+    const bySearch = await repository.getActiveCrawlQueueEntryForSearch(search._id);
+    const byOwner = await repository.getActiveCrawlQueueEntryForOwner("client-queue");
+
+    expect(bySearch?.crawlRunId).toBe(crawlRun._id);
+    expect(bySearch?.status).toBe("running");
+    expect(bySearch?.startedAt).toBe("2026-03-29T00:00:02.000Z");
+    expect(bySearch?.workerId).toBe("worker:test");
+    expect(byOwner?.crawlRunId).toBe(crawlRun._id);
+    expect(await repository.hasActiveCrawlQueueEntryForSearch(search._id)).toBe(true);
+
+    await repository.finalizeCrawlQueueEntry(crawlRun._id, {
+      status: "aborted",
+      finishedAt: "2026-03-29T00:00:03.000Z",
+    });
+
+    expect(await repository.getActiveCrawlQueueEntryForSearch(search._id)).toBeNull();
   });
 
   it("merges duplicate jobs across crawl runs without updating the immutable _id field", async () => {
@@ -756,8 +1021,20 @@ describe("JobCrawlerRepository", () => {
       db.collection(collectionNames.crawlRuns).indexes.map((index) => index.name),
     ).toContain("crawlRuns_validationMode_startedAt_desc");
     expect(
+      db.collection(collectionNames.crawlControls).indexes.map((index) => index.name),
+    ).toContain("crawlControls_crawlRunId");
+    expect(
+      db.collection(collectionNames.crawlQueue).indexes.map((index) => index.name),
+    ).toContain("crawlQueue_searchId_status_updatedAt_desc");
+    expect(
       db.collection(collectionNames.crawlRunJobEvents).indexes.map((index) => index.name),
     ).toContain("crawlRunJobEvents_run_sequence");
+    expect(
+      db.collection(collectionNames.searchSessions).indexes.map((index) => index.name),
+    ).toContain("searchSessions_searchId_createdAt_desc");
+    expect(
+      db.collection(collectionNames.searchSessionJobEvents).indexes.map((index) => index.name),
+    ).toContain("searchSessionJobEvents_session_sequence");
   });
 
   it("groups duplicate updates into a single bulk write instead of issuing per-job mutations", async () => {
@@ -888,11 +1165,72 @@ describe("JobCrawlerRepository", () => {
     expect(inventory).toHaveLength(1);
     expect(inventory[0]).toMatchObject({
       _id: greenhouse._id,
+      sourceType: "ats_board",
+      sourceKey: "openai",
+      status: "active",
+      health: "unknown",
+      crawlPriority: 0,
       companyHint: "OpenAI Careers",
       firstSeenAt,
       lastSeenAt: refreshedAt,
       lastRefreshedAt: refreshedAt,
     });
     expect(db.snapshot(collectionNames.sourceInventory)).toHaveLength(1);
+  });
+
+  it("records source inventory crawl observations with health and failure tracking", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const observedAt = "2026-04-15T00:00:00.000Z";
+    const failedAt = "2026-04-16T00:00:00.000Z";
+    const recoveredAt = "2026-04-17T00:00:00.000Z";
+
+    const greenhouse = toSourceInventoryRecord(
+      classifySourceCandidate({
+        url: "https://boards.greenhouse.io/openai",
+        token: "openai",
+        companyHint: "OpenAI",
+        confidence: "high",
+        discoveryMethod: "platform_registry",
+      }),
+      {
+        now: observedAt,
+        inventoryOrigin: "greenhouse_registry",
+        inventoryRank: 0,
+      },
+    );
+
+    await repository.upsertSourceInventory([greenhouse]);
+    await repository.recordSourceInventoryObservations([
+      {
+        sourceId: greenhouse._id,
+        observedAt: failedAt,
+        health: "failing",
+        lastFailureReason: "Timed out fetching board payload",
+        succeeded: false,
+      },
+    ]);
+    await repository.recordSourceInventoryObservations([
+      {
+        sourceId: greenhouse._id,
+        observedAt: recoveredAt,
+        health: "healthy",
+        succeeded: true,
+      },
+    ]);
+
+    const inventory = await repository.listSourceInventory(["greenhouse"]);
+
+    expect(inventory).toHaveLength(1);
+    expect(inventory[0]).toMatchObject({
+      _id: greenhouse._id,
+      health: "healthy",
+      failureCount: 1,
+      consecutiveFailures: 0,
+      lastFailureReason: "Timed out fetching board payload",
+      lastCrawledAt: recoveredAt,
+      lastSucceededAt: recoveredAt,
+      lastFailedAt: failedAt,
+    });
   });
 });

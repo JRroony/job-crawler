@@ -259,6 +259,10 @@ function mergeCandidates<T extends ComparableJobRecord>(left: T, right: T): T {
 
   return {
     ...primary,
+    rawSourceMetadata: {
+      ...(left.rawSourceMetadata ?? {}),
+      ...(right.rawSourceMetadata ?? {}),
+    },
     postedAt: latestDate(left.postedAt, right.postedAt),
     discoveredAt: left.discoveredAt < right.discoveredAt ? left.discoveredAt : right.discoveredAt,
     sourceLookupKeys: Array.from(new Set([...left.sourceLookupKeys, ...right.sourceLookupKeys])),
