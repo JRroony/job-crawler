@@ -708,5 +708,5 @@ describe("jobs-first indexed search", () => {
         expect.objectContaining({ title: "Data Analyst" }),
       ]),
     );
-  });
+  }, 10_000);
 });

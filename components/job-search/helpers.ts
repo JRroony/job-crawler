@@ -42,6 +42,10 @@ export const platformFilterOptions: Array<{
     label: "Ashby",
   },
   {
+    value: "smartrecruiters",
+    label: "SmartRecruiters",
+  },
+  {
     value: "company_page",
     label: "Company Pages",
   },

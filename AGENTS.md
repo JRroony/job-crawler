@@ -43,6 +43,19 @@ For large architecture refactors in this repository:
 - treat search sessions, incremental delivery, durable cancellation, and durable background control as required behavior
 - do not claim completion for code movement alone; validate actual behavior improvement
 
+## Architecture enforcement and self-repair
+This repository runs as a live retrieval system with active background processes.
+Implementation agents must enforce the following runtime guarantees:
+
+- **Background ingestion is mandatory.** The system must support recurring, scheduled background ingestion that continuously discovers sources, crawls them, normalizes jobs, and refreshes the index. A one-shot crawl is insufficient.
+- **sourceInventory must be actively refreshed.** A static or never-updated sourceInventory is an unacceptable end state. The inventory must be replenished on a schedule and reflect current source health and availability.
+- **Jobs must be populated from inventory-backed crawling.** An empty or stale jobs collection after ingestion has run is a defect, not an acceptable baseline. Background ingestion must write normalized job records into persistent storage.
+- **Search must return indexed jobs.** User search requests must serve results from the job index first. Request-time crawl is supplemental only. A search path that bypasses the index or returns zero indexed jobs when the index should contain data is a root-cause failure.
+- **Self-repair until green.** For any large implementation task, if `npm run typecheck` or `npm test` fails after initial changes, the agent must inspect failures, fix root causes, and rerun validation until both commands pass. Stopping at a failing build or failing tests is not acceptable completion.
+- **Runtime behavior must be validated.** Passing typecheck and tests is necessary but not sufficient. Agents must verify that background ingestion actually populates jobs, that sourceInventory is non-empty and refreshed, and that search returns indexed results for representative queries.
+
+If any of these guarantees are violated, treat it as a blocking defect and self-repair before claiming task completion.
+
 ## Retrieval principles
 - Separate recall from precision.
 - Separate source discovery from job-detail harvesting.

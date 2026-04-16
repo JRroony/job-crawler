@@ -9,6 +9,7 @@ import { lookupGreenhouseCompanyHint } from "@/lib/server/discovery/greenhouse-r
 import {
   buildSourceInventorySeeds,
   toDiscoveredSourceFromInventory,
+  toSourceInventoryRecord,
 } from "@/lib/server/discovery/inventory";
 import { discoverSourcesFromPublicSearchDetailed } from "@/lib/server/discovery/public-search";
 import { resolveOperationalCrawlerPlatforms, type CrawlMode } from "@/lib/types";
@@ -390,19 +391,10 @@ function resolvePublicSearchSkippedReason(
   hasBaselineCoverage: boolean,
   platforms?: readonly string[],
 ) {
-  const greenhouseFirstOnly =
-    Array.isArray(platforms) &&
-    platforms.length > 0 &&
-    platforms.every((platform) => platform === "greenhouse");
-  if (crawlMode !== "fast" || !hasBaselineCoverage) {
-    return undefined;
-  }
-
-  if (greenhouseFirstOnly) {
-    return undefined;
-  }
-
-  return "Fast mode skipped public ATS search because configured or expanded sources already provided runnable coverage.";
+  void crawlMode;
+  void hasBaselineCoverage;
+  void platforms;
+  return undefined;
 }
 
 export function discoverConfiguredSources(input: DiscoveryInput & { env: DiscoveryEnvSnapshot }) {
@@ -425,17 +417,41 @@ export async function refreshSourceInventory(input: {
   repository: JobCrawlerRepository;
   now: Date;
   env?: DiscoveryEnvSnapshot;
+  fetchImpl?: typeof fetch;
 }) {
   const env = input.env ?? getEnv();
   const now = input.now.toISOString();
-  const records = buildSourceInventorySeeds(env).map((record) => ({
+  const existingRecords = await input.repository.listSourceInventory();
+  const carryForwardRecords = existingRecords.map((record) => ({
+    ...record,
+    lastRefreshedAt: now,
+  }));
+  const seededRecords = buildSourceInventorySeeds(env).map((record) => ({
     ...record,
     firstSeenAt: now,
     lastSeenAt: now,
     lastRefreshedAt: now,
   }));
+  const refreshCandidates = dedupeDiscoveredSources([
+    ...existingRecords.map(toDiscoveredSourceFromInventory),
+    ...seededRecords.map(toDiscoveredSourceFromInventory),
+  ]);
+  const expandedRecords = (await expandCompanyPageSources(
+    refreshCandidates,
+    input.fetchImpl,
+  )).map((source, index) =>
+    toSourceInventoryRecord(source, {
+      now,
+      inventoryOrigin: "public_search",
+      inventoryRank: 50_000 + index,
+    }),
+  );
 
-  const persisted = await input.repository.upsertSourceInventory(records);
+  const persisted = await input.repository.upsertSourceInventory([
+    ...carryForwardRecords,
+    ...seededRecords,
+    ...expandedRecords,
+  ]);
 
   console.info("[discovery:inventory-refresh]", {
     persistedCount: persisted.length,
@@ -446,6 +462,7 @@ export async function refreshSourceInventory(input: {
     greenhouseCount: persisted.filter((record) => record.platform === "greenhouse").length,
     leverCount: persisted.filter((record) => record.platform === "lever").length,
     ashbyCount: persisted.filter((record) => record.platform === "ashby").length,
+    smartRecruitersCount: persisted.filter((record) => record.platform === "smartrecruiters").length,
   });
 
   return persisted;
@@ -519,6 +536,7 @@ function isInventoryPlatform(
     platform === "greenhouse" ||
     platform === "lever" ||
     platform === "ashby" ||
+    platform === "smartrecruiters" ||
     platform === "company_page" ||
     platform === "workday"
   );

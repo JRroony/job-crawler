@@ -41,6 +41,12 @@ export const selectablePlatformOptions: Array<{
     availability: "Secondary",
   },
   {
+    platform: "smartrecruiters",
+    label: "SmartRecruiters",
+    detail: "Available through public board discovery and detail-page normalization",
+    availability: "Secondary",
+  },
+  {
     platform: "company_page",
     label: "Company page",
     detail: "Available for configured feeds and pages, but not the focus of this MVP",
@@ -179,6 +185,7 @@ export function labelForCrawlerPlatform(platform: CrawlerPlatform | ProviderPlat
     greenhouse: "Greenhouse",
     lever: "Lever",
     ashby: "Ashby",
+    smartrecruiters: "SmartRecruiters",
     company_page: "Company page",
     workday: "Workday",
     linkedin_limited: "LinkedIn",

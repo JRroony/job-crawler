@@ -5,6 +5,7 @@ import type { PublicSearchCandidate } from "@/lib/server/discovery/public-search
 import { extractAshbyJobFromDetailUrl } from "@/lib/server/providers/ashby";
 import { extractGreenhouseJobFromDetailUrl } from "@/lib/server/providers/greenhouse";
 import { extractLeverJobFromDetailUrl } from "@/lib/server/providers/lever";
+import { extractSmartRecruitersJobFromDetailUrl } from "@/lib/server/providers/smartrecruiters";
 import { extractWorkdayJobFromDetailUrl } from "@/lib/server/providers/workday";
 
 export async function extractDirectJobFromPublicSearchCandidate(input: {
@@ -44,6 +45,17 @@ export async function extractDirectJobFromPublicSearchCandidate(input: {
     return extractAshbyJobFromDetailUrl({
       detailUrl: candidate.url,
       companyToken: candidate.detailToken,
+      companyHint: input.companyHint,
+      discoveredAt: input.discoveredAt,
+      fetchImpl: input.fetchImpl,
+    });
+  }
+
+  if (candidate.platform === "smartrecruiters") {
+    return extractSmartRecruitersJobFromDetailUrl({
+      detailUrl: candidate.url,
+      companyToken: candidate.detailToken,
+      jobId: candidate.detailJobId,
       companyHint: input.companyHint,
       discoveredAt: input.discoveredAt,
       fetchImpl: input.fetchImpl,

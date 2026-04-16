@@ -24,7 +24,7 @@ export function SearchBar(props: SearchBarProps) {
             Find relevant roles quickly
           </h1>
           <p className="mt-1 text-sm text-slate">
-            Search public postings, narrow the list with lightweight filters, and inspect the original job details without leaving the page.
+            Load saved matches first, keep refining with lightweight filters, and let background refresh expand coverage without interrupting the list.
           </p>
         </div>
         <div className="rounded-full border border-ink/10 bg-mist/45 px-3 py-1.5 text-xs font-semibold text-slate">
@@ -65,8 +65,7 @@ export function SearchBar(props: SearchBarProps) {
         <div className="flex gap-2 lg:self-stretch">
           <button
             type="submit"
-            disabled={props.isLoading}
-            className="min-h-[56px] min-w-[132px] rounded-[16px] bg-[#0a66c2] px-5 text-sm font-semibold text-white transition hover:bg-[#004182] disabled:cursor-not-allowed disabled:opacity-60"
+            className="min-h-[56px] min-w-[132px] rounded-[16px] bg-[#0a66c2] px-5 text-sm font-semibold text-white transition hover:bg-[#004182]"
           >
             {props.isLoading ? "Searching..." : "Search"}
           </button>

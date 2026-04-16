@@ -203,13 +203,13 @@ export function LoadingPanel(props: {
   return (
     <section className="rounded-[20px] border border-ink/8 bg-white p-5 shadow-[0_18px_48px_rgba(15,23,42,0.05)]">
       <div className="font-mono text-xs uppercase tracking-[0.24em] text-ember">
-        Search in progress
+        Search session
       </div>
       <h2 className="mt-2 text-xl font-semibold text-ink">
-        Gathering fresh job results
+        Preparing your first saved matches
       </h2>
       <p className="mt-2 max-w-3xl text-sm leading-6 text-slate">
-        {stageLabel}
+        {stageLabel} Indexed jobs appear first when available, and any slower supplemental work stays in the background.
       </p>
       <div className="mt-4 flex flex-wrap gap-2 text-sm text-slate">
         <span className="rounded-full border border-ink/10 bg-mist/35 px-3 py-1.5">
@@ -270,20 +270,20 @@ export function BackgroundSupplementIndicator(props: {
   foundCount?: number;
   onStop?: () => void;
 }) {
-  const stageLabel = describeStage(props.stage);
+  const stageLabel = describeCompactStage(props.stage);
 
   return (
-    <div className="flex items-center gap-2 rounded-full border border-ink/10 bg-white/80 px-3 py-1.5 text-xs text-slate">
+    <div className="flex items-center gap-2 rounded-full border border-ink/10 bg-white/80 px-3 py-1.5 text-xs text-slate shadow-sm">
       <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
       <span>
-        {stageLabel ?? "Refining results"} &middot; {props.foundCount ?? 0} saved
+        {stageLabel} &middot; {props.foundCount ?? 0} saved
       </span>
       {props.onStop ? (
         <button
           type="button"
           onClick={props.onStop}
           className="ml-1 rounded-full px-1.5 py-0.5 text-[11px] font-medium text-slate/70 transition hover:bg-ink/5"
-          title="Stop background refinement"
+          title="Stop background refresh"
         >
           Stop
         </button>
@@ -310,4 +310,24 @@ function describeStage(stage?: CrawlResponse["crawlRun"]["stage"]) {
   }
 
   return "Queueing the crawl and preparing the first provider batch.";
+}
+
+function describeCompactStage(stage?: CrawlResponse["crawlRun"]["stage"]) {
+  if (stage === "discovering") {
+    return "Refreshing source coverage";
+  }
+
+  if (stage === "crawling") {
+    return "Saving additional matches";
+  }
+
+  if (stage === "validating") {
+    return "Checking the newest links";
+  }
+
+  if (stage === "finalizing") {
+    return "Wrapping up this refresh";
+  }
+
+  return "Background refresh running";
 }

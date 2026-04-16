@@ -167,6 +167,7 @@ export const crawlerPlatforms = [
   "greenhouse",
   "lever",
   "ashby",
+  "smartrecruiters",
   "company_page",
   "workday",
 ] as const;
@@ -274,6 +275,7 @@ export const providerPlatforms = [
   "greenhouse",
   "lever",
   "ashby",
+  "smartrecruiters",
   "workday",
   "company_page",
   "linkedin_limited",
@@ -289,6 +291,7 @@ export const activeCrawlerPlatforms = [
   "greenhouse",
   "lever",
   "ashby",
+  "smartrecruiters",
   "workday",
   "company_page",
 ] as const;

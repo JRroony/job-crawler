@@ -62,6 +62,7 @@ export const sourceInventoryRecordSchema = z.object({
   pageType: z.enum(["json_feed", "json_ld_page", "html_page"]).optional(),
   sitePath: z.string().min(1).optional(),
   careerSitePath: z.string().min(1).optional(),
+  jobUrl: z.string().url().optional(),
   status: sourceInventoryStatusSchema.default("active"),
   health: sourceInventoryHealthSchema.default("unknown"),
   crawlPriority: z.number().int().nonnegative().default(0),
@@ -223,6 +224,7 @@ export function toSourceInventoryRecord(
     pageType: "pageType" in source ? source.pageType : undefined,
     sitePath: "sitePath" in source ? source.sitePath : undefined,
     careerSitePath: "careerSitePath" in source ? source.careerSitePath : undefined,
+    jobUrl: "jobUrl" in source ? source.jobUrl : undefined,
     status: "active",
     health: "unknown",
     crawlPriority: input.inventoryRank ?? 0,
@@ -253,6 +255,7 @@ export function toDiscoveredSourceFromInventory(
     ...(record.pageType ? { pageType: record.pageType } : {}),
     ...(record.sitePath ? { sitePath: record.sitePath } : {}),
     ...(record.careerSitePath ? { careerSitePath: record.careerSitePath } : {}),
+    ...(record.jobUrl ? { jobUrl: record.jobUrl } : {}),
   } as DiscoveredSource;
 }
 
@@ -308,7 +311,12 @@ function resolveSourceInventorySourceType(
     return source.careerSitePath ? "career_site" : "unknown";
   }
 
-  if (source.platform === "greenhouse" || source.platform === "lever" || source.platform === "ashby") {
+  if (
+    source.platform === "greenhouse" ||
+    source.platform === "lever" ||
+    source.platform === "ashby" ||
+    source.platform === "smartrecruiters"
+  ) {
     return "ats_board";
   }
 

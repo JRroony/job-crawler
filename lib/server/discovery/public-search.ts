@@ -40,7 +40,7 @@ type PublicSearchOptions = {
 
 type SearchablePublicPlatform = Extract<
   ActiveCrawlerPlatform,
-  "greenhouse" | "lever" | "ashby" | "workday"
+  "greenhouse" | "lever" | "ashby" | "smartrecruiters" | "workday"
 >;
 
 type PublicSearchHostQuery = {
@@ -129,11 +129,12 @@ const searchablePlatforms: ActiveCrawlerPlatform[] = [
   "greenhouse",
   "lever",
   "ashby",
+  "smartrecruiters",
   "workday",
 ];
 
 const searchHostQueries: Record<
-  Extract<ActiveCrawlerPlatform, "greenhouse" | "lever" | "ashby" | "workday">,
+  Extract<ActiveCrawlerPlatform, "greenhouse" | "lever" | "ashby" | "smartrecruiters" | "workday">,
   PublicSearchHostQuery[]
 > = {
   greenhouse: [
@@ -156,6 +157,10 @@ const searchHostQueries: Record<
   ],
   lever: [{ query: "site:jobs.lever.co", kind: "board" }],
   ashby: [{ query: "site:jobs.ashbyhq.com", kind: "board" }],
+  smartrecruiters: [
+    { query: "site:jobs.smartrecruiters.com", kind: "detail" },
+    { query: "site:careers.smartrecruiters.com", kind: "board" },
+  ],
   workday: [
     { query: "site:myworkdayjobs.com", kind: "detail" },
     { query: "myworkdayjobs", kind: "board" },
@@ -431,6 +436,7 @@ export function buildPublicSearchQueryPlan(
       platform === "greenhouse" ||
       platform === "lever" ||
       platform === "ashby" ||
+      platform === "smartrecruiters" ||
       platform === "workday",
   );
   const roleQueryVariants = buildRoleQueries(filters.title, options.maxRoleQueries);
@@ -999,6 +1005,7 @@ function supportsDirectDetailExtraction(candidate: PublicSearchCandidate) {
     candidate.platform === "greenhouse" ||
     candidate.platform === "lever" ||
     candidate.platform === "ashby" ||
+    candidate.platform === "smartrecruiters" ||
     candidate.platform === "workday"
   );
 }

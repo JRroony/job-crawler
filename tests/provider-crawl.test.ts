@@ -6,6 +6,7 @@ import { createAshbyProvider } from "@/lib/server/providers/ashby";
 import { createCompanyPageProvider } from "@/lib/server/providers/company-page";
 import { createGreenhouseProvider } from "@/lib/server/providers/greenhouse";
 import { createLeverProvider } from "@/lib/server/providers/lever";
+import { createSmartRecruitersProvider } from "@/lib/server/providers/smartrecruiters";
 import { createWorkdayProvider } from "@/lib/server/providers/workday";
 import type { CrawlProvider, ProviderExecutionContext } from "@/lib/server/providers/types";
 import type { CompanyPageSourceConfig } from "@/lib/types";
@@ -38,6 +39,14 @@ function leverSource(token: string, jobId?: string) {
 }
 
 function workdaySource(url: string) {
+  return classifySourceCandidate({
+    url,
+    confidence: "high",
+    discoveryMethod: "future_search",
+  });
+}
+
+function smartRecruitersSource(url: string) {
   return classifySourceCandidate({
     url,
     confidence: "high",
@@ -509,6 +518,105 @@ describe("provider crawl status and live parsing", () => {
       fetchCount: 1,
       parseSuccessCount: 1,
       parseFailureCount: 0,
+    });
+  });
+
+  it("crawls a SmartRecruiters board through detail-page extraction into normalized jobs", async () => {
+    const provider = createSmartRecruitersProvider();
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url === "https://careers.smartrecruiters.com/Acme") {
+        return new Response(
+          `
+            <html>
+              <body>
+                <a href="https://jobs.smartrecruiters.com/Acme/744000067444685-senior-product-analyst">
+                  Senior Product Analyst
+                </a>
+              </body>
+            </html>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "text/html",
+            },
+          },
+        );
+      }
+
+      if (url === "https://jobs.smartrecruiters.com/Acme/744000067444685-senior-product-analyst") {
+        return new Response(
+          `
+            <html>
+              <head>
+                <script type="application/ld+json">
+                  {
+                    "@context": "https://schema.org",
+                    "@type": "JobPosting",
+                    "title": "Senior Product Analyst",
+                    "description": "Analyze product signals and support product planning.",
+                    "datePosted": "2026-03-18T00:00:00.000Z",
+                    "employmentType": "Full-time",
+                    "url": "https://jobs.smartrecruiters.com/Acme/744000067444685-senior-product-analyst",
+                    "hiringOrganization": {
+                      "@type": "Organization",
+                      "name": "Acme"
+                    },
+                    "jobLocation": {
+                      "@type": "Place",
+                      "address": {
+                        "@type": "PostalAddress",
+                        "addressLocality": "Austin",
+                        "addressRegion": "TX",
+                        "addressCountry": "US"
+                      }
+                    }
+                  }
+                </script>
+              </head>
+              <body></body>
+            </html>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "text/html",
+            },
+          },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Product Analyst",
+        country: "United States",
+      },
+      sources: [smartRecruitersSource("https://careers.smartrecruiters.com/Acme")],
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.fetchedCount).toBe(1);
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0]).toMatchObject({
+      title: "Senior Product Analyst",
+      company: "Acme",
+      sourcePlatform: "smartrecruiters",
+      sourceUrl: "https://jobs.smartrecruiters.com/Acme/744000067444685-senior-product-analyst",
+      city: "Austin",
+      state: "Texas",
+      country: "United States",
+    });
+    expect(result.diagnostics).toMatchObject({
+      provider: "smartrecruiters",
+      discoveryCount: 1,
+      parseSuccessCount: 1,
     });
   });
 

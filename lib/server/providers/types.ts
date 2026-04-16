@@ -4,6 +4,7 @@ import type {
   DiscoveredSource,
   GreenhouseDiscoveredSource,
   LeverDiscoveredSource,
+  SmartRecruitersDiscoveredSource,
   WorkdayDiscoveredSource,
 } from "@/lib/server/discovery/types";
 import type {
@@ -67,6 +68,7 @@ type ProviderSourceMap = {
   greenhouse: GreenhouseDiscoveredSource;
   lever: LeverDiscoveredSource;
   ashby: AshbyDiscoveredSource;
+  smartrecruiters: SmartRecruitersDiscoveredSource;
   workday: WorkdayDiscoveredSource;
   company_page: CompanyPageDiscoveredSource;
   linkedin_limited: never;

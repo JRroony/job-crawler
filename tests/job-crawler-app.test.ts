@@ -4,11 +4,13 @@ import {
   buildSearchRequestPayload,
   describeResultNotice,
   describeZeroResultState,
+  isSupplementingSearchSession,
   isLatestClientRequest,
   mergeCrawlDeltaIntoResult,
   normalizeSearchFiltersForClient,
   resolveQueuedSearchPollIntervalMs,
   resolveViewState,
+  shouldShowBlockingSearchLoad,
   shouldApplyQueuedResultImmediately,
 } from "@/components/job-crawler-app";
 import { BackgroundSupplementIndicator } from "@/components/job-crawler/status-panels";
@@ -244,6 +246,17 @@ describe("job crawler app result state", () => {
     expect(resolveViewState(result)).toBe("loading");
   });
 
+  it("keeps the visible surface in success state when supplemental work is running", () => {
+    const result = {
+      ...createResult("running"),
+      jobs: [createTestJob("job-1")],
+    } satisfies CrawlResponse;
+
+    expect(resolveViewState(result)).toBe("success");
+    expect(isSupplementingSearchSession(result)).toBe(true);
+    expect(shouldShowBlockingSearchLoad("loading", result)).toBe(false);
+  });
+
   it("keeps aborted zero-job crawls mapped to the stopped state", () => {
     const result = createResult("aborted", {
       discoveredSources: 3,
@@ -443,13 +456,13 @@ describe("abort signal propagation in background runs", () => {
 });
 
 describe("Progressive index-first search UI behavior", () => {
-  it("resolveViewState returns loading when crawl is running even with jobs visible", () => {
+  it("resolveViewState returns success when crawl is running with visible jobs", () => {
     const result = {
       ...createResult("running"),
       jobs: [createTestJob("job-1")],
     };
-    // This ensures the UI shows results while indicating work continues
-    expect(resolveViewState(result)).toBe("loading");
+    expect(resolveViewState(result)).toBe("success");
+    expect(isSupplementingSearchSession(result)).toBe(true);
   });
 
   it("resolveViewState returns success when crawl completes with jobs", () => {
@@ -510,6 +523,17 @@ describe("Progressive index-first search UI behavior", () => {
     expect(typeof BackgroundSupplementIndicator).toBe("function");
   });
 
+  it("shouldShowBlockingSearchLoad only blocks the main surface before any jobs are visible", () => {
+    expect(shouldShowBlockingSearchLoad("loading", null)).toBe(true);
+    expect(shouldShowBlockingSearchLoad("loading", createResult("running"))).toBe(true);
+    expect(
+      shouldShowBlockingSearchLoad("loading", {
+        ...createResult("running"),
+        jobs: [createTestJob("job-1")],
+      }),
+    ).toBe(false);
+  });
+
   it("mergeCrawlDeltaIntoResult preserves job identity across incremental updates", () => {
     const base = {
       ...createResult("running"),
@@ -541,6 +565,65 @@ describe("Progressive index-first search UI behavior", () => {
     expect(merged.jobs.map((j) => j._id)).toContain("job-2");
     expect(merged.jobs.map((j) => j._id)).toContain("job-3");
     // Cursor should be updated
+    expect(merged.delivery?.cursor).toBe(2);
+  });
+
+  it("mergeCrawlDeltaIntoResult dedupes logically identical jobs so render keys stay stable", () => {
+    const base = {
+      ...createResult("running"),
+      jobs: [
+        {
+          ...createTestJob("job-1"),
+          canonicalUrl: "https://example.com/jobs/shared-role",
+          applyUrl: "https://example.com/jobs/shared-role/apply",
+          sourceUrl: "https://example.com/jobs/shared-role",
+          sourceJobId: "shared-role",
+          sourceLookupKeys: ["greenhouse:shared-role"],
+        },
+      ],
+      delivery: {
+        mode: "full" as const,
+        cursor: 1,
+      },
+    } satisfies CrawlResponse;
+
+    const delta = {
+      search: base.search,
+      searchSession: {
+        _id: "session-1",
+        searchId: base.search._id,
+        latestCrawlRunId: base.crawlRun._id,
+        status: "running" as const,
+        createdAt: base.search.createdAt,
+        updatedAt: base.search.updatedAt,
+        finishedAt: undefined,
+        lastEventSequence: 2,
+        lastEventAt: base.search.updatedAt,
+      },
+      crawlRun: base.crawlRun,
+      sourceResults: base.sourceResults,
+      diagnostics: base.diagnostics,
+      jobs: [
+        {
+          ...createTestJob("job-2"),
+          canonicalUrl: "https://example.com/jobs/shared-role",
+          applyUrl: "https://example.com/jobs/shared-role/apply",
+          sourceUrl: "https://example.com/jobs/shared-role",
+          sourceJobId: "shared-role",
+          sourceLookupKeys: ["greenhouse:shared-role"],
+        },
+      ],
+      delivery: {
+        mode: "delta" as const,
+        previousCursor: 1,
+        cursor: 2,
+      },
+    } satisfies CrawlDeltaResponse;
+
+    const merged = mergeCrawlDeltaIntoResult(base, delta);
+
+    expect(merged.jobs).toHaveLength(1);
+    expect(merged.searchSession?._id).toBe("session-1");
     expect(merged.delivery?.cursor).toBe(2);
   });
 

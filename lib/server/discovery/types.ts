@@ -9,6 +9,7 @@ export const discoveredPlatforms = [
   "greenhouse",
   "lever",
   "ashby",
+  "smartrecruiters",
   "company_page",
   "workday",
   "unknown",
@@ -62,6 +63,14 @@ export type AshbyDiscoveredSource = BaseDiscoveredSource & {
   boardUrl?: string;
 };
 
+export type SmartRecruitersDiscoveredSource = BaseDiscoveredSource & {
+  platform: "smartrecruiters";
+  token?: string;
+  jobId?: string;
+  boardUrl?: string;
+  jobUrl?: string;
+};
+
 export type CompanyPageDiscoveredSource = BaseDiscoveredSource & {
   platform: "company_page";
   companyHint: string;
@@ -85,6 +94,7 @@ export type DiscoveredSource =
   | GreenhouseDiscoveredSource
   | LeverDiscoveredSource
   | AshbyDiscoveredSource
+  | SmartRecruitersDiscoveredSource
   | CompanyPageDiscoveredSource
   | WorkdayDiscoveredSource
   | UnknownDiscoveredSource;
@@ -144,6 +154,12 @@ export function isCompanyPageSource(
   source: DiscoveredSource,
 ): source is CompanyPageDiscoveredSource {
   return source.platform === "company_page";
+}
+
+export function isSmartRecruitersSource(
+  source: DiscoveredSource,
+): source is SmartRecruitersDiscoveredSource {
+  return source.platform === "smartrecruiters";
 }
 
 export function isWorkdaySource(source: DiscoveredSource): source is WorkdayDiscoveredSource {

@@ -2187,7 +2187,7 @@ async function applyInlineValidationStrategy(
   };
 }
 
-function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): PersistableJob {
+export function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): PersistableJob {
   const resolvedLocation = seed.resolvedLocation;
   const locationRaw = seed.locationRaw ?? seed.locationText;
   const locationNormalized =

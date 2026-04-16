@@ -28,6 +28,10 @@ const platformPhraseMatchers: Array<{
     pattern: /\bashby\b/gi,
   },
   {
+    platform: "smartrecruiters",
+    pattern: /\bsmart ?recruiters?\b/gi,
+  },
+  {
     platform: "company_page",
     pattern: /\bcompany(?: |-)?pages?\b/gi,
   },

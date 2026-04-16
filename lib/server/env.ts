@@ -31,6 +31,13 @@ const envSchema = z.object({
   CRAWL_INITIAL_VISIBLE_WAIT_MS: z.coerce.number().int().nonnegative().default(400),
   CRAWL_TARGET_JOB_COUNT: z.coerce.number().int().positive().default(30),
   CRAWL_EARLY_VISIBLE_TARGET: z.coerce.number().int().positive().default(30),
+  BACKGROUND_INGESTION_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  BACKGROUND_INGESTION_INTERVAL_MS: z.coerce.number().int().positive().default(600000),
+  BACKGROUND_INGESTION_STALE_AFTER_MS: z.coerce.number().int().positive().default(1800000),
+  BACKGROUND_INGESTION_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(540000),
 });
 
 type ParsedEnv = z.infer<typeof envSchema>;
@@ -91,6 +98,14 @@ export function getEnv() {
         process.env.CRAWL_TARGET_JOB_COUNT ?? "30",
       CRAWL_EARLY_VISIBLE_TARGET:
         process.env.CRAWL_EARLY_VISIBLE_TARGET ?? "30",
+      BACKGROUND_INGESTION_ENABLED:
+        process.env.BACKGROUND_INGESTION_ENABLED ?? "true",
+      BACKGROUND_INGESTION_INTERVAL_MS:
+        process.env.BACKGROUND_INGESTION_INTERVAL_MS ?? "600000",
+      BACKGROUND_INGESTION_STALE_AFTER_MS:
+        process.env.BACKGROUND_INGESTION_STALE_AFTER_MS ?? "1800000",
+      BACKGROUND_INGESTION_RUN_TIMEOUT_MS:
+        process.env.BACKGROUND_INGESTION_RUN_TIMEOUT_MS ?? "540000",
     });
   }
 

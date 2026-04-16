@@ -14,6 +14,9 @@ import {
   buildCanonicalLeverApiUrl,
   parseLeverUrl,
 } from "@/lib/server/discovery/lever-url";
+import {
+  parseSmartRecruitersUrl,
+} from "@/lib/server/discovery/smartrecruiters-url";
 import type {
   DiscoveredSource,
   DiscoveryConfidence,
@@ -102,6 +105,30 @@ export function classifySourceCandidate(
       jobId: ashbyUrl.jobPath,
       companyHint: resolveCompanyHint(input.companyHint, ashbyUrl.companyToken, parsedUrl),
       confidence: resolvePlatformConfidence(input.confidence, "high"),
+      discoveryMethod: input.discoveryMethod,
+    };
+  }
+
+  const smartRecruitersUrl = parseSmartRecruitersUrl(parsedUrl);
+  if (smartRecruitersUrl?.companyToken) {
+    const boardUrl =
+      smartRecruitersUrl.canonicalBoardUrl ??
+      `https://careers.smartrecruiters.com/${smartRecruitersUrl.companyToken}`;
+
+    return {
+      id: buildSourceId("smartrecruiters", smartRecruitersUrl.companyToken),
+      platform: "smartrecruiters",
+      url: boardUrl,
+      boardUrl,
+      token: smartRecruitersUrl.companyToken,
+      jobId: smartRecruitersUrl.jobId,
+      jobUrl: smartRecruitersUrl.canonicalJobUrl,
+      companyHint: resolveCompanyHint(
+        input.companyHint,
+        smartRecruitersUrl.companyToken,
+        parsedUrl,
+      ),
+      confidence: resolvePlatformConfidence(input.confidence, "medium"),
       discoveryMethod: input.discoveryMethod,
     };
   }

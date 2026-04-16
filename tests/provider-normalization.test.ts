@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { normalizeAshbyCandidate } from "@/lib/server/providers/ashby";
 import { normalizeGreenhouseJob } from "@/lib/server/providers/greenhouse";
 import { normalizeLeverJob } from "@/lib/server/providers/lever";
+import { normalizeSmartRecruitersJob } from "@/lib/server/providers/smartrecruiters";
 import { normalizeWorkdayJob } from "@/lib/server/providers/workday";
 
 describe("provider normalization", () => {
@@ -117,6 +118,33 @@ describe("provider normalization", () => {
       explicitLevel: "staff",
       source: "title",
     });
+  });
+
+  it("normalizes SmartRecruiters jobs into the common model", () => {
+    const job = normalizeSmartRecruitersJob({
+      companyToken: "acme",
+      discoveredAt: "2026-03-29T00:00:00.000Z",
+      candidate: {
+        id: "744000067444685",
+        title: "Senior Product Analyst",
+        locationText: "Austin, TX",
+        jobUrl: "https://jobs.smartrecruiters.com/Acme/744000067444685-senior-product-analyst",
+        applyUrl: "https://jobs.smartrecruiters.com/Acme/744000067444685-senior-product-analyst",
+        postedAt: "2026-03-18T00:00:00.000Z",
+        typeOfEmployment: "Full-time",
+        description: "Analyze product signals and partner with product leaders.",
+        company: "Acme",
+      },
+    });
+
+    expect(job.sourcePlatform).toBe("smartrecruiters");
+    expect(job.company).toBe("Acme");
+    expect(job.locationText).toBe("Austin, TX");
+    expect(job.country).toBe("United States");
+    expect(job.state).toBe("Texas");
+    expect(job.city).toBe("Austin");
+    expect(job.employmentType).toBe("full_time");
+    expect(job.sourceCompanySlug).toBe("acme");
   });
 
   it("normalizes workday jobs into the common model", () => {

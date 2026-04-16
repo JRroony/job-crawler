@@ -4,6 +4,7 @@ import { parseAshbyUrl } from "@/lib/server/discovery/ashby-url";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import { parseGreenhouseUrl } from "@/lib/server/discovery/greenhouse-url";
 import { parseLeverUrl } from "@/lib/server/discovery/lever-url";
+import { parseSmartRecruitersUrl } from "@/lib/server/discovery/smartrecruiters-url";
 import type {
   DiscoveredSource,
   DiscoveredPlatform,
@@ -84,6 +85,25 @@ export function classifyPublicSearchCandidate(
       recoveryKind: ashby.jobPath ? "detail_recovery" : "source_classification",
       detailToken: ashby.companyToken,
       detailJobId: ashby.jobPath,
+    };
+  }
+
+  const smartRecruiters = parseSmartRecruitersUrl(url);
+  if (smartRecruiters?.companyToken) {
+    return {
+      url: smartRecruiters.jobPath && smartRecruiters.canonicalJobUrl
+        ? smartRecruiters.canonicalJobUrl
+        : smartRecruiters.canonicalBoardUrl ?? url,
+      platform: "smartrecruiters",
+      kind: smartRecruiters.jobPath ? "detail" : "source",
+      recoveredSource: classifySourceCandidate({
+        url,
+        discoveryMethod,
+      }),
+      recoveryKind:
+        smartRecruiters.jobPath ? "detail_recovery" : "source_classification",
+      detailToken: smartRecruiters.companyToken,
+      detailJobId: smartRecruiters.jobId ?? smartRecruiters.jobPath,
     };
   }
 

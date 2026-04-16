@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import { getDefaultGreenhouseRegistryEntries } from "@/lib/server/discovery/greenhouse-registry";
+import { toSourceInventoryRecord } from "@/lib/server/discovery/inventory";
 import {
   buildPublicSearchQueryPlan,
   discoverSourcesFromPublicSearch,
@@ -55,6 +56,10 @@ describe("source discovery", () => {
       url: "https://jobs.ashbyhq.com/notion",
       discoveryMethod: "future_search",
     });
+    const smartRecruiters = classifySourceCandidate({
+      url: "https://careers.smartrecruiters.com/Acme",
+      discoveryMethod: "future_search",
+    });
     const workday = classifySourceCandidate({
       url: "https://acme.wd1.myworkdayjobs.com/Careers",
       discoveryMethod: "future_search",
@@ -83,6 +88,11 @@ describe("source discovery", () => {
       platform: "ashby",
       token: "notion",
       boardUrl: "https://jobs.ashbyhq.com/notion",
+    });
+    expect(smartRecruiters).toMatchObject({
+      platform: "smartrecruiters",
+      token: "Acme",
+      boardUrl: "https://careers.smartrecruiters.com/Acme",
     });
     expect(workday).toMatchObject({
       platform: "workday",
@@ -155,6 +165,10 @@ describe("source discovery", () => {
       url: "https://jobs.ashbyhq.com/notion/497fcc20-d3fd-42f0-9b24-123456789abc",
       discoveryMethod: "future_search",
     });
+    const smartRecruitersDetail = classifySourceCandidate({
+      url: "https://jobs.smartrecruiters.com/Acme/744000067444685-senior-product-analyst",
+      discoveryMethod: "future_search",
+    });
     const workdayDetail = classifySourceCandidate({
       url: "https://acme.wd1.myworkdayjobs.com/en-US/Careers/job/Seattle-WA/Data-Engineer_R12345",
       discoveryMethod: "future_search",
@@ -174,6 +188,14 @@ describe("source discovery", () => {
       jobId: "497fcc20-d3fd-42f0-9b24-123456789abc",
       url: "https://jobs.ashbyhq.com/notion",
       boardUrl: "https://jobs.ashbyhq.com/notion",
+    });
+    expect(smartRecruitersDetail).toMatchObject({
+      platform: "smartrecruiters",
+      token: "Acme",
+      jobId: "744000067444685",
+      url: "https://careers.smartrecruiters.com/Acme",
+      boardUrl: "https://careers.smartrecruiters.com/Acme",
+      jobUrl: "https://jobs.smartrecruiters.com/Acme/744000067444685-senior-product-analyst",
     });
     expect(workdayDetail).toMatchObject({
       platform: "workday",
@@ -804,6 +826,121 @@ describe("source discovery", () => {
       recoveredSourcesFromDetailUrls: 1,
       directJobsExtracted: 1,
       sampleRecoveredSourceUrls: ["https://acme.wd1.myworkdayjobs.com/en-US/Careers"],
+    });
+  });
+
+  it("harvests direct SmartRecruiters detail jobs from SERP hits while recovering the company board", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      if (url.startsWith("https://www.bing.com/search")) {
+        return new Response(
+          `
+            <rss>
+              <channel>
+                <item>
+                  <link>https://jobs.smartrecruiters.com/Acme/744000067444685-senior-product-analyst</link>
+                </item>
+              </channel>
+            </rss>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/rss+xml",
+            },
+          },
+        );
+      }
+
+      if (url.startsWith("https://html.duckduckgo.com/html/")) {
+        return new Response("<html><body></body></html>", {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        });
+      }
+
+      if (url === "https://jobs.smartrecruiters.com/Acme/744000067444685-senior-product-analyst") {
+        return new Response(
+          `
+            <html>
+              <head>
+                <script type="application/ld+json">
+                  {
+                    "@context": "https://schema.org",
+                    "@type": "JobPosting",
+                    "title": "Senior Product Analyst",
+                    "description": "Analyze product signals across US markets.",
+                    "datePosted": "2026-03-18T00:00:00.000Z",
+                    "employmentType": "Full-time",
+                    "url": "https://jobs.smartrecruiters.com/Acme/744000067444685-senior-product-analyst",
+                    "hiringOrganization": {
+                      "@type": "Organization",
+                      "name": "Acme"
+                    },
+                    "jobLocation": {
+                      "@type": "Place",
+                      "address": {
+                        "@type": "PostalAddress",
+                        "addressLocality": "Austin",
+                        "addressRegion": "TX",
+                        "addressCountry": "US"
+                      }
+                    }
+                  }
+                </script>
+              </head>
+              <body></body>
+            </html>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "text/html",
+            },
+          },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const result = await discoverSourcesFromPublicSearchDetailed(
+      {
+        title: "Product Analyst",
+        country: "United States",
+        platforms: ["smartrecruiters"],
+      },
+      {
+        fetchImpl,
+        maxResultsPerQuery: 4,
+        maxQueries: 1,
+      },
+    );
+
+    expect(result.sources).toEqual([
+      expect.objectContaining({
+        platform: "smartrecruiters",
+        token: "Acme",
+        jobId: "744000067444685",
+        boardUrl: "https://careers.smartrecruiters.com/Acme",
+      }),
+    ]);
+    expect(result.jobs).toEqual([
+      expect.objectContaining({
+        title: "Senior Product Analyst",
+        company: "Acme",
+        sourcePlatform: "smartrecruiters",
+        locationText: "Austin, TX, US",
+      }),
+    ]);
+    expect(result.diagnostics).toMatchObject({
+      detailUrlsHarvested: 1,
+      recoveredSourcesFromDetailUrls: 1,
+      directJobsExtracted: 1,
+      sampleRecoveredSourceUrls: ["https://careers.smartrecruiters.com/Acme"],
     });
   });
 
@@ -1784,6 +1921,74 @@ describe("source capping with platform diversity", () => {
     expect(inventory.some((record) => record.platform === "ashby" && record.token === "notion")).toBe(
       true,
     );
+  });
+
+  it("refreshes existing inventory records and grows inventory from company-page SmartRecruiters expansion", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    await repository.upsertSourceInventory([
+      toSourceInventoryRecord(
+        classifySourceCandidate({
+          url: "https://careers.acme.com/jobs",
+          companyHint: "Acme",
+          pageType: "html_page",
+          confidence: "medium",
+          discoveryMethod: "manual_config",
+        }),
+        {
+          now: "2026-04-10T00:00:00.000Z",
+          inventoryOrigin: "manual_config",
+          inventoryRank: 0,
+        },
+      ),
+    ]);
+
+    const inventory = await refreshSourceInventory({
+      repository,
+      now: new Date("2026-04-15T00:00:00.000Z"),
+      fetchImpl: vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url !== "https://careers.acme.com/jobs") {
+          throw new Error(`Unexpected fetch: ${url}`);
+        }
+
+        return new Response(
+          `
+            <html>
+              <body>
+                <a href="https://careers.smartrecruiters.com/Acme">Careers</a>
+              </body>
+            </html>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "text/html",
+            },
+          },
+        );
+      }) as unknown as typeof fetch,
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+      },
+    });
+
+    expect(inventory.some((record) => record.platform === "company_page")).toBe(true);
+    expect(inventory.some((record) => record.platform === "smartrecruiters")).toBe(true);
+    expect(
+      inventory.find((record) => record.platform === "company_page" && record.url === "https://careers.acme.com/jobs"),
+    ).toMatchObject({
+      lastRefreshedAt: "2026-04-15T00:00:00.000Z",
+    });
+    expect(
+      inventory.find((record) => record.platform === "smartrecruiters" && record.token === "Acme"),
+    ).toMatchObject({
+      inventoryOrigin: "public_search",
+      lastSeenAt: "2026-04-15T00:00:00.000Z",
+    });
   });
 
   it("uses persistent source inventory in the baseline stage before falling back to configured seeds", async () => {

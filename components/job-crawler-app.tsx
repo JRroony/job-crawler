@@ -27,6 +27,7 @@ import {
 } from "@/components/job-search/helpers";
 import { SearchBar } from "@/components/job-search/search-bar";
 import { ResultsTable } from "@/components/results-table";
+import { buildStableJobRenderIdentity } from "@/lib/job-identity";
 import type {
   CrawlDeltaResponse,
   CrawlDiagnostics,
@@ -143,11 +144,6 @@ export function JobCrawlerApp({
     initialError ? "initial_load" : null,
   );
   const [revalidatingIds, setRevalidatingIds] = useState<string[]>([]);
-  const [backgroundCrawlId, setBackgroundCrawlId] = useState<string | null>(null);
-  const [backgroundCrawlNotice, setBackgroundCrawlNotice] = useState<{
-    searchId: string;
-    title: string;
-  } | null>(null);
   const pollSequenceRef = useRef(0);
   const activeDeliveryCursorRef = useRef(0);
   const clientRequestOwnerKeyRef = useRef(createClientRequestOwnerKey());
@@ -195,7 +191,7 @@ export function JobCrawlerApp({
     setActiveResult(normalizedPayload);
     activeDeliveryCursorRef.current = normalizedPayload.delivery?.cursor ?? 0;
     hydrateSearchForm(normalizedPayload.search.filters);
-    setViewState("loading");
+    setViewState(resolveViewState(normalizedPayload));
     setErrorKind(null);
   }
 
@@ -205,7 +201,6 @@ export function JobCrawlerApp({
       updatedAfter?: string;
       pollToken: number;
       signal?: AbortSignal;
-      onSettled?: () => void;
     },
   ) {
     const deadline = Date.now() + queuedSearchPollTimeoutMs;
@@ -257,13 +252,11 @@ export function JobCrawlerApp({
       if (options.updatedAfter && finalPayload.search.updatedAt <= options.updatedAfter) {
         applyLoadedResult(finalPayload);
         refreshRecentSearch(finalPayload.search);
-        options.onSettled?.();
         return;
       }
 
       applyLoadedResult(finalPayload);
       refreshRecentSearch(finalPayload.search);
-      options.onSettled?.();
       return;
     }
 
@@ -292,7 +285,6 @@ export function JobCrawlerApp({
     setViewState("loading");
     setMessage("");
     setErrorKind(null);
-    setBackgroundCrawlNotice(null);
 
     try {
       const response = await fetch("/api/searches", {
@@ -337,17 +329,10 @@ export function JobCrawlerApp({
           applyQueuedResult(payload);
         }
         if (payload.crawlRun.status === "running") {
-          setBackgroundCrawlId(payload.search._id);
           void pollSearchUntilSettled(payload.search._id, {
             updatedAfter: payload.search.updatedAt,
             pollToken,
             signal: requestController.signal,
-            onSettled: () => {
-              setBackgroundCrawlNotice({
-                searchId: payload.search._id,
-                title: payload.search.filters.title,
-              });
-            },
           });
         }
         return;
@@ -571,47 +556,31 @@ export function JobCrawlerApp({
     });
     hydrateSearchForm(normalizedPayload.search.filters);
     setViewState(
-      normalizedPayload.crawlRun.status === "running"
-        ? "loading"
-        : mergedResult
-          ? resolveViewState(mergedResult)
-          : "loading",
+      mergedResult ? resolveViewState(mergedResult) : "loading",
     );
     setErrorKind(null);
   }
 
-  function dismissBackgroundCrawlNotice() {
-    setBackgroundCrawlNotice(null);
-  }
-
   async function startNewSearch() {
-    // Stop any running server-side crawl first
-    const runningSearchId = activeResult?.crawlRun.status === "running"
-      ? activeResult.search._id
-      : backgroundCrawlId ?? null;
-    if (runningSearchId) {
-      try {
-        await fetch(`/api/searches/${runningSearchId}`, {
-          method: "DELETE",
-        });
-      } catch {
-        // Best-effort: ignore errors when stopping the crawl
-      }
-    }
+    const runningSearchId =
+      activeResult?.crawlRun.status === "running" ? activeResult.search._id : null;
 
-    // Abort the current polling request
     activeRequestControllerRef.current?.abort();
     activeRequestControllerRef.current = null;
     setActiveResult(null);
     setViewState("idle");
-    setBackgroundCrawlId(null);
-    setBackgroundCrawlNotice(null);
     setMessage("");
     setErrorKind(null);
-    // Reset poll token so a new search gets its own sequence
-    pollSequenceRef.current = 0;
-    // Clear the form so the new search feels fresh and independent
+    pollSequenceRef.current += 1;
     clearSearchForm();
+
+    if (runningSearchId) {
+      void fetch(`/api/searches/${runningSearchId}`, {
+        method: "DELETE",
+      }).catch(() => {
+        // Best-effort: keep the new search flow unblocked even if cancellation races.
+      });
+    }
   }
 
   const visibleJobs = useMemo(
@@ -621,6 +590,8 @@ export function JobCrawlerApp({
         : [],
     [activeResult, clientResultFilters, filters],
   );
+  const isBlockingSearchLoad = shouldShowBlockingSearchLoad(viewState, activeResult);
+  const isRefreshingVisibleSession = isSupplementingSearchSession(activeResult);
   const zeroResultState =
     activeResult && activeResult.jobs.length === 0
       ? describeZeroResultState(activeResult)
@@ -644,7 +615,7 @@ export function JobCrawlerApp({
           <SearchBar
             keyword={keywordInput}
             location={locationInput}
-            isLoading={viewState === "loading"}
+            isLoading={isBlockingSearchLoad}
             onKeywordChange={setKeywordInput}
             onLocationChange={setLocationInput}
             onSubmit={(event) => {
@@ -701,8 +672,7 @@ export function JobCrawlerApp({
         </div>
 
         <div className="mt-4 space-y-4">
-          {/* Initial loading panel: shown while waiting for first results */}
-          {viewState === "loading" && (!activeResult || activeResult.jobs.length === 0) ? (
+          {isBlockingSearchLoad ? (
             <LoadingPanel
               stage={activeResult?.crawlRun.stage}
               foundCount={activeResult?.jobs.length}
@@ -732,8 +702,7 @@ export function JobCrawlerApp({
             />
           ) : null}
 
-          {/* Background supplement indicator: shown when results are visible but work continues */}
-          {viewState === "loading" && activeResult && activeResult.jobs.length > 0 ? (
+          {isRefreshingVisibleSession && activeResult ? (
             <div className="flex items-center justify-between gap-3">
               <BackgroundSupplementIndicator
                 stage={activeResult.crawlRun.stage}
@@ -750,35 +719,10 @@ export function JobCrawlerApp({
             </div>
           ) : null}
 
-          {backgroundCrawlNotice ? (
-            <section className="rounded-[18px] border border-[#0a66c2]/20 bg-[#0a66c2]/5 px-5 py-4 shadow-sm">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-sm font-semibold text-ink">
-                    Your previous search completed
-                  </div>
-                  <p className="mt-1 text-sm text-slate">
-                    &ldquo;{backgroundCrawlNotice.title}&rdquo; finished crawling. View the full results whenever you&apos;re ready.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    dismissBackgroundCrawlNotice();
-                    void loadSearch(backgroundCrawlNotice.searchId);
-                  }}
-                  className="shrink-0 rounded-full bg-[#0a66c2] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#004182]"
-                >
-                  View Results
-                </button>
-              </div>
-            </section>
-          ) : null}
-
           {viewState === "idle" ? (
             <StatePanel
               title="Search by role and location"
-              description="Start with a target job title, add a location, and narrow the result list only when you need to."
+              description="Start with a role and location to load saved matches quickly, then let background refresh improve coverage without taking over the page."
               tone="neutral"
             />
           ) : null}
@@ -826,6 +770,11 @@ export function JobCrawlerApp({
                     </h2>
                     <p className="mt-1 text-sm text-slate">
                       {resultsLocation} • updated {formatRelativeMoment(activeResult.search.updatedAt)}
+                    </p>
+                    <p className="mt-2 text-sm text-slate">
+                      {isRefreshingVisibleSession
+                        ? "Saved matches are ready now. Background refresh is still adding coverage for this session."
+                        : "Saved matches for this session are ready to review and refine."}
                     </p>
                     {activeSearchBadges.length > 0 ? (
                       <div className="mt-3 flex flex-wrap gap-2">
@@ -955,6 +904,10 @@ export function JobCrawlerApp({
 }
 
 export function resolveViewState(result: CrawlResponse): ViewState {
+  if (result.jobs.length > 0) {
+    return "success";
+  }
+
   if (result.crawlRun.status === "running") {
     return "loading";
   }
@@ -972,6 +925,17 @@ export function resolveViewState(result: CrawlResponse): ViewState {
   }
 
   return "success";
+}
+
+export function isSupplementingSearchSession(result: CrawlResponse | null | undefined) {
+  return Boolean(result && result.crawlRun.status === "running" && result.jobs.length > 0);
+}
+
+export function shouldShowBlockingSearchLoad(
+  viewState: ViewState,
+  result: CrawlResponse | null | undefined,
+) {
+  return viewState === "loading" && !(result && result.jobs.length > 0);
 }
 
 export function describeZeroResultState(result: CrawlResponse): ZeroResultState {
@@ -1280,10 +1244,11 @@ export function mergeCrawlDeltaIntoResult(
   payload: CrawlDeltaResponse,
 ): CrawlResponse {
   const baseJobs = current?.search._id === payload.search._id ? current.jobs : [];
-  const mergedJobs = dedupeJobsById([...baseJobs, ...payload.jobs]).sort(jobComparator);
+  const mergedJobs = dedupeJobsForSessionRender([...baseJobs, ...payload.jobs]).sort(jobComparator);
 
   return {
     search: payload.search,
+    ...(payload.searchSession ? { searchSession: payload.searchSession } : {}),
     crawlRun: payload.crawlRun,
     sourceResults: payload.sourceResults,
     jobs: mergedJobs,
@@ -1401,11 +1366,11 @@ function dedupeSearches(searches: SearchDocument[]) {
   return Array.from(map.values());
 }
 
-function dedupeJobsById(jobs: CrawlResponse["jobs"]) {
+function dedupeJobsForSessionRender(jobs: CrawlResponse["jobs"]) {
   const map = new Map<string, CrawlResponse["jobs"][number]>();
 
   jobs.forEach((job) => {
-    map.set(job._id, job);
+    map.set(buildStableJobRenderIdentity(job), job);
   });
 
   return Array.from(map.values());

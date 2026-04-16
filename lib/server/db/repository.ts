@@ -3,6 +3,7 @@ import "server-only";
 import type { Db } from "mongodb";
 
 import { buildCanonicalJobIdentity, normalizeComparableIdentityText } from "@/lib/job-identity";
+import { isBackgroundIngestionSearchFilters } from "@/lib/server/background/constants";
 import { dedupeJobs, dedupeStoredJobs } from "@/lib/server/crawler/dedupe";
 import { buildSourceLookupKey, createId } from "@/lib/server/crawler/helpers";
 import { collectionNames } from "@/lib/server/db/indexes";
@@ -160,12 +161,27 @@ export class JobCrawlerRepository {
       .find({}, { sort: { createdAt: -1 }, limit })
       .toArray();
 
-    return documents.map((document) => parseStoredSearch(document));
+    return documents
+      .map((document) => parseStoredSearch(document))
+      .filter((document) => !isBackgroundIngestionSearchFilters(document.filters));
   }
 
   async getSearch(searchId: string) {
     const document = await this.searches().findOne({ _id: searchId });
     return document ? parseStoredSearch(document) : null;
+  }
+
+  async findMostRecentSearchByFilters(filters: SearchFilters) {
+    const documents = await this.searches()
+      .find({}, { sort: { createdAt: -1 } })
+      .toArray();
+    const expected = stableSerialize(filters);
+    const matched = documents.find((document) => {
+      const parsed = parseStoredSearch(document);
+      return stableSerialize(parsed.filters) === expected;
+    });
+
+    return matched ? parseStoredSearch(matched) : null;
   }
 
   async createSearchSession(
@@ -933,30 +949,30 @@ export class JobCrawlerRepository {
   }
 
   async upsertSourceInventory(records: SourceInventoryRecord[]) {
-    const normalizedRecords = records.map((record) => sourceInventoryRecordSchema.parse(record));
+    const normalizedRecords = records.map((record) => sanitizeSourceInventoryRecord(record));
 
     for (const record of normalizedRecords) {
       const existing = await this.sourceInventory().findOne({ _id: record._id });
       if (existing) {
+        const parsedExisting = parseStoredSourceInventory(existing);
         const merged = sourceInventoryRecordSchema.parse({
-          ...existing,
+          ...parsedExisting,
           ...record,
-          firstSeenAt: parseStoredSourceInventory(existing).firstSeenAt,
-          status: parseStoredSourceInventory(existing).status,
-          health: parseStoredSourceInventory(existing).health,
+          firstSeenAt: parsedExisting.firstSeenAt,
+          status: parsedExisting.status,
+          health: parsedExisting.health,
           crawlPriority: Math.min(
-            parseStoredSourceInventory(existing).crawlPriority,
+            parsedExisting.crawlPriority,
             record.crawlPriority,
           ),
-          failureCount: parseStoredSourceInventory(existing).failureCount,
-          consecutiveFailures: parseStoredSourceInventory(existing).consecutiveFailures,
-          lastFailureReason:
-            parseStoredSourceInventory(existing).lastFailureReason ?? record.lastFailureReason,
+          failureCount: parsedExisting.failureCount,
+          consecutiveFailures: parsedExisting.consecutiveFailures,
+          lastFailureReason: parsedExisting.lastFailureReason ?? record.lastFailureReason,
           lastSeenAt: record.lastSeenAt,
           lastRefreshedAt: record.lastRefreshedAt,
-          lastCrawledAt: parseStoredSourceInventory(existing).lastCrawledAt,
-          lastSucceededAt: parseStoredSourceInventory(existing).lastSucceededAt,
-          lastFailedAt: parseStoredSourceInventory(existing).lastFailedAt,
+          lastCrawledAt: parsedExisting.lastCrawledAt,
+          lastSucceededAt: parsedExisting.lastSucceededAt,
+          lastFailedAt: parsedExisting.lastFailedAt,
         });
         const { _id, ...updateFields } = merged;
         await this.sourceInventory().updateOne({ _id }, { $set: updateFields });
@@ -1251,8 +1267,26 @@ function mergeJobRecords(
   };
 }
 
+function stableSerialize(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(",")}]`;
+  }
+
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    return `{${keys
+      .map((key) => `${JSON.stringify(key)}:${stableSerialize(record[key])}`)
+      .join(",")}}`;
+  }
+
+  return JSON.stringify(value);
+}
+
 function parseStoredSourceInventory(document: Record<string, unknown>) {
-  return sourceInventoryRecordSchema.parse(document);
+  return sourceInventoryRecordSchema.parse(
+    normalizeStoredSourceInventoryFields(document),
+  );
 }
 
 function selectPrimaryRecord(existing: JobListing, incoming: PersistableJob) {
@@ -1311,6 +1345,14 @@ function sanitizePersistableJob(job: PersistableJob): PersistableJob {
   } = normalized as PersistableJob & { _id?: string; crawlRunIds?: string[] };
 
   return persistableJobSchema.parse(persistable);
+}
+
+function sanitizeSourceInventoryRecord(
+  record: SourceInventoryRecord | Record<string, unknown>,
+): SourceInventoryRecord {
+  return sourceInventoryRecordSchema.parse(
+    normalizeStoredSourceInventoryFields(record),
+  );
 }
 
 function dedupeProvenance(records: JobListing["sourceProvenance"]) {
@@ -1852,7 +1894,7 @@ function normalizeStoredJobFields(document: Record<string, unknown>) {
     locationRaw,
     normalizedLocation,
     locationText: normalizeOptionalDocumentString(document.locationText) ?? locationRaw,
-    ...(resolvedLocation ? { resolvedLocation } : {}),
+    resolvedLocation,
     remoteType: normalizeRemoteType(document.remoteType, resolvedLocation, locationRaw),
     employmentType: normalizeEmploymentType(document.employmentType),
     seniority:
@@ -1881,6 +1923,45 @@ function normalizeStoredJobFields(document: Record<string, unknown>) {
     titleNormalized: normalizedTitle,
     locationNormalized: normalizedLocation,
     contentFingerprint: dedupeFingerprint,
+  };
+}
+
+function normalizeStoredSourceInventoryFields(document: Record<string, unknown>) {
+  const normalizedDocument = normalizeLegacyStoredRecord(document);
+
+  return {
+    ...normalizedDocument,
+    _id: normalizeOptionalDocumentString(normalizedDocument._id),
+    platform: normalizedDocument.platform,
+    url: normalizeOptionalDocumentString(normalizedDocument.url),
+    sourceType: normalizeOptionalSourceInventoryEnum(normalizedDocument.sourceType),
+    sourceKey: normalizeOptionalDocumentString(normalizedDocument.sourceKey),
+    token: normalizeOptionalDocumentString(normalizedDocument.token),
+    companyHint: normalizeOptionalDocumentString(normalizedDocument.companyHint),
+    confidence: normalizedDocument.confidence,
+    inventoryOrigin: normalizedDocument.inventoryOrigin,
+    originalDiscoveryMethod: normalizedDocument.originalDiscoveryMethod,
+    jobId: normalizeOptionalDocumentString(normalizedDocument.jobId),
+    boardUrl: normalizeOptionalDocumentString(normalizedDocument.boardUrl),
+    hostedUrl: normalizeOptionalDocumentString(normalizedDocument.hostedUrl),
+    apiUrl: normalizeOptionalDocumentString(normalizedDocument.apiUrl),
+    pageType: normalizeOptionalSourceInventoryEnum(normalizedDocument.pageType),
+    sitePath: normalizeOptionalDocumentString(normalizedDocument.sitePath),
+    careerSitePath: normalizeOptionalDocumentString(normalizedDocument.careerSitePath),
+    jobUrl: normalizeOptionalDocumentString(normalizedDocument.jobUrl),
+    status: normalizedDocument.status,
+    health: normalizedDocument.health,
+    crawlPriority: normalizedDocument.crawlPriority,
+    inventoryRank: normalizedDocument.inventoryRank,
+    failureCount: normalizedDocument.failureCount,
+    consecutiveFailures: normalizedDocument.consecutiveFailures,
+    lastFailureReason: normalizeOptionalDocumentString(normalizedDocument.lastFailureReason),
+    firstSeenAt: normalizeOptionalDocumentString(normalizedDocument.firstSeenAt),
+    lastSeenAt: normalizeOptionalDocumentString(normalizedDocument.lastSeenAt),
+    lastRefreshedAt: normalizeOptionalDocumentString(normalizedDocument.lastRefreshedAt),
+    lastCrawledAt: normalizeOptionalDocumentString(normalizedDocument.lastCrawledAt),
+    lastSucceededAt: normalizeOptionalDocumentString(normalizedDocument.lastSucceededAt),
+    lastFailedAt: normalizeOptionalDocumentString(normalizedDocument.lastFailedAt),
   };
 }
 
@@ -2046,6 +2127,10 @@ function normalizeOptionalDocumentString(value: unknown) {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeOptionalSourceInventoryEnum(value: unknown) {
+  return normalizeOptionalDocumentString(value);
 }
 
 function isNonEmptyString(value: unknown): value is string {
