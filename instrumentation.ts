@@ -1,5 +1,16 @@
-import { startRecurringBackgroundIngestionScheduler } from "@/lib/server/background/recurring-ingestion";
+import "server-only";
 
 export async function register() {
-  startRecurringBackgroundIngestionScheduler();
+  // Only run in Node.js runtime (not edge)
+  if (process.env.NEXT_RUNTIME !== "nodejs") {
+    return;
+  }
+
+  try {
+    const { registerNodeInstrumentation } = await import("./instrumentation.node");
+    registerNodeInstrumentation();
+  } catch (error) {
+    // Log but don't crash the instrumentation
+    console.error("[instrumentation] Failed to start background ingestion scheduler", error);
+  }
 }

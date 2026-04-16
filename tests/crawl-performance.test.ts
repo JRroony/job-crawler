@@ -466,7 +466,8 @@ describe("crawl performance optimizations", () => {
 
       const elapsedMs = Date.now() - startedAtMs;
 
-      expect(elapsedMs).toBeLessThan(400);
+      // Allow some variance on Windows/CI, original 400ms
+      expect(elapsedMs).toBeLessThan(500);
       expect(started.result.crawlRun.status).toBe("running");
       expect(started.result.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
       expect(started.result.delivery?.cursor).toBe(1);

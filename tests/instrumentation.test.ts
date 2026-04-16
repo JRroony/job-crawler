@@ -1,16 +1,44 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/server/background/recurring-ingestion", () => ({
-  startRecurringBackgroundIngestionScheduler: vi.fn(),
+const { registerNodeInstrumentationMock } = vi.hoisted(() => ({
+  registerNodeInstrumentationMock: vi.fn(),
+}));
+
+vi.mock("../instrumentation.node", () => ({
+  registerNodeInstrumentation: registerNodeInstrumentationMock,
 }));
 
 describe("instrumentation runtime wiring", () => {
-  it("starts the recurring background ingestion scheduler during runtime registration", async () => {
-    const module = await import("@/lib/server/background/recurring-ingestion");
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("starts the recurring background ingestion scheduler during runtime registration when NEXT_RUNTIME=nodejs", async () => {
+    vi.stubEnv("NEXT_RUNTIME", "nodejs");
     const instrumentation = await import("../instrumentation");
 
     await instrumentation.register();
 
-    expect(module.startRecurringBackgroundIngestionScheduler).toHaveBeenCalledTimes(1);
+    expect(registerNodeInstrumentationMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not start the scheduler when NEXT_RUNTIME is not nodejs", async () => {
+    vi.stubEnv("NEXT_RUNTIME", "edge");
+    const instrumentation = await import("../instrumentation");
+
+    await instrumentation.register();
+
+    expect(registerNodeInstrumentationMock).not.toHaveBeenCalled();
+  });
+
+  it("does not start the scheduler when NEXT_RUNTIME is undefined", async () => {
+    // Ensure NEXT_RUNTIME is not set
+    delete process.env.NEXT_RUNTIME;
+    const instrumentation = await import("../instrumentation");
+
+    await instrumentation.register();
+
+    expect(registerNodeInstrumentationMock).not.toHaveBeenCalled();
   });
 });
