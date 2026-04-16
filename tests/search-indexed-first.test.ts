@@ -462,6 +462,107 @@ describe("jobs-first indexed search", () => {
     expect(delta.delivery.cursor).toBe(5);
   });
 
+  it("reuses persisted results for repeated identical searches instead of re-crawling sparse completed searches", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    let providerCalls = 0;
+    const provider = createStubProvider("greenhouse", async () => {
+      providerCalls += 1;
+
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: 1,
+        fetchedCount: 2,
+        matchedCount: 2,
+        warningCount: 0,
+        jobs: [
+          {
+            title: "Business Analyst",
+            company: "Acme",
+            country: "United States",
+            locationText: "Chicago, IL",
+            state: "Illinois",
+            city: "Chicago",
+            sourcePlatform: "greenhouse",
+            sourceJobId: "business-analyst-repeat-1",
+            sourceUrl: "https://example.com/jobs/business-analyst-repeat-1",
+            applyUrl: "https://example.com/jobs/business-analyst-repeat-1/apply",
+            canonicalUrl: "https://example.com/jobs/business-analyst-repeat-1",
+            discoveredAt: "2026-04-15T12:10:00.000Z",
+            rawSourceMetadata: {},
+          },
+          {
+            title: "Business Systems Analyst",
+            company: "Acme",
+            country: "United States",
+            locationText: "Remote - United States",
+            sourcePlatform: "greenhouse",
+            sourceJobId: "business-analyst-repeat-2",
+            sourceUrl: "https://example.com/jobs/business-analyst-repeat-2",
+            applyUrl: "https://example.com/jobs/business-analyst-repeat-2/apply",
+            canonicalUrl: "https://example.com/jobs/business-analyst-repeat-2",
+            discoveredAt: "2026-04-15T12:10:00.000Z",
+            rawSourceMetadata: {},
+          },
+        ],
+      };
+    });
+
+    const runtime = {
+      repository,
+      providers: [provider],
+      discovery: createDiscovery(),
+      fetchImpl: vi.fn() as unknown as typeof fetch,
+    };
+
+    const firstSearch = await startSearchFromFilters(
+      {
+        title: "Business Analyst",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        ...runtime,
+        now: new Date("2026-04-15T12:10:00.000Z"),
+        requestOwnerKey: "business-analyst-repeat-initial",
+      },
+    );
+
+    expect(firstSearch.queued).toBe(true);
+
+    const completedFirstSearch = await getSearchDetails(firstSearch.result.search._id, {
+      repository,
+      now: new Date("2026-04-15T12:10:01.000Z"),
+    });
+
+    expect(providerCalls).toBe(1);
+    expect(completedFirstSearch.jobs.map((job) => job.title)).toEqual([
+      "Business Analyst",
+      "Business Systems Analyst",
+    ]);
+
+    const repeatedSearch = await startSearchFromFilters(
+      {
+        title: "Business Analyst",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        ...runtime,
+        now: new Date("2026-04-15T12:11:00.000Z"),
+        requestOwnerKey: "business-analyst-repeat-followup",
+      },
+    );
+
+    expect(repeatedSearch.result.search._id).toBe(firstSearch.result.search._id);
+    expect(repeatedSearch.queued).toBe(false);
+    expect(providerCalls).toBe(1);
+    expect(repeatedSearch.result.jobs.map((job) => job.title)).toEqual([
+      "Business Analyst",
+      "Business Systems Analyst",
+    ]);
+  });
+
   it("keeps semantic title, US location, experience filters, and ranking on indexed jobs", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     await seedIndexedJobs(repository, [

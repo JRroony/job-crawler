@@ -25,6 +25,13 @@ import { ResourceNotFoundError } from "@/lib/server/search/errors";
 
 const initialVisiblePollIntervalMs = 75;
 
+type SearchReuseBaseline = {
+  reusedExistingSearch: boolean;
+  previousVisibleJobCount: number;
+  previousRunStatus?: SearchDocument["lastStatus"];
+  previousFinishedAt?: string;
+};
+
 export async function createSearchSession(
   filters: SearchDocument["filters"],
   runtime: JobCrawlerRuntime = {},
@@ -32,7 +39,9 @@ export async function createSearchSession(
   const repository = await resolveRepository(runtime.repository);
   const now = runtime.now ?? new Date();
   const nowIso = now.toISOString();
-  const search = await repository.createSearch(filters, now.toISOString());
+  const resolvedSearch = await resolveSearchForNewSession(filters, repository, nowIso);
+  const search = resolvedSearch.search;
+  const searchReuse = await loadSearchReuseBaseline(search, repository, resolvedSearch.reusedExistingSearch);
   const searchSession = await repository.createSearchSession(search._id, nowIso, {
     status: "running",
   });
@@ -55,6 +64,7 @@ export async function createSearchSession(
     repository,
     now,
     search,
+    searchReuse,
     searchSession,
     crawlRun,
   };
@@ -95,6 +105,11 @@ export async function createSearchRerunSession(
     repository,
     now,
     search,
+    searchReuse: {
+      reusedExistingSearch: false,
+      previousVisibleJobCount: 0,
+      previousRunStatus: search.lastStatus,
+    } satisfies SearchReuseBaseline,
     searchSession,
     crawlRun,
   };
@@ -500,4 +515,65 @@ async function loadIndexedSearchJobs(
 ) {
   const indexedMatches = await getIndexedJobsForSearch(repository, search.filters);
   return indexedMatches.map(({ job }) => job);
+}
+
+async function resolveSearchForNewSession(
+  filters: SearchDocument["filters"],
+  repository: Awaited<ReturnType<typeof resolveRepository>>,
+  nowIso: string,
+) {
+  const existing = await repository.findMostRecentSearchByFilters(filters);
+  if (!existing) {
+    return {
+      search: await repository.createSearch(filters, nowIso),
+      reusedExistingSearch: false,
+    };
+  }
+
+  const hasActiveQueueEntry = await repository.hasActiveCrawlQueueEntryForSearch(existing._id);
+  if (hasActiveQueueEntry) {
+    return {
+      search: await repository.createSearch(filters, nowIso),
+      reusedExistingSearch: false,
+    };
+  }
+
+  return {
+    search: existing,
+    reusedExistingSearch: true,
+  };
+}
+
+async function loadSearchReuseBaseline(
+  search: SearchDocument,
+  repository: Awaited<ReturnType<typeof resolveRepository>>,
+  reusedExistingSearch: boolean,
+): Promise<SearchReuseBaseline> {
+  if (!reusedExistingSearch) {
+    return {
+      reusedExistingSearch: false,
+      previousVisibleJobCount: 0,
+      previousRunStatus: search.lastStatus,
+    };
+  }
+
+  const previousSearchSession = search.latestSearchSessionId
+    ? await repository.getSearchSession(search.latestSearchSessionId)
+    : null;
+  const previousCrawlRunId = previousSearchSession?.latestCrawlRunId ?? search.latestCrawlRunId;
+  const previousCrawlRun = previousCrawlRunId
+    ? await repository.getCrawlRun(previousCrawlRunId)
+    : null;
+  const previousVisibleJobCount = previousSearchSession
+    ? previousSearchSession.lastEventSequence
+    : previousCrawlRun
+      ? await repository.getCrawlRunDeliveryCursor(previousCrawlRun._id)
+      : 0;
+
+  return {
+    reusedExistingSearch,
+    previousVisibleJobCount,
+    previousRunStatus: previousCrawlRun?.status ?? search.lastStatus,
+    previousFinishedAt: previousCrawlRun?.finishedAt,
+  };
 }

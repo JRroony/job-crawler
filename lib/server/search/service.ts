@@ -164,6 +164,11 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
   const shouldQueueSupplemental = shouldEnqueueSupplementalCrawl(
     session.search.filters.crawlMode,
     indexedJobs.length,
+    {
+      reusedExistingSearch: session.searchReuse.reusedExistingSearch,
+      previousVisibleJobCount: session.searchReuse.previousVisibleJobCount,
+      previousRunStatus: session.searchReuse.previousRunStatus,
+    },
   );
 
   console.info("[search:index-first]", {
@@ -172,6 +177,9 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     indexedJobs: indexedJobs.length,
     supplementalQueued: shouldQueueSupplemental,
     crawlMode: session.search.filters.crawlMode ?? "balanced",
+    reusedExistingSearch: session.searchReuse.reusedExistingSearch,
+    previousVisibleJobCount: session.searchReuse.previousVisibleJobCount,
+    previousRunStatus: session.searchReuse.previousRunStatus ?? "unknown",
   });
 
   if (!shouldQueueSupplemental) {
@@ -257,6 +265,11 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
 function shouldEnqueueSupplementalCrawl(
   crawlMode: ReturnType<typeof parseSearchFilters>["crawlMode"],
   indexedJobCount: number,
+  previousCoverage: {
+    reusedExistingSearch: boolean;
+    previousVisibleJobCount: number;
+    previousRunStatus?: "running" | "completed" | "partial" | "failed" | "aborted";
+  },
 ) {
   const env = getEnv();
   const mode = crawlMode ?? "balanced";
@@ -265,6 +278,19 @@ function shouldEnqueueSupplementalCrawl(
     balanced: Math.min(5, env.CRAWL_TARGET_JOB_COUNT),
     deep: Math.min(8, env.CRAWL_TARGET_JOB_COUNT),
   } as const;
+
+  if (indexedJobCount >= minimumIndexedCoverageByMode[mode]) {
+    return false;
+  }
+
+  if (
+    previousCoverage.reusedExistingSearch &&
+    previousCoverage.previousRunStatus === "completed" &&
+    previousCoverage.previousVisibleJobCount > 0 &&
+    indexedJobCount >= previousCoverage.previousVisibleJobCount
+  ) {
+    return false;
+  }
 
   return indexedJobCount < minimumIndexedCoverageByMode[mode];
 }
