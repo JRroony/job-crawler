@@ -5,6 +5,7 @@ const {
   hasRequiredProductionBuildFiles,
   isBrokenProductionBuild,
   resolveNextDistDir,
+  shouldRemoveDistDirBeforeRun,
 } = require("../scripts/next-runtime.js");
 
 describe("next runtime guards", () => {
@@ -37,5 +38,23 @@ describe("next runtime guards", () => {
       isBrokenProductionBuild(["BUILD_ID", "required-server-files.json", "server"]),
     ).toBe(true);
     expect(isBrokenProductionBuild(["trace", "cache"])).toBe(false);
+  });
+
+  it("does not remove dev output before next dev starts", () => {
+    expect(
+      shouldRemoveDistDirBeforeRun("dev", [
+        "build-manifest.json",
+        "server",
+        "static",
+        "trace",
+      ]),
+    ).toBe(false);
+  });
+
+  it("still removes incomplete production output before build or start", () => {
+    const incompleteProductionEntries = ["build-manifest.json", "server"];
+
+    expect(shouldRemoveDistDirBeforeRun("build", incompleteProductionEntries)).toBe(true);
+    expect(shouldRemoveDistDirBeforeRun("start", incompleteProductionEntries)).toBe(true);
   });
 });

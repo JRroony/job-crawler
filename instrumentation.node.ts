@@ -1,7 +1,8 @@
 import "server-only";
 
-import { startRecurringBackgroundIngestionScheduler } from "@/lib/server/background/recurring-ingestion";
-
-export function registerNodeInstrumentation() {
+export async function registerNodeInstrumentation() {
+  const { startRecurringBackgroundIngestionScheduler } = await import(
+    "@/lib/server/background/recurring-ingestion"
+  );
   startRecurringBackgroundIngestionScheduler();
 }

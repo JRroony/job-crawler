@@ -1,6 +1,6 @@
 import "server-only";
 
-import { MongoClient } from "mongodb";
+import type { Db, MongoClient } from "mongodb";
 
 import { ensureDatabaseIndexes } from "@/lib/server/db/indexes";
 import { getEnv } from "@/lib/server/env";
@@ -23,7 +23,7 @@ function databaseNameFromUri(uri: string) {
 const env = getEnv();
 let mongoUnavailableUntil = 0;
 
-export async function getMongoDb() {
+export async function getMongoDb(): Promise<Db> {
   if (mongoUnavailableUntil > Date.now()) {
     throw new Error("MongoDB connection is in cooldown after a recent failure.");
   }
@@ -34,12 +34,13 @@ export async function getMongoDb() {
   return db;
 }
 
-async function getMongoClient() {
+async function getMongoClient(): Promise<MongoClient> {
   const cachedPromise = globalThis.__jobCrawlerMongoClientPromise;
   if (cachedPromise) {
     return cachedPromise;
   }
 
+  const { MongoClient } = await import("mongodb");
   const connectionPromise = new MongoClient(env.MONGODB_URI, {
     serverSelectionTimeoutMS: env.MONGODB_SERVER_SELECTION_TIMEOUT_MS,
   })

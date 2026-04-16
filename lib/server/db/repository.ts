@@ -14,7 +14,6 @@ import {
   toSourceInventoryRecord,
   type SourceInventoryRecord,
 } from "@/lib/server/discovery/inventory";
-import { getMongoDb } from "@/lib/server/mongodb";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import type {
   CrawlControlDocument,
@@ -1223,6 +1222,7 @@ export async function getRepository(db?: DatabaseAdapter | Db) {
   }
 
   try {
+    const { getMongoDb } = await import("@/lib/server/mongodb");
     return new JobCrawlerRepository((await getMongoDb()) as DatabaseAdapter);
   } catch (error) {
     if (!hasWarnedMemoryFallback) {

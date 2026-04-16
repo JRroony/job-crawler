@@ -72,6 +72,14 @@ function isBrokenProductionBuild(entries) {
   );
 }
 
+function shouldRemoveDistDirBeforeRun(mode, entries) {
+  if (mode === "dev") {
+    return false;
+  }
+
+  return isBrokenProductionBuild(entries);
+}
+
 function removeDistDir(projectDir, distDir) {
   const distPath = path.resolve(projectDir, distDir);
 
@@ -127,4 +135,5 @@ module.exports = {
   readDistDirEntries,
   removeDistDir,
   resolveNextDistDir,
+  shouldRemoveDistDirBeforeRun,
 };

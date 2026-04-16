@@ -1,6 +1,6 @@
 import "server-only";
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "crypto";
 
 import {
   analyzeUsLocation,

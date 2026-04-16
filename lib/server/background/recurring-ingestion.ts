@@ -7,13 +7,12 @@ import {
 import { queueSearchRun } from "@/lib/server/crawler/background-runs";
 import { CrawlAbortedError, seedToPersistableJob } from "@/lib/server/crawler/pipeline";
 import { createId } from "@/lib/server/crawler/helpers";
-import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { toDiscoveredSourceFromInventory } from "@/lib/server/discovery/inventory";
 import { getEnv } from "@/lib/server/env";
 import { refreshPersistentSourceInventory } from "@/lib/server/inventory/service";
-import { getMongoDb } from "@/lib/server/mongodb";
 import { createDefaultProviders } from "@/lib/server/providers";
 import type { CrawlProvider } from "@/lib/server/providers/types";
+import type { JobCrawlerRepository } from "@/lib/server/db/repository";
 import type {
   CrawlDiagnostics,
   CrawlRunStatus,
@@ -530,6 +529,11 @@ async function resolveDurableBackgroundRepository(repository?: JobCrawlerReposit
   }
 
   try {
+    const [{ JobCrawlerRepository }, { getMongoDb }] = await Promise.all([
+      import("@/lib/server/db/repository"),
+      import("@/lib/server/mongodb"),
+    ]);
+
     return new JobCrawlerRepository((await getMongoDb()) as never);
   } catch (error) {
     console.warn("[background-ingestion:mongo-unavailable]", {

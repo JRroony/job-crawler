@@ -5,10 +5,10 @@ const { spawn, spawnSync } = require("node:child_process");
 
 const {
   hasRequiredProductionBuildFiles,
-  isBrokenProductionBuild,
   readDistDirEntries,
   removeDistDir,
   resolveNextDistDir,
+  shouldRemoveDistDirBeforeRun,
 } = require("./next-runtime");
 
 const projectDir = path.resolve(__dirname, "..");
@@ -35,7 +35,7 @@ if (rawDistDir && rawDistDir.trim() && rawDistDir.trim() !== distDir) {
 
 const existingEntries = readDistDirEntries(projectDir, distDir);
 
-if (isBrokenProductionBuild(existingEntries)) {
+if (shouldRemoveDistDirBeforeRun(mode, existingEntries)) {
   console.warn(
     `[next:runtime] Removing incomplete Next build output from "${distDir}" before "${mode}".`,
   );
