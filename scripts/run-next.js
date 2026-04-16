@@ -4,6 +4,8 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 
 const {
+  buildRecoveryDistDir,
+  ensureTraceArtifactWritable,
   hasRequiredProductionBuildFiles,
   readDistDirEntries,
   removeDistDir,
@@ -26,6 +28,7 @@ if (!mode || !["dev", "build", "start"].includes(mode)) {
 
 const rawDistDir = process.env.NEXT_DIST_DIR;
 const distDir = resolveNextDistDir(rawDistDir);
+let effectiveDistDir = distDir;
 
 if (rawDistDir && rawDistDir.trim() && rawDistDir.trim() !== distDir) {
   console.warn(
@@ -33,25 +36,62 @@ if (rawDistDir && rawDistDir.trim() && rawDistDir.trim() !== distDir) {
   );
 }
 
-const existingEntries = readDistDirEntries(projectDir, distDir);
+function prepareDistDir(candidateDistDir) {
+  const existingEntries = readDistDirEntries(projectDir, candidateDistDir);
 
-if (shouldRemoveDistDirBeforeRun(mode, existingEntries)) {
+  if (shouldRemoveDistDirBeforeRun(mode, existingEntries)) {
+    console.warn(
+      `[next:runtime] Removing incomplete Next build output from "${candidateDistDir}" before "${mode}".`,
+    );
+    removeDistDir(projectDir, candidateDistDir);
+  }
+
+  return ensureTraceArtifactWritable(projectDir, candidateDistDir);
+}
+
+let traceRepair;
+try {
+  traceRepair = prepareDistDir(effectiveDistDir);
+} catch (error) {
+  if (process.platform !== "win32") {
+    throw error;
+  }
+
+  effectiveDistDir = buildRecoveryDistDir(distDir);
   console.warn(
-    `[next:runtime] Removing incomplete Next build output from "${distDir}" before "${mode}".`,
+    `[next:runtime] Falling back to "${effectiveDistDir}" after failing to repair "${distDir}" on Windows: ${error.message}`,
   );
-  removeDistDir(projectDir, distDir);
+  traceRepair = prepareDistDir(effectiveDistDir);
+}
+
+if (traceRepair.repaired) {
+  const repairTarget = traceRepair.resetDistDir
+    ? `Reset "${effectiveDistDir}" to recover`
+    : `Removed invalid "${effectiveDistDir}/trace"`;
+  console.warn(
+    `[next:runtime] ${repairTarget} from trace state "${traceRepair.beforeState}" before "${mode}".`,
+  );
+}
+
+const nextEnv = {
+  ...process.env,
+  NEXT_DIST_DIR: effectiveDistDir,
+};
+
+if (!rawDistDir && effectiveDistDir === ".next") {
+  delete nextEnv.NEXT_DIST_DIR;
 }
 
 if (mode === "start") {
-  const refreshedEntries = readDistDirEntries(projectDir, distDir);
+  const refreshedEntries = readDistDirEntries(projectDir, effectiveDistDir);
   if (!hasRequiredProductionBuildFiles(refreshedEntries)) {
     console.warn(
-      `[next:runtime] "${distDir}" is missing required Next build artifacts. Running "next build" first.`,
+      `[next:runtime] "${effectiveDistDir}" is missing required Next build artifacts. Running "next build" first.`,
     );
 
     const buildResult = spawnSync(process.execPath, [nextBin, "build"], {
       cwd: projectDir,
-      env: process.env,
+      env: nextEnv,
       stdio: "inherit",
     });
 
@@ -67,7 +107,7 @@ if (mode === "start") {
 
 const child = spawn(process.execPath, [nextBin, mode, ...passthroughArgs], {
   cwd: projectDir,
-  env: process.env,
+  env: nextEnv,
   stdio: "inherit",
 });
 

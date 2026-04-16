@@ -33,13 +33,13 @@ const nextConfig: NextConfig = {
 
 export default nextConfig;
 
-function resolveSafeDistDir(rawValue?: string) {
+export function resolveSafeDistDir(rawValue?: string) {
   const trimmed = rawValue?.trim();
   if (!trimmed) {
     return undefined;
   }
 
-  if (path.isAbsolute(trimmed)) {
+  if (path.isAbsolute(trimmed) || isWindowsAbsolutePath(trimmed)) {
     console.warn(
       `[next:config] Ignoring unsafe NEXT_DIST_DIR="${trimmed}". Use a relative directory inside the project root instead.`,
     );
@@ -60,6 +60,14 @@ function resolveSafeDistDir(rawValue?: string) {
   }
 
   return normalized;
+}
+
+function isWindowsAbsolutePath(value: string) {
+  return (
+    /^[a-zA-Z]:[\\/]/.test(value) ||
+    /^\\\\[^\\]+\\[^\\]+/.test(value) ||
+    /^\/\/[^/]+\/[^/]+/.test(value)
+  );
 }
 
 export function buildNodeExternals() {

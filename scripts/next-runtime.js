@@ -7,6 +7,7 @@ const requiredProductionFiles = [
   "routes-manifest.json",
   "required-server-files.json",
 ];
+const traceArtifactName = "trace";
 
 function resolveNextDistDir(rawValue) {
   const trimmed = typeof rawValue === "string" ? rawValue.trim() : "";
@@ -14,7 +15,7 @@ function resolveNextDistDir(rawValue) {
     return ".next";
   }
 
-  if (path.isAbsolute(trimmed)) {
+  if (path.isAbsolute(trimmed) || isWindowsAbsolutePath(trimmed)) {
     return ".next";
   }
 
@@ -29,6 +30,19 @@ function resolveNextDistDir(rawValue) {
   }
 
   return normalized;
+}
+
+function buildRecoveryDistDir(distDir) {
+  const sanitized = distDir.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+/, "");
+  return `.next-runtime-${sanitized || "recovery"}`;
+}
+
+function isWindowsAbsolutePath(value) {
+  return (
+    /^[a-zA-Z]:[\\/]/.test(value) ||
+    /^\\\\[^\\]+\\[^\\]+/.test(value) ||
+    /^\/\/[^/]+\/[^/]+/.test(value)
+  );
 }
 
 function readDistDirEntries(projectDir, distDir) {
@@ -80,11 +94,95 @@ function shouldRemoveDistDirBeforeRun(mode, entries) {
   return isBrokenProductionBuild(entries);
 }
 
-function removeDistDir(projectDir, distDir) {
-  const distPath = path.resolve(projectDir, distDir);
+function getTraceArtifactState(projectDir, distDir, entries) {
+  const currentEntries = entries ?? readDistDirEntries(projectDir, distDir);
+  if (!currentEntries || !currentEntries.includes(traceArtifactName)) {
+    return "missing";
+  }
+
+  const tracePath = path.resolve(projectDir, distDir, traceArtifactName);
 
   try {
-    fs.rmSync(distPath, {
+    const stats = fs.lstatSync(tracePath);
+    if (stats.isFile()) {
+      return "file";
+    }
+
+    if (stats.isDirectory()) {
+      return "directory";
+    }
+
+    return "other";
+  } catch (error) {
+    if (error && typeof error === "object") {
+      if (error.code === "ENOENT") {
+        return "ghost";
+      }
+
+      if (error.code === "EPERM" || error.code === "EACCES") {
+        return "unreadable";
+      }
+    }
+
+    throw error;
+  }
+}
+
+function ensureTraceArtifactWritable(projectDir, distDir) {
+  const beforeState = getTraceArtifactState(projectDir, distDir);
+  if (beforeState === "missing" || beforeState === "file") {
+    return {
+      beforeState,
+      afterState: beforeState,
+      repaired: false,
+      resetDistDir: false,
+    };
+  }
+
+  const tracePath = path.resolve(projectDir, distDir, traceArtifactName);
+
+  if (beforeState === "directory" || beforeState === "other") {
+    try {
+      removePath(tracePath, beforeState === "directory" ? "directory" : "file");
+      const afterDirectRepair = getTraceArtifactState(projectDir, distDir);
+      if (afterDirectRepair === "missing" || afterDirectRepair === "file") {
+        return {
+          beforeState,
+          afterState: afterDirectRepair,
+          repaired: true,
+          resetDistDir: false,
+        };
+      }
+    } catch {
+      // Fall back to replacing the dist directory below when the trace path
+      // cannot be repaired in place on Windows.
+    }
+  }
+
+  removeDistDir(projectDir, distDir);
+  const afterState = getTraceArtifactState(projectDir, distDir);
+  if (afterState !== "missing" && afterState !== "file") {
+    throw new Error(
+      `[next:runtime] Failed to repair "${distDir}/${traceArtifactName}" (state: ${beforeState} -> ${afterState}).`,
+    );
+  }
+
+  return {
+    beforeState,
+    afterState,
+    repaired: true,
+    resetDistDir: true,
+  };
+}
+
+function removeDistDir(projectDir, distDir) {
+  const distPath = path.resolve(projectDir, distDir);
+  removePath(distPath, "directory");
+}
+
+function removePath(targetPath, targetKind) {
+  try {
+    fs.rmSync(targetPath, {
       recursive: true,
       force: true,
       maxRetries: 5,
@@ -96,17 +194,18 @@ function removeDistDir(projectDir, distDir) {
       throw error;
     }
 
-    const renamedPath = path.resolve(
-      projectDir,
-      `${distDir.replace(/[\\/]/g, "_")}.stale-${Date.now()}`,
-    );
+    const parentDir = path.dirname(targetPath);
+    const baseName = path.basename(targetPath).replace(/[\\/]/g, "_");
+    const renamedPath = path.resolve(parentDir, `${baseName}.stale-${Date.now()}`);
+    let removablePath = targetPath;
 
     try {
-      if (fs.existsSync(distPath)) {
-        fs.renameSync(distPath, renamedPath);
+      if (fs.existsSync(targetPath)) {
+        fs.renameSync(targetPath, renamedPath);
+        removablePath = renamedPath;
       }
 
-      fs.rmSync(renamedPath, {
+      fs.rmSync(removablePath, {
         recursive: true,
         force: true,
         maxRetries: 5,
@@ -116,11 +215,22 @@ function removeDistDir(projectDir, distDir) {
     } catch {
       const shellResult = spawnSync(
         process.env.ComSpec || "cmd.exe",
-        ["/d", "/s", "/c", `rd /s /q "${distPath}"`],
+        [
+          "/d",
+          "/s",
+          "/c",
+          targetKind === "directory"
+            ? `rd /s /q "${removablePath}"`
+            : `del /f /q "${removablePath}"`,
+        ],
         { stdio: "ignore" },
       );
 
       if (shellResult.status === 0) {
+        return;
+      }
+
+      if (removablePath !== targetPath && !fs.existsSync(targetPath)) {
         return;
       }
     }
@@ -130,6 +240,9 @@ function removeDistDir(projectDir, distDir) {
 }
 
 module.exports = {
+  buildRecoveryDistDir,
+  ensureTraceArtifactWritable,
+  getTraceArtifactState,
   hasRequiredProductionBuildFiles,
   isBrokenProductionBuild,
   readDistDirEntries,
