@@ -128,15 +128,19 @@ describe("search API normalization", () => {
         mode: "delta",
         previousCursor: 3,
         cursor: 4,
+        previousIndexedCursor: 9,
+        indexedCursor: 10,
       },
     });
 
-    const response = await GET(new Request("http://localhost/api/searches/search-1?mode=delta&after=3"), {
+    const response = await GET(new Request("http://localhost/api/searches/search-1?mode=delta&after=3&indexedAfter=9"), {
       params: Promise.resolve({ id: "search-1" }),
     });
 
     expect(response.status).toBe(200);
-    expect(getSearchJobDeltasMock).toHaveBeenCalledWith("search-1", 3);
+    expect(getSearchJobDeltasMock).toHaveBeenCalledWith("search-1", 3, {
+      afterIndexedCursor: 9,
+    });
     expect(getSearchDetailsMock).not.toHaveBeenCalled();
   });
 });

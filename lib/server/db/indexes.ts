@@ -25,6 +25,7 @@ export const collectionNames = {
   crawlSourceResults: "crawlSourceResults",
   crawlRunJobEvents: "crawlRunJobEvents",
   searchSessionJobEvents: "searchSessionJobEvents",
+  indexedJobEvents: "indexedJobEvents",
   linkValidations: "linkValidations",
   sourceInventory: "sourceInventory",
 } as const;
@@ -71,6 +72,11 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
 
   await db.collection(collectionNames.jobs).createIndexes([
     {
+      key: { canonicalJobKey: 1 },
+      name: "jobs_canonical_job_key",
+      unique: true,
+    },
+    {
       key: { crawlRunIds: 1, postedAt: -1, sourcePlatform: 1, title: 1 },
       name: "jobs_listing_by_run_and_sort",
     },
@@ -103,6 +109,48 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     {
       key: { contentFingerprint: 1 },
       name: "jobs_content_fingerprint",
+    },
+    {
+      key: { isActive: 1, lastSeenAt: -1, postedAt: -1 },
+      name: "jobs_lifecycle_activity_lastSeenAt_desc",
+    },
+    {
+      key: {
+        isActive: 1,
+        sourcePlatform: 1,
+        "searchIndex.titleFamily": 1,
+        postingDate: -1,
+        lastSeenAt: -1,
+      },
+      name: "jobs_search_active_platform_family_recent",
+    },
+    {
+      key: {
+        "searchIndex.titleConceptIds": 1,
+        isActive: 1,
+        sourcePlatform: 1,
+        postingDate: -1,
+      },
+      name: "jobs_search_title_concepts_active_recent",
+    },
+    {
+      key: {
+        "resolvedLocation.isUnitedStates": 1,
+        "resolvedLocation.state": 1,
+        city: 1,
+        isActive: 1,
+        postingDate: -1,
+      },
+      name: "jobs_search_location_activity_recent",
+    },
+    {
+      key: {
+        experienceLevel: 1,
+        "experienceClassification.inferredLevel": 1,
+        isActive: 1,
+        postingDate: -1,
+      },
+      name: "jobs_search_experience_activity_recent",
     },
     {
       key: { linkStatus: 1, lastValidatedAt: -1 },
@@ -200,6 +248,22 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     {
       key: { searchSessionId: 1, crawlRunId: 1, sequence: 1 },
       name: "searchSessionJobEvents_session_run_sequence",
+    },
+  ]);
+
+  await db.collection(collectionNames.indexedJobEvents).createIndexes([
+    {
+      key: { sequence: 1 },
+      name: "indexedJobEvents_sequence",
+      unique: true,
+    },
+    {
+      key: { jobId: 1, sequence: 1 },
+      name: "indexedJobEvents_job_sequence",
+    },
+    {
+      key: { crawlRunId: 1, sequence: 1 },
+      name: "indexedJobEvents_run_sequence",
     },
   ]);
 

@@ -1,15 +1,25 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  filterJobsForDisplay,
   isRemoteJob,
   isVisaFriendlyJob,
   matchesPostedDateFilter,
 } from "@/components/job-search/helpers";
-import type { JobListing } from "@/lib/types";
+import type { JobListing, SearchFilters } from "@/lib/types";
 
 function createJob(overrides: Partial<JobListing> = {}): JobListing {
+  const sourcePlatform = overrides.sourcePlatform ?? "greenhouse";
+  const sourceCompanySlug = overrides.sourceCompanySlug ?? "acme";
+  const sourceJobId = overrides.sourceJobId ?? "role-1";
+  const discoveredAt = overrides.discoveredAt ?? "2026-03-29T00:00:00.000Z";
+  const crawledAt = overrides.crawledAt ?? "2026-03-29T00:00:00.000Z";
+
   return {
     _id: "job-1",
+    canonicalJobKey:
+      overrides.canonicalJobKey ??
+      `platform:${sourcePlatform}:${sourceCompanySlug}:${sourceJobId.toLowerCase()}`,
     title: "Software Engineer",
     company: "Acme",
     normalizedCompany: "acme",
@@ -23,41 +33,47 @@ function createJob(overrides: Partial<JobListing> = {}): JobListing {
     remoteType: "onsite",
     seniority: "mid",
     experienceLevel: "mid",
-    sourcePlatform: "greenhouse",
-    sourceCompanySlug: "acme",
-    sourceJobId: "role-1",
+    sourcePlatform,
+    sourceCompanySlug,
+    sourceJobId,
     sourceUrl: "https://example.com/jobs/1",
     applyUrl: "https://example.com/jobs/1/apply",
     resolvedUrl: "https://example.com/jobs/1/apply",
     canonicalUrl: "https://example.com/jobs/1",
     postingDate: "2026-03-20T00:00:00.000Z",
     postedAt: "2026-03-20T00:00:00.000Z",
-    discoveredAt: "2026-03-29T00:00:00.000Z",
-    crawledAt: "2026-03-29T00:00:00.000Z",
+    discoveredAt,
+    crawledAt,
     descriptionSnippet: "Team is open to visa sponsorship.",
     sponsorshipHint: "unknown",
     linkStatus: "valid",
-    lastValidatedAt: "2026-03-29T00:00:00.000Z",
+    lastValidatedAt: overrides.lastValidatedAt ?? crawledAt,
     rawSourceMetadata: {},
     sourceProvenance: [
       {
-        sourcePlatform: "greenhouse",
-        sourceJobId: "role-1",
+        sourcePlatform,
+        sourceJobId,
         sourceUrl: "https://example.com/jobs/1",
         applyUrl: "https://example.com/jobs/1/apply",
         resolvedUrl: "https://example.com/jobs/1/apply",
         canonicalUrl: "https://example.com/jobs/1",
-        discoveredAt: "2026-03-29T00:00:00.000Z",
+        discoveredAt,
         rawSourceMetadata: {},
       },
     ],
-    sourceLookupKeys: ["greenhouse:role-1"],
+    sourceLookupKeys: overrides.sourceLookupKeys ?? [`${sourcePlatform}:${sourceJobId}`],
     crawlRunIds: ["run-1"],
+    firstSeenAt: overrides.firstSeenAt ?? discoveredAt,
+    lastSeenAt: overrides.lastSeenAt ?? crawledAt,
+    indexedAt: overrides.indexedAt ?? crawledAt,
+    isActive: overrides.isActive ?? true,
+    closedAt: overrides.closedAt,
     dedupeFingerprint: "fingerprint-1",
     companyNormalized: "acme",
     titleNormalized: "software engineer",
     locationNormalized: "san francisco california united states",
     contentFingerprint: "fingerprint-1",
+    contentHash: overrides.contentHash ?? `content-hash:${sourceJobId}`,
     ...overrides,
   };
 }
@@ -94,5 +110,85 @@ describe("job-search helpers", () => {
 
     expect(matchesPostedDateFilter(recentJob, "7d")).toBe(true);
     expect(matchesPostedDateFilter(recentJob, "24h")).toBe(false);
+  });
+
+  it("keeps client-side experience filtering aligned with strict and balanced inference rules", () => {
+    const inferredSeniorJob = createJob({
+      experienceLevel: undefined,
+      experienceClassification: {
+        experienceVersion: 2,
+        experienceBand: "senior",
+        experienceSource: "description",
+        experienceConfidence: "medium",
+        experienceSignals: [],
+        inferredLevel: "senior",
+        confidence: "medium",
+        source: "description",
+        reasons: ["Detected senior markers in description."],
+        isUnspecified: false,
+      },
+    });
+    const resultFilters = {
+      remoteOnly: false,
+      visaFriendlyOnly: false,
+      postedDate: "any" as const,
+    };
+
+    expect(
+      filterJobsForDisplay(
+        [inferredSeniorJob],
+        {
+          title: "Software Engineer",
+          experienceLevels: ["senior"],
+          experienceMatchMode: "strict",
+        } satisfies SearchFilters,
+        resultFilters,
+      ),
+    ).toEqual([]);
+
+    expect(
+      filterJobsForDisplay(
+        [inferredSeniorJob],
+        {
+          title: "Software Engineer",
+          experienceLevels: ["senior"],
+          experienceMatchMode: "balanced",
+        } satisfies SearchFilters,
+        resultFilters,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("lets broad client-side filtering include unspecified experience jobs", () => {
+    const unspecifiedJob = createJob({
+      experienceLevel: undefined,
+      experienceClassification: {
+        experienceVersion: 2,
+        experienceBand: "unknown",
+        experienceSource: "unknown",
+        experienceConfidence: "none",
+        experienceSignals: [],
+        confidence: "none",
+        source: "unknown",
+        reasons: [],
+        isUnspecified: true,
+      },
+    });
+
+    expect(
+      filterJobsForDisplay(
+        [unspecifiedJob],
+        {
+          title: "Software Engineer",
+          experienceLevels: ["mid"],
+          experienceMatchMode: "broad",
+        } satisfies SearchFilters,
+        {
+          remoteOnly: false,
+          visaFriendlyOnly: false,
+          postedDate: "any",
+        },
+      ),
+    ).toHaveLength(1);
   });
 });

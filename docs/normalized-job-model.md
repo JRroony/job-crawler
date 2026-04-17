@@ -26,6 +26,7 @@ The canonical product fields are:
 
 Supporting operational fields remain on the record for validation, persistence, and provenance:
 
+- `canonicalJobKey`
 - `applyUrl`
 - `resolvedUrl`
 - `linkStatus`
@@ -35,12 +36,22 @@ Supporting operational fields remain on the record for validation, persistence, 
 - `sourceProvenance`
 - `rawSourceMetadata`
 - `crawlRunIds`
+- `firstSeenAt`
+- `lastSeenAt`
+- `indexedAt`
+- `isActive`
+- `closedAt`
+- `contentHash`
+- `searchIndex`
 
 Compatibility notes:
 
 - `locationText` is kept as a compatibility alias for `locationRaw`.
 - `postedAt` is kept as a compatibility alias for `postingDate`.
+- `experienceLevel` remains the top-level resolved filter field, while `experienceClassification` stores the structured explanation: `experienceVersion`, `experienceBand`, `experienceSource`, `experienceConfidence`, `experienceSignals`, plus compatibility `explicitLevel` / `inferredLevel`.
 - `companyNormalized`, `titleNormalized`, `locationNormalized`, and `contentFingerprint` are compatibility aliases for the canonical normalized and dedupe fields.
+- `searchIndex` stores query-friendly title facets used for coarse candidate retrieval before higher-precision title/location/experience evaluation.
+- `canonicalJobKey`, lifecycle timestamps, and `contentHash` are backfilled by repository reads for older stored documents that do not have them yet.
 - Repository reads backfill the canonical fields when older stored documents only contain the legacy aliases.
 
 Provider guidance:

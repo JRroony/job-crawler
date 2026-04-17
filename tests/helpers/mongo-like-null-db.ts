@@ -1,4 +1,5 @@
 import type { CollectionAdapter, DatabaseAdapter } from "@/lib/server/db/repository";
+import { compareWithSort, matchesQuery } from "@/lib/server/db/query-utils";
 
 type SortSpec = Record<string, 1 | -1>;
 
@@ -35,6 +36,7 @@ export class MongoLikeNullCollection<TDocument extends Record<string, unknown>>
           updateOne: {
             filter: Record<string, unknown>;
             update: Record<string, unknown>;
+            options?: Record<string, unknown>;
           };
         }
     >,
@@ -52,6 +54,7 @@ export class MongoLikeNullCollection<TDocument extends Record<string, unknown>>
       const result = await this.updateOne(
         operation.updateOne.filter,
         operation.updateOne.update,
+        operation.updateOne.options,
       );
       matchedCount += Number((result as { matchedCount?: number }).matchedCount ?? 0);
     }
@@ -66,10 +69,20 @@ export class MongoLikeNullCollection<TDocument extends Record<string, unknown>>
   async updateOne(
     filter: Record<string, unknown>,
     update: Record<string, unknown>,
+    options?: Record<string, unknown>,
   ) {
     const target = this.documents.find((document) => matches(document, filter));
-    if (!target) {
+    if (!target && !options?.upsert) {
       return { matchedCount: 0, modifiedCount: 0 };
+    }
+
+    if (!target && options?.upsert) {
+      const inserted = {
+        ...clone(toMongoLikeValue((update.$setOnInsert as Record<string, unknown>) ?? {})),
+        ...clone(toMongoLikeValue((update.$set as Record<string, unknown>) ?? {})),
+      } as TDocument;
+      this.documents.push(inserted);
+      return { matchedCount: 0, modifiedCount: 0, upsertedCount: 1 };
     }
 
     const nextValues = update.$set && typeof update.$set === "object" ? update.$set : update;
@@ -77,7 +90,10 @@ export class MongoLikeNullCollection<TDocument extends Record<string, unknown>>
       throw new Error("MongoDB does not allow updates to the immutable _id field.");
     }
 
-    Object.assign(target, clone(toMongoLikeValue(nextValues as Record<string, unknown>)));
+    Object.assign(
+      target as TDocument,
+      clone(toMongoLikeValue(nextValues as Record<string, unknown>)),
+    );
     return { matchedCount: 1, modifiedCount: 1 };
   }
 
@@ -132,59 +148,7 @@ export class MongoLikeNullDb implements DatabaseAdapter {
 }
 
 function matches(document: Record<string, unknown>, filter: Record<string, unknown>) {
-  return Object.entries(filter).every(([key, expected]) => {
-    const actual = document[key];
-
-    if (expected && typeof expected === "object" && !Array.isArray(expected)) {
-      if ("$in" in expected && Array.isArray((expected as { $in: unknown[] }).$in)) {
-        const values = (expected as { $in: unknown[] }).$in;
-        return Array.isArray(actual)
-          ? actual.some((item) => values.includes(item))
-          : values.includes(actual);
-      }
-
-      return false;
-    }
-
-    if (Array.isArray(actual)) {
-      return actual.includes(expected);
-    }
-
-    return actual === expected;
-  });
-}
-
-function compareWithSort(
-  left: Record<string, unknown>,
-  right: Record<string, unknown>,
-  sort: SortSpec,
-) {
-  for (const [key, direction] of Object.entries(sort)) {
-    const leftValue = left[key];
-    const rightValue = right[key];
-
-    if (leftValue === rightValue) {
-      continue;
-    }
-
-    if (leftValue == null) {
-      return direction === -1 ? 1 : -1;
-    }
-
-    if (rightValue == null) {
-      return direction === -1 ? -1 : 1;
-    }
-
-    if (leftValue > rightValue) {
-      return direction === -1 ? -1 : 1;
-    }
-
-    if (leftValue < rightValue) {
-      return direction === -1 ? 1 : -1;
-    }
-  }
-
-  return 0;
+  return matchesQuery(document, filter);
 }
 
 function toMongoLikeValue<T>(value: T): T {

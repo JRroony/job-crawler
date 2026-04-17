@@ -1,6 +1,10 @@
 "use client";
 
 import { buildStableJobRenderIdentity } from "@/lib/job-identity";
+import {
+  evaluateStoredExperienceMatch,
+  resolveExperienceLevel,
+} from "@/lib/experience";
 import type {
   ActiveCrawlerPlatform,
   ExperienceLevel,
@@ -195,16 +199,21 @@ export function filterJobsForDisplay(
     }
 
     if (selectedExperienceLevels.size > 0) {
-      const level =
-        job.experienceLevel ??
-        job.experienceClassification?.explicitLevel ??
-        job.experienceClassification?.inferredLevel;
+      const classification = job.experienceClassification ?? {
+        explicitLevel: job.experienceLevel,
+        inferredLevel: undefined,
+        confidence: "high" as const,
+        isUnspecified: !job.experienceLevel,
+        reasons: job.experienceLevel ? ["Resolved stored experience level."] : [],
+      };
+      const experienceMatch = evaluateStoredExperienceMatch({
+        classification,
+        selectedLevels: Array.from(selectedExperienceLevels),
+        mode: searchFilters.experienceMatchMode ?? "balanced",
+        includeUnspecified,
+      });
 
-      if (!level) {
-        if (!includeUnspecified) {
-          return false;
-        }
-      } else if (!selectedExperienceLevels.has(level)) {
+      if (!experienceMatch.matches) {
         return false;
       }
     }
@@ -267,9 +276,7 @@ export function getWorkplaceLabel(job: JobListing) {
 
 export function getExperienceLabel(job: JobListing) {
   const level =
-    job.experienceLevel ??
-    job.experienceClassification?.explicitLevel ??
-    job.experienceClassification?.inferredLevel;
+    job.experienceLevel ?? resolveExperienceLevel(job.experienceClassification);
 
   return level ? labelForExperience(level) : undefined;
 }

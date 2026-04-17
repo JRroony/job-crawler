@@ -8,8 +8,29 @@ import type { JobListing } from "@/lib/types";
 import { formatPostedDate } from "@/lib/utils";
 
 function createJob(overrides: Partial<JobListing> = {}): JobListing {
+  const sourcePlatform = overrides.sourcePlatform ?? "greenhouse";
+  const sourceCompanySlug =
+    "sourceCompanySlug" in overrides ? overrides.sourceCompanySlug : "acme";
+  const sourceJobId = overrides.sourceJobId ?? "role-1";
+  const discoveredAt = overrides.discoveredAt ?? "2026-03-29T00:00:00.000Z";
+  const crawledAt = overrides.crawledAt ?? "2026-03-29T00:00:00.000Z";
+  const canonicalUrl = overrides.canonicalUrl ?? "https://example.com/jobs/1/apply";
+  const resolvedUrl = overrides.resolvedUrl ?? "https://example.com/jobs/1/apply";
+  const applyUrl = overrides.applyUrl ?? "https://example.com/jobs/1/apply";
+  const normalizedSourceJobId = sourceJobId.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const canonicalJobKey =
+    overrides.canonicalJobKey ??
+    (sourceCompanySlug && normalizedSourceJobId
+      ? `platform:${sourcePlatform}:${sourceCompanySlug}:${normalizedSourceJobId}`
+      : canonicalUrl
+        ? `canonical_url:${canonicalUrl.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`
+        : resolvedUrl
+          ? `resolved_url:${resolvedUrl.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`
+          : `apply_url:${applyUrl.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`);
+
   return {
     _id: "job-1",
+    canonicalJobKey,
     title: "Software Engineer",
     company: "Acme",
     normalizedCompany: "acme",
@@ -23,40 +44,46 @@ function createJob(overrides: Partial<JobListing> = {}): JobListing {
     remoteType: "onsite",
     seniority: "mid",
     experienceLevel: "mid",
-    sourcePlatform: "greenhouse",
-    sourceCompanySlug: "acme",
-    sourceJobId: "role-1",
+    sourcePlatform,
+    sourceCompanySlug,
+    sourceJobId,
     sourceUrl: "https://example.com/jobs/1",
-    applyUrl: "https://example.com/jobs/1/apply",
-    resolvedUrl: "https://example.com/jobs/1/apply",
-    canonicalUrl: "https://example.com/jobs/1/apply",
+    applyUrl,
+    resolvedUrl,
+    canonicalUrl,
     postingDate: "2026-03-20T00:00:00.000Z",
     postedAt: "2026-03-20T00:00:00.000Z",
-    discoveredAt: "2026-03-29T00:00:00.000Z",
-    crawledAt: "2026-03-29T00:00:00.000Z",
+    discoveredAt,
+    crawledAt,
     sponsorshipHint: "unknown",
     linkStatus: "valid",
-    lastValidatedAt: "2026-03-29T00:00:00.000Z",
+    lastValidatedAt: overrides.lastValidatedAt ?? crawledAt,
     rawSourceMetadata: {},
     sourceProvenance: [
       {
-        sourcePlatform: "greenhouse",
-        sourceJobId: "role-1",
+        sourcePlatform,
+        sourceJobId,
         sourceUrl: "https://example.com/jobs/1",
         applyUrl: "https://example.com/jobs/1/apply",
         resolvedUrl: "https://example.com/jobs/1/apply",
         canonicalUrl: "https://example.com/jobs/1/apply",
-        discoveredAt: "2026-03-29T00:00:00.000Z",
+        discoveredAt,
         rawSourceMetadata: {},
       },
     ],
-    sourceLookupKeys: ["greenhouse:role-1"],
+    sourceLookupKeys: overrides.sourceLookupKeys ?? [`${sourcePlatform}:${sourceJobId}`],
     crawlRunIds: ["run-1"],
+    firstSeenAt: overrides.firstSeenAt ?? discoveredAt,
+    lastSeenAt: overrides.lastSeenAt ?? crawledAt,
+    indexedAt: overrides.indexedAt ?? crawledAt,
+    isActive: overrides.isActive ?? true,
+    closedAt: overrides.closedAt,
     dedupeFingerprint: "fingerprint-1",
     companyNormalized: "acme",
     titleNormalized: "software engineer",
     locationNormalized: "san francisco california united states",
     contentFingerprint: "fingerprint-1",
+    contentHash: overrides.contentHash ?? `content-hash:${sourceJobId}`,
     ...overrides,
   };
 }
@@ -135,7 +162,7 @@ describe("ResultsTable", () => {
     ]);
 
     expect(keys[0]).not.toBe(keys[1]);
-    expect(keys[0]).toBe("canonical:https://example.com/jobs/1/apply");
-    expect(keys[1]).toBe("canonical:https://example.com/jobs/2");
+    expect(keys[0]).toBe("platform:greenhouse:acme:role 1");
+    expect(keys[1]).toBe("platform:greenhouse:acme:role 2");
   });
 });

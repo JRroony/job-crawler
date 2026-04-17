@@ -7,44 +7,52 @@ import {
 } from "@/lib/server/crawler/helpers";
 import { dedupeStoredJobs } from "@/lib/server/crawler/dedupe";
 import type { JobCrawlerRepository } from "@/lib/server/db/repository";
-import {
-  resolveOperationalCrawlerPlatforms,
-  type ActiveCrawlerPlatform,
-  type JobListing,
-  type SearchFilters,
-} from "@/lib/types";
+import type { IndexedJobCandidateQuery } from "@/lib/server/search/job-search-index";
+import { resolveOperationalCrawlerPlatforms, type ActiveCrawlerPlatform, type JobListing, type SearchFilters } from "@/lib/types";
 
 type IndexedJobSearchMatch = {
   job: JobListing;
   evaluation: Extract<FilterEvaluation, { matches: true }>;
 };
 
+type IndexedJobDelta = {
+  cursor: number;
+  jobs: JobListing[];
+};
+
+export type IndexedJobSearchResult = {
+  candidateCount: number;
+  candidateQuery: IndexedJobCandidateQuery["diagnostics"];
+  matches: IndexedJobSearchMatch[];
+};
+
 export async function getIndexedJobsForSearch(
   repository: JobCrawlerRepository,
   filters: SearchFilters,
-) {
-  const jobs = await repository.listJobs();
-  const allowedPlatforms = resolveAllowedPlatforms(filters);
+): Promise<IndexedJobSearchResult> {
+  const candidateResult = await repository.getIndexedJobCandidatesForSearch(filters);
 
-  return jobs.flatMap((job) => {
-    if (!matchesPlatformFilter(job, allowedPlatforms)) {
-      return [];
-    }
+  return {
+    candidateCount: candidateResult.jobs.length,
+    candidateQuery: candidateResult.query.diagnostics,
+    matches: matchIndexedJobsForSearch(candidateResult.jobs, filters, {
+      candidateCount: candidateResult.jobs.length,
+      candidateQuery: candidateResult.query.diagnostics,
+    }),
+  };
+}
 
-      const normalizedJob = applyResolvedExperienceLevel(job);
-      const evaluation = evaluateSearchFilters(normalizedJob, filters, {
-        includeExperience: true,
-      });
+export async function getIndexedJobDeltasForSearch(
+  repository: JobCrawlerRepository,
+  filters: SearchFilters,
+  afterSequence = 0,
+): Promise<IndexedJobDelta> {
+  const indexedDelta = await repository.getIndexedJobsAfterSequence(afterSequence);
 
-      if (!evaluation.matches) {
-        return [];
-      }
-
-      return [{
-        job: attachIndexedSearchDiagnostics(normalizedJob, evaluation),
-        evaluation,
-      }];
-    });
+  return {
+    cursor: indexedDelta.cursor,
+    jobs: matchIndexedJobsForSearch(indexedDelta.jobs, filters).map(({ job }) => job),
+  };
 }
 
 export function mergeSearchResultJobs(
@@ -52,6 +60,37 @@ export function mergeSearchResultJobs(
   supplementalJobs: JobListing[],
 ) {
   return dedupeStoredJobs([...indexedJobs, ...supplementalJobs]);
+}
+
+function matchIndexedJobsForSearch(
+  jobs: JobListing[],
+  filters: SearchFilters,
+  context?: {
+    candidateCount: number;
+    candidateQuery: IndexedJobCandidateQuery["diagnostics"];
+  },
+) {
+  const allowedPlatforms = resolveAllowedPlatforms(filters);
+
+  return jobs.flatMap((job) => {
+    if (!matchesPlatformFilter(job, allowedPlatforms)) {
+      return [];
+    }
+
+    const normalizedJob = applyResolvedExperienceLevel(job);
+    const evaluation = evaluateSearchFilters(normalizedJob, filters, {
+      includeExperience: true,
+    });
+
+    if (!evaluation.matches) {
+      return [];
+    }
+
+    return [{
+      job: attachIndexedSearchDiagnostics(normalizedJob, evaluation, context),
+      evaluation,
+    }];
+  });
 }
 
 function matchesPlatformFilter(
@@ -76,6 +115,10 @@ function resolveAllowedPlatforms(filters: SearchFilters) {
 function attachIndexedSearchDiagnostics(
   job: JobListing,
   evaluation: Extract<FilterEvaluation, { matches: true }>,
+  context?: {
+    candidateCount: number;
+    candidateQuery: IndexedJobCandidateQuery["diagnostics"];
+  },
 ) {
   return {
     ...job,
@@ -83,6 +126,8 @@ function attachIndexedSearchDiagnostics(
       ...(job.rawSourceMetadata ?? {}),
       indexedSearch: {
         source: "jobs_collection",
+        candidateCount: context?.candidateCount,
+        candidateQuery: context?.candidateQuery,
         titleMatch: {
           tier: evaluation.titleMatch.tier,
           score: evaluation.titleMatch.score,

@@ -293,7 +293,7 @@ export async function executeCrawlPipeline(
     validation: 0,
     responseAssembly: 0,
   };
-  const diagnostics = createEmptyDiagnostics();
+  const diagnostics = createEmptyDiagnostics(input.crawlRun?.diagnostics);
   const sourceResultsByProvider = new Map<CrawlSourceResult["provider"], CrawlSourceResult>();
   const providerSavedJobIds = new Map<CrawlSourceResult["provider"], Set<string>>();
   const savedJobIds = new Set<string>();
@@ -979,7 +979,7 @@ export async function executeCrawlPipeline(
 
     await updateRunProgress("discovering", crawlRun.startedAt);
 
-    Object.assign(diagnostics, createEmptyDiagnostics());
+    Object.assign(diagnostics, createEmptyDiagnostics(input.crawlRun?.diagnostics));
 
     if (input.discovery.discoverBaseline && input.discovery.discoverSupplemental) {
       await persistentCancellation.throwIfCanceled({ heartbeat: true });
@@ -1909,7 +1909,7 @@ function buildFilterDecisionTrace(
         explanation: evaluation.experienceMatch?.explanation ?? "Experience filtering passed.",
         passed: true,
         reasons: experienceClassification.reasons,
-        matchedSignals: experienceClassification.diagnostics?.matchedSignals ?? [],
+        matchedSignals: experienceClassification.experienceSignals,
       },
     };
   }
@@ -1980,7 +1980,7 @@ function buildFilterDecisionTrace(
         "Experience filtering did not run because an earlier stage dropped the job.",
       passed: filterStage !== "experience",
       reasons: experienceClassification.reasons,
-      matchedSignals: experienceClassification.diagnostics?.matchedSignals ?? [],
+      matchedSignals: experienceClassification.experienceSignals,
     },
   };
 }
@@ -2211,8 +2211,38 @@ export function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): Persis
       title: seed.title,
       location: locationNormalized,
     });
+  const crawledAt = seed.crawledAt ?? discoveredAt;
+  const sourceLookupKeys = buildSeedSourceLookupKeys(seed);
+  const contentHash = buildContentFingerprint({
+    company: seed.company,
+    title: seed.title,
+    location: locationNormalized,
+  });
+  const canonicalJobKey = buildCanonicalJobIdentity({
+    sourcePlatform: seed.sourcePlatform,
+    sourceCompanySlug: seed.sourceCompanySlug,
+    sourceJobId: seed.sourceJobId,
+    sourceUrl: seed.sourceUrl,
+    applyUrl: seed.applyUrl,
+    canonicalUrl: seed.canonicalUrl,
+    resolvedUrl: undefined,
+    sourceLookupKeys,
+    company: seed.company,
+    title: seed.title,
+    locationRaw,
+    locationText: seed.locationText,
+    normalizedCompany,
+    normalizedTitle,
+    normalizedLocation: locationNormalized,
+    dedupeFingerprint,
+    companyNormalized: normalizedCompany,
+    titleNormalized: normalizedTitle,
+    locationNormalized,
+    contentFingerprint: dedupeFingerprint,
+  }).canonicalJobKey;
 
   return {
+    canonicalJobKey,
     title: seed.title,
     company: seed.company,
     normalizedCompany,
@@ -2240,7 +2270,7 @@ export function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): Persis
     postingDate,
     postedAt: postingDate,
     discoveredAt,
-    crawledAt: seed.crawledAt ?? discoveredAt,
+    crawledAt,
     descriptionSnippet: seed.descriptionSnippet,
     salaryInfo: seed.salaryInfo,
     sponsorshipHint: seed.sponsorshipHint ?? "unknown",
@@ -2257,12 +2287,18 @@ export function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): Persis
         rawSourceMetadata: seed.rawSourceMetadata,
       },
     ],
-    sourceLookupKeys: buildSeedSourceLookupKeys(seed),
+    sourceLookupKeys,
+    firstSeenAt: discoveredAt,
+    lastSeenAt: crawledAt,
+    indexedAt: crawledAt,
+    isActive: true,
+    closedAt: undefined,
     dedupeFingerprint,
     companyNormalized: normalizedCompany,
     titleNormalized: normalizedTitle,
     locationNormalized,
     contentFingerprint: dedupeFingerprint,
+    contentHash,
   };
 }
 

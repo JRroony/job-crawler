@@ -20,6 +20,7 @@ import {
 } from "@/lib/server/search/session-service";
 import { getIndexedJobsForSearch } from "@/lib/server/search/indexed-jobs";
 import { InputValidationError, isInputValidationError } from "@/lib/server/search/errors";
+import type { CrawlDiagnostics, SearchDocument } from "@/lib/types";
 
 export async function runSearchFromFilters(
   rawFilters: unknown,
@@ -152,8 +153,8 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
   session: Awaited<ReturnType<typeof createSearchSession>> | Awaited<ReturnType<typeof createSearchRerunSession>>,
   runtime: JobCrawlerRuntime,
 ) {
-  const indexedMatches = await getIndexedJobsForSearch(session.repository, session.search.filters);
-  const indexedJobs = indexedMatches.map(({ job }) => job);
+  const indexedSearch = await getIndexedJobsForSearch(session.repository, session.search.filters);
+  const indexedJobs = indexedSearch.matches.map(({ job }) => job);
 
   await session.repository.appendExistingJobsToSearchSession(
     session.searchSession._id,
@@ -161,28 +162,44 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     indexedJobs.map((job) => job._id),
   );
 
-  const shouldQueueSupplemental = shouldEnqueueSupplementalCrawl(
-    session.search.filters.crawlMode,
-    indexedJobs.length,
-    {
-      reusedExistingSearch: session.searchReuse.reusedExistingSearch,
-      previousVisibleJobCount: session.searchReuse.previousVisibleJobCount,
-      previousRunStatus: session.searchReuse.previousRunStatus,
-    },
+  const supplementalDecision = resolveSupplementalCrawlDecision(
+    session.search.filters,
+    indexedSearch,
+    session.searchReuse,
+    session.now,
   );
+  const primedDiagnostics = buildPrimedSessionDiagnostics(
+    supplementalDecision,
+    indexedJobs.length,
+  );
+  session.crawlRun = {
+    ...session.crawlRun,
+    diagnostics: primedDiagnostics,
+  };
+
+  await session.repository.updateCrawlRunProgress(session.crawlRun._id, {
+    stage: supplementalDecision.shouldQueue ? "queued" : "finalizing",
+    totalFetchedJobs: 0,
+    totalMatchedJobs: indexedJobs.length,
+    dedupedJobs: indexedJobs.length,
+    diagnostics: primedDiagnostics,
+  });
 
   console.info("[search:index-first]", {
     searchId: session.search._id,
     searchSessionId: session.searchSession._id,
+    indexedCandidates: indexedSearch.candidateCount,
     indexedJobs: indexedJobs.length,
-    supplementalQueued: shouldQueueSupplemental,
+    supplementalQueued: supplementalDecision.shouldQueue,
+    supplementalReason: supplementalDecision.triggerReason,
     crawlMode: session.search.filters.crawlMode ?? "balanced",
     reusedExistingSearch: session.searchReuse.reusedExistingSearch,
     previousVisibleJobCount: session.searchReuse.previousVisibleJobCount,
     previousRunStatus: session.searchReuse.previousRunStatus ?? "unknown",
+    latestIndexedJobAgeMs: supplementalDecision.latestIndexedJobAgeMs,
   });
 
-  if (!shouldQueueSupplemental) {
+  if (!supplementalDecision.shouldQueue) {
     const finishedAt = session.now.toISOString();
     await Promise.all([
       session.repository.finalizeCrawlRun(session.crawlRun._id, {
@@ -191,38 +208,7 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
         totalFetchedJobs: 0,
         totalMatchedJobs: indexedJobs.length,
         dedupedJobs: indexedJobs.length,
-        diagnostics: {
-          discoveredSources: 0,
-          crawledSources: 0,
-          providersEnqueued: 0,
-          providerFailures: 0,
-          directJobsHarvested: 0,
-          jobsBeforeDedupe: indexedJobs.length,
-          jobsAfterDedupe: indexedJobs.length,
-          excludedByTitle: 0,
-          excludedByLocation: 0,
-          excludedByExperience: 0,
-          dedupedOut: 0,
-          validationDeferred: 0,
-          dropReasonCounts: {},
-          filterDecisionTraces: [],
-          dedupeDecisionTraces: [],
-          performance: {
-            stageTimingsMs: {
-              discovery: 0,
-              providerExecution: 0,
-              filtering: 0,
-              dedupe: 0,
-              persistence: 0,
-              validation: 0,
-              responseAssembly: 0,
-              total: 0,
-            },
-            providerTimingsMs: [],
-            progressUpdateCount: 0,
-            persistenceBatchCount: 0,
-          },
-        },
+        diagnostics: primedDiagnostics,
         finishedAt,
       }),
       session.repository.updateSearchLatestRun(
@@ -262,25 +248,61 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
   );
 }
 
-function shouldEnqueueSupplementalCrawl(
-  crawlMode: ReturnType<typeof parseSearchFilters>["crawlMode"],
-  indexedJobCount: number,
+type SupplementalDecision = {
+  shouldQueue: boolean;
+  triggerReason: NonNullable<NonNullable<CrawlDiagnostics["session"]>["triggerReason"]>;
+  triggerExplanation: string;
+  minimumIndexedCoverage: number;
+  targetJobCount: number;
+  indexedCandidateCount: number;
+  indexedJobCount: number;
+  reusedExistingSearch: boolean;
+  previousVisibleJobCount: number;
+  previousRunStatus?: SearchDocument["lastStatus"];
+  previousFinishedAt?: string;
+  latestIndexedJobAgeMs?: number;
+};
+
+function resolveSupplementalCrawlDecision(
+  filters: ReturnType<typeof parseSearchFilters>,
+  indexedSearch: Awaited<ReturnType<typeof getIndexedJobsForSearch>>,
   previousCoverage: {
     reusedExistingSearch: boolean;
     previousVisibleJobCount: number;
     previousRunStatus?: "running" | "completed" | "partial" | "failed" | "aborted";
+    previousFinishedAt?: string;
   },
-) {
+  now: Date,
+): SupplementalDecision {
   const env = getEnv();
-  const mode = crawlMode ?? "balanced";
+  const mode = filters.crawlMode ?? "balanced";
   const minimumIndexedCoverageByMode = {
     fast: Math.min(3, env.CRAWL_TARGET_JOB_COUNT),
     balanced: Math.min(5, env.CRAWL_TARGET_JOB_COUNT),
     deep: Math.min(8, env.CRAWL_TARGET_JOB_COUNT),
   } as const;
+  const minimumIndexedCoverage = minimumIndexedCoverageByMode[mode];
+  const indexedJobCount = indexedSearch.matches.length;
+  const latestIndexedJobAgeMs = resolveLatestIndexedJobAgeMs(
+    indexedSearch.matches.map(({ job }) => job),
+    now,
+  );
 
-  if (indexedJobCount >= minimumIndexedCoverageByMode[mode]) {
-    return false;
+  if (indexedJobCount >= minimumIndexedCoverage) {
+    return {
+      shouldQueue: false,
+      triggerReason: "indexed_coverage_sufficient",
+      triggerExplanation: `Indexed results already meet the ${minimumIndexedCoverage}-job ${mode} coverage threshold, so request-time crawl stays off.`,
+      minimumIndexedCoverage,
+      targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
+      indexedCandidateCount: indexedSearch.candidateCount,
+      indexedJobCount,
+      reusedExistingSearch: previousCoverage.reusedExistingSearch,
+      previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
+      previousRunStatus: previousCoverage.previousRunStatus,
+      previousFinishedAt: previousCoverage.previousFinishedAt,
+      latestIndexedJobAgeMs,
+    };
   }
 
   if (
@@ -289,8 +311,154 @@ function shouldEnqueueSupplementalCrawl(
     previousCoverage.previousVisibleJobCount > 0 &&
     indexedJobCount >= previousCoverage.previousVisibleJobCount
   ) {
-    return false;
+    return {
+      shouldQueue: false,
+      triggerReason: "reused_completed_coverage",
+      triggerExplanation: "A completed identical search was reused and the indexed session already preserves its previously visible coverage.",
+      minimumIndexedCoverage,
+      targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
+      indexedCandidateCount: indexedSearch.candidateCount,
+      indexedJobCount,
+      reusedExistingSearch: previousCoverage.reusedExistingSearch,
+      previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
+      previousRunStatus: previousCoverage.previousRunStatus,
+      previousFinishedAt: previousCoverage.previousFinishedAt,
+      latestIndexedJobAgeMs,
+    };
   }
 
-  return indexedJobCount < minimumIndexedCoverageByMode[mode];
+  const staleAfterMs = env.BACKGROUND_INGESTION_STALE_AFTER_MS;
+  const freshnessRecoveryEligible =
+    indexedJobCount > 0 &&
+    typeof latestIndexedJobAgeMs === "number" &&
+    latestIndexedJobAgeMs >= staleAfterMs;
+
+  if (freshnessRecoveryEligible) {
+    return {
+      shouldQueue: true,
+      triggerReason: "freshness_recovery",
+      triggerExplanation: `Indexed coverage is below the ${minimumIndexedCoverage}-job ${mode} threshold and the newest indexed match is stale, so a bounded supplemental refresh was queued.`,
+      minimumIndexedCoverage,
+      targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
+      indexedCandidateCount: indexedSearch.candidateCount,
+      indexedJobCount,
+      reusedExistingSearch: previousCoverage.reusedExistingSearch,
+      previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
+      previousRunStatus: previousCoverage.previousRunStatus,
+      previousFinishedAt: previousCoverage.previousFinishedAt,
+      latestIndexedJobAgeMs,
+    };
+  }
+
+  if (
+    previousCoverage.reusedExistingSearch &&
+    previousCoverage.previousRunStatus &&
+    previousCoverage.previousRunStatus !== "completed"
+  ) {
+    return {
+      shouldQueue: true,
+      triggerReason: "retry_incomplete_previous_run",
+      triggerExplanation: "The previous identical session did not complete cleanly and indexed coverage is still below threshold, so supplemental recovery was retried.",
+      minimumIndexedCoverage,
+      targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
+      indexedCandidateCount: indexedSearch.candidateCount,
+      indexedJobCount,
+      reusedExistingSearch: previousCoverage.reusedExistingSearch,
+      previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
+      previousRunStatus: previousCoverage.previousRunStatus,
+      previousFinishedAt: previousCoverage.previousFinishedAt,
+      latestIndexedJobAgeMs,
+    };
+  }
+
+  return {
+    shouldQueue: true,
+    triggerReason: "insufficient_indexed_coverage",
+    triggerExplanation: `Indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${mode} threshold, so a bounded supplemental crawl was queued.`,
+    minimumIndexedCoverage,
+    targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
+    indexedCandidateCount: indexedSearch.candidateCount,
+    indexedJobCount,
+    reusedExistingSearch: previousCoverage.reusedExistingSearch,
+    previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
+    previousRunStatus: previousCoverage.previousRunStatus,
+    previousFinishedAt: previousCoverage.previousFinishedAt,
+    latestIndexedJobAgeMs,
+  };
+}
+
+function buildPrimedSessionDiagnostics(
+  decision: SupplementalDecision,
+  indexedJobCount: number,
+): CrawlDiagnostics {
+  return {
+    discoveredSources: 0,
+    crawledSources: 0,
+    providersEnqueued: 0,
+    providerFailures: 0,
+    directJobsHarvested: 0,
+    jobsBeforeDedupe: indexedJobCount,
+    jobsAfterDedupe: indexedJobCount,
+    excludedByTitle: 0,
+    excludedByLocation: 0,
+    excludedByExperience: 0,
+    dedupedOut: 0,
+    validationDeferred: 0,
+    session: {
+      indexedResultsCount: indexedJobCount,
+      initialIndexedResultsCount: indexedJobCount,
+      supplementalResultsCount: 0,
+      totalVisibleResultsCount: indexedJobCount,
+      indexedCandidateCount: decision.indexedCandidateCount,
+      minimumIndexedCoverage: decision.minimumIndexedCoverage,
+      targetJobCount: decision.targetJobCount,
+      supplementalQueued: decision.shouldQueue,
+      supplementalRunning: decision.shouldQueue,
+      triggerReason: decision.triggerReason,
+      triggerExplanation: decision.triggerExplanation,
+      reusedExistingSearch: decision.reusedExistingSearch,
+      previousVisibleJobCount: decision.previousVisibleJobCount,
+      previousRunStatus: decision.previousRunStatus,
+      previousFinishedAt: decision.previousFinishedAt,
+      latestIndexedJobAgeMs: decision.latestIndexedJobAgeMs,
+    },
+    dropReasonCounts: {},
+    filterDecisionTraces: [],
+    dedupeDecisionTraces: [],
+    performance: {
+      stageTimingsMs: {
+        discovery: 0,
+        providerExecution: 0,
+        filtering: 0,
+        dedupe: 0,
+        persistence: 0,
+        validation: 0,
+        responseAssembly: 0,
+        total: 0,
+      },
+      providerTimingsMs: [],
+      progressUpdateCount: 0,
+      persistenceBatchCount: 0,
+    },
+  };
+}
+
+function resolveLatestIndexedJobAgeMs(
+  indexedJobs: Array<{ indexedAt: string; crawledAt: string; discoveredAt: string }>,
+  now: Date,
+) {
+  if (indexedJobs.length === 0) {
+    return undefined;
+  }
+
+  const latestIndexedMs = indexedJobs.reduce((latest, job) => {
+    const timestamp = Date.parse(job.indexedAt ?? job.crawledAt ?? job.discoveredAt);
+    return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest;
+  }, Number.NEGATIVE_INFINITY);
+
+  if (!Number.isFinite(latestIndexedMs)) {
+    return undefined;
+  }
+
+  return Math.max(0, now.getTime() - latestIndexedMs);
 }

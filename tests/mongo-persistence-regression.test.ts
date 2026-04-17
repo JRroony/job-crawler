@@ -31,11 +31,16 @@ function createPersistableJob(
   const canonicalUrl = overrides.canonicalUrl ?? "https://example.com/jobs/role-1";
   const applyUrl = overrides.applyUrl ?? `${canonicalUrl}/apply`;
   const sourceUrl = overrides.sourceUrl ?? canonicalUrl;
+  const sourcePlatform = overrides.sourcePlatform ?? "greenhouse";
+  const sourceCompanySlug = overrides.sourceCompanySlug ?? companyNormalized;
   const sourceJobId = overrides.sourceJobId ?? "role-1";
   const discoveredAt = overrides.discoveredAt ?? "2026-04-15T12:00:00.000Z";
   const crawledAt = overrides.crawledAt ?? discoveredAt;
 
   return {
+    canonicalJobKey:
+      overrides.canonicalJobKey ??
+      `platform:${sourcePlatform}:${sourceCompanySlug}:${sourceJobId.toLowerCase()}`,
     title,
     company,
     normalizedCompany: companyNormalized,
@@ -52,8 +57,8 @@ function createPersistableJob(
     seniority: overrides.seniority,
     experienceLevel: overrides.experienceLevel,
     experienceClassification: overrides.experienceClassification,
-    sourcePlatform: overrides.sourcePlatform ?? "greenhouse",
-    sourceCompanySlug: overrides.sourceCompanySlug ?? companyNormalized,
+    sourcePlatform,
+    sourceCompanySlug,
     sourceJobId,
     sourceUrl,
     applyUrl,
@@ -71,7 +76,7 @@ function createPersistableJob(
     rawSourceMetadata: overrides.rawSourceMetadata ?? {},
     sourceProvenance: overrides.sourceProvenance ?? [
       {
-        sourcePlatform: overrides.sourcePlatform ?? "greenhouse",
+        sourcePlatform,
         sourceJobId,
         sourceUrl,
         applyUrl,
@@ -82,13 +87,19 @@ function createPersistableJob(
       },
     ],
     sourceLookupKeys: overrides.sourceLookupKeys ?? [
-      `${overrides.sourcePlatform ?? "greenhouse"}:${sourceJobId.toLowerCase()}`,
+      `${sourcePlatform}:${sourceJobId.toLowerCase()}`,
     ],
+    firstSeenAt: overrides.firstSeenAt ?? discoveredAt,
+    lastSeenAt: overrides.lastSeenAt ?? crawledAt,
+    indexedAt: overrides.indexedAt ?? crawledAt,
+    isActive: overrides.isActive ?? true,
+    closedAt: overrides.closedAt,
     dedupeFingerprint: overrides.dedupeFingerprint ?? `dedupe:${sourceJobId}`,
     companyNormalized,
     titleNormalized,
     locationNormalized,
     contentFingerprint: overrides.contentFingerprint ?? `content:${sourceJobId}`,
+    contentHash: overrides.contentHash ?? `content-hash:${sourceJobId}`,
   };
 }
 

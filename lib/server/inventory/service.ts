@@ -7,6 +7,11 @@ import type {
 import { refreshSourceInventory } from "@/lib/server/discovery/service";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import type { SourceInventoryRecord } from "@/lib/server/discovery/inventory";
+import type { CrawlProvider } from "@/lib/server/providers/types";
+import {
+  planRecurringInventorySourceSelection,
+  type RecurringInventorySelectionPlan,
+} from "@/lib/server/inventory/selection";
 import { resolveRepository } from "@/lib/server/services/runtime";
 
 export async function refreshPersistentSourceInventory(runtime: {
@@ -46,4 +51,14 @@ export async function recordPersistentSourceInventoryObservations(runtime: {
 }) {
   const repository = await resolveRepository(runtime.repository);
   return repository.recordSourceInventoryObservations(runtime.observations);
+}
+
+export function planPersistentInventoryRecurringCrawl(runtime: {
+  inventory: SourceInventoryRecord[];
+  providers: CrawlProvider[];
+  now: Date;
+  maxSources: number;
+  intervalMs: number;
+}): RecurringInventorySelectionPlan {
+  return planRecurringInventorySourceSelection(runtime);
 }

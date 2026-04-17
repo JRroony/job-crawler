@@ -19,12 +19,19 @@ import {
   getTitleMatchResult as getTitleRetrievalMatchResult,
   normalizeTitleToCanonicalForm as normalizeTitleRetrievalCanonicalForm,
 } from "@/lib/server/title-retrieval";
+import {
+  currentExperienceClassificationVersion,
+  evaluateStoredExperienceMatch,
+  resolveExperienceBand,
+  resolveExperienceLevel,
+} from "@/lib/experience";
 import type {
   TitleMatchMode,
   TitleMatchResult,
 } from "@/lib/server/title-retrieval";
 import type {
   ExperienceClassification,
+  ExperienceClassificationSource,
   ExperienceInferenceConfidence,
   ExperienceLevel,
   ExperienceMatchMode,
@@ -467,17 +474,58 @@ export function buildUnspecifiedExperienceClassification(
   title?: string,
   matchedSignals: ExperienceSignal[] = [],
 ): ExperienceClassification {
+  const diagnostics = buildExperienceClassificationDiagnostics({
+    title,
+    matchedSignals,
+    finalSeniority: "unknown",
+    rationale: reasons,
+  });
+
   return {
+    experienceVersion: currentExperienceClassificationVersion,
+    experienceBand: "unknown",
+    experienceSource: "unknown",
+    experienceConfidence: "none",
+    experienceSignals: diagnostics.matchedSignals,
     confidence: "none",
     source: "unknown",
     reasons,
     isUnspecified: true,
-    diagnostics: buildExperienceClassificationDiagnostics({
-      title,
-      matchedSignals,
-      finalSeniority: "unknown",
-      rationale: reasons,
-    }),
+    diagnostics,
+  };
+}
+
+function buildStructuredExperienceClassification(input: {
+  explicitLevel?: ExperienceLevel;
+  inferredLevel?: ExperienceLevel;
+  confidence: ExperienceInferenceConfidence;
+  source: ExperienceClassificationSource;
+  reasons: string[];
+  title?: string;
+  matchedSignals?: ExperienceSignal[];
+}): ExperienceClassification {
+  const resolvedLevel =
+    input.explicitLevel ?? input.inferredLevel ?? undefined;
+  const diagnostics = buildExperienceClassificationDiagnostics({
+    title: input.title,
+    matchedSignals: input.matchedSignals,
+    finalSeniority: resolvedLevel ?? "unknown",
+    rationale: input.reasons,
+  });
+
+  return {
+    experienceVersion: currentExperienceClassificationVersion,
+    experienceBand: resolveExperienceBand(resolvedLevel ?? "unknown"),
+    experienceSource: input.source,
+    experienceConfidence: input.confidence,
+    experienceSignals: diagnostics.matchedSignals,
+    explicitLevel: input.explicitLevel,
+    inferredLevel: input.inferredLevel,
+    confidence: input.confidence,
+    source: input.source,
+    reasons: input.reasons,
+    isUnspecified: !resolvedLevel,
+    diagnostics,
   };
 }
 
@@ -497,26 +545,28 @@ export function classifyExperience(input: {
     return explicitExperience;
   }
 
-  const structuredSignal = selectBestExperienceSignal(
+  const structuredSignal = selectConservativeExperienceSignal(
     collectedSignals.structuredSignals,
   );
   if (structuredSignal) {
     return classificationFromSignal(structuredSignal, input.title, collectedSignals.allSignals);
   }
 
-  const descriptionSignal = selectBestExperienceSignal(
+  const descriptionSignal = selectConservativeExperienceSignal(
     collectedSignals.descriptionSignals,
   );
   if (descriptionSignal) {
     return classificationFromSignal(descriptionSignal, input.title, collectedSignals.allSignals);
   }
 
-  const metadataSignal = selectBestExperienceSignal(collectedSignals.metadataSignals);
+  const metadataSignal = selectConservativeExperienceSignal(
+    collectedSignals.metadataSignals,
+  );
   if (metadataSignal) {
     return classificationFromSignal(metadataSignal, input.title, collectedSignals.allSignals);
   }
 
-  const pageFetchSignal = selectBestExperienceSignal(
+  const pageFetchSignal = selectConservativeExperienceSignal(
     collectedSignals.pageFetchSignals,
   );
   if (pageFetchSignal) {
@@ -540,31 +590,54 @@ export function normalizeExperienceClassification(
   const reasons = classification.reasons.filter(Boolean);
   const explicitLevel = classification.explicitLevel;
   const inferredLevel = classification.inferredLevel;
+  const resolvedLevel = resolveExperienceLevel(classification);
   const isUnspecified = !explicitLevel && !inferredLevel;
   const diagnostics = normalizeExperienceDiagnostics(
     classification.diagnostics,
-    explicitLevel ?? inferredLevel,
+    resolvedLevel,
     reasons,
   );
+  const experienceSignals =
+    (classification.experienceSignals?.length ?? 0) > 0
+      ? classification.experienceSignals
+      : diagnostics.matchedSignals;
+  const source = classification.experienceSource ?? classification.source;
+  const confidence =
+    classification.experienceConfidence ?? classification.confidence;
 
   if (isUnspecified) {
     return buildUnspecifiedExperienceClassification(
       reasons,
       diagnostics.originalTitle,
-      [],
+      experienceSignals.map((signal) => ({
+        ruleId: signal.ruleId,
+        signalType: signal.signalType,
+        level: signal.level,
+        confidence: signal.confidence,
+        source: signal.source,
+        reason: signal.rationale,
+        matchedText: signal.matchedText,
+      })),
     );
   }
 
-  return {
+  return buildStructuredExperienceClassification({
     explicitLevel,
     inferredLevel,
-    confidence:
-      classification.confidence === "none" ? "low" : classification.confidence,
-    source: classification.source,
+    confidence: confidence === "none" ? "low" : confidence,
+    source,
     reasons,
-    isUnspecified: false,
-    diagnostics,
-  };
+    title: diagnostics.originalTitle,
+    matchedSignals: experienceSignals.map((signal) => ({
+      ruleId: signal.ruleId,
+      signalType: signal.signalType,
+      level: signal.level,
+      confidence: signal.confidence,
+      source: signal.source,
+      reason: signal.rationale,
+      matchedText: signal.matchedText,
+    })),
+  });
 }
 
 export function resolveJobExperienceClassification(
@@ -581,18 +654,13 @@ export function resolveJobExperienceClassification(
   }
 
   if (job.experienceLevel) {
-    return {
+    return buildStructuredExperienceClassification({
       explicitLevel: job.experienceLevel,
       confidence: "high",
       source: "unknown",
       reasons: ["Legacy stored experience level."],
-      isUnspecified: false,
-      diagnostics: buildExperienceClassificationDiagnostics({
-        title: job.title,
-        finalSeniority: job.experienceLevel,
-        rationale: ["Legacy stored experience level."],
-      }),
-    } satisfies ExperienceClassification;
+      title: job.title,
+    });
   }
 
   return classifyExperience({
@@ -734,79 +802,21 @@ function getExperienceMatchResult(
   const mode = resolveExperienceMatchMode(filters);
   const includeUnspecified =
     filters.includeUnspecifiedExperience === true || mode === "broad";
-
-  if (
-    classification.explicitLevel &&
-    selectedLevels.includes(classification.explicitLevel)
-  ) {
-    return {
-      matches: true,
-      classification,
-      selectedLevels,
-      mode,
-      includeUnspecified,
-      matchedLevel: classification.explicitLevel,
-      explanation: `Matched explicit experience level "${classification.explicitLevel}".`,
-    };
-  }
-
-  if (
-    mode !== "strict" &&
-    classification.inferredLevel &&
-    selectedLevels.includes(classification.inferredLevel)
-  ) {
-    if (mode === "broad") {
-      return {
-        matches: true,
-        classification,
-        selectedLevels,
-        mode,
-        includeUnspecified,
-        matchedLevel: classification.inferredLevel,
-        explanation: `Matched inferred experience level "${classification.inferredLevel}" in broad mode.`,
-      };
-    }
-
-    if (
-      classification.confidence === "high" ||
-      classification.confidence === "medium"
-    ) {
-      return {
-        matches: true,
-        classification,
-        selectedLevels,
-        mode,
-        includeUnspecified,
-        matchedLevel: classification.inferredLevel,
-        explanation: `Matched inferred experience level "${classification.inferredLevel}" with ${classification.confidence} confidence.`,
-      };
-    }
-  }
-
-  if (includeUnspecified && classification.isUnspecified) {
-    return {
-      matches: true,
-      classification,
-      selectedLevels,
-      mode,
-      includeUnspecified,
-      explanation: "Allowed an unspecified experience level for this search.",
-    };
-  }
-
-  const resolvedLevel = classification.explicitLevel ?? classification.inferredLevel;
-  const reasons = classification.reasons.filter(Boolean).join(" ");
-
-  return {
-    matches: false,
+  const decision = evaluateStoredExperienceMatch({
     classification,
     selectedLevels,
     mode,
     includeUnspecified,
-    matchedLevel: resolvedLevel,
-    explanation: classification.isUnspecified
-      ? "Rejected because the role did not provide a usable experience level and unspecified levels are not allowed."
-      : `Rejected experience level "${resolvedLevel}" for selected levels ${selectedLevels.join(", ")}.${reasons ? ` ${reasons}` : ""}`,
+  });
+
+  return {
+    matches: decision.matches,
+    classification,
+    selectedLevels,
+    mode,
+    includeUnspecified,
+    matchedLevel: decision.matchedLevel,
+    explanation: decision.explanation,
   };
 }
 
@@ -1029,36 +1039,26 @@ function resolveExplicitExperienceClassification(input: {
       input.explicitExperienceReasons?.filter(Boolean) ?? [
         "Provider supplied an explicit experience level.",
       ];
-    return {
+    return buildStructuredExperienceClassification({
       explicitLevel: input.explicitExperienceLevel,
       confidence: "high",
       source: input.explicitExperienceSource ?? "structured_metadata",
       reasons,
-      isUnspecified: false,
-      diagnostics: buildExperienceClassificationDiagnostics({
-        title: input.title,
-        finalSeniority: input.explicitExperienceLevel,
-        rationale: reasons,
-      }),
-    } satisfies ExperienceClassification;
+      title: input.title,
+    });
   }
 
   const titleSignals = inferExperienceSignalsFromTitle(input.title);
   const titleSignal = selectBestExperienceSignal(titleSignals);
   return titleSignal
-    ? {
+    ? buildStructuredExperienceClassification({
         explicitLevel: titleSignal.level,
         confidence: titleSignal.confidence,
         source: titleSignal.source,
         reasons: buildClassificationRationale(titleSignal, titleSignals),
-        isUnspecified: false,
-        diagnostics: buildExperienceClassificationDiagnostics({
-          title: input.title,
-          matchedSignals: titleSignals,
-          finalSeniority: titleSignal.level,
-          rationale: buildClassificationRationale(titleSignal, titleSignals),
-        }),
-      }
+        title: input.title,
+        matchedSignals: titleSignals,
+      })
     : undefined;
 }
 
@@ -1068,23 +1068,18 @@ function classificationFromSignal(
   allSignals: ExperienceSignal[] = [signal],
 ): ExperienceClassification {
   const rationale = buildClassificationRationale(signal, allSignals);
-  return {
+  return buildStructuredExperienceClassification({
     inferredLevel: signal.level,
     confidence: signal.confidence,
     source: signal.source,
     reasons: rationale,
-    isUnspecified: false,
-    diagnostics: buildExperienceClassificationDiagnostics({
-      title,
-      matchedSignals: allSignals,
-      finalSeniority: signal.level,
-      rationale,
-    }),
-  };
+    title,
+    matchedSignals: allSignals,
+  });
 }
 
 function selectExperienceLevel(classification: ExperienceClassification) {
-  return classification.explicitLevel ?? classification.inferredLevel;
+  return resolveExperienceLevel(classification);
 }
 
 function inferExperienceSignalsFromTitle(title?: string) {
@@ -1282,6 +1277,29 @@ function dedupeExperienceSignals(signals: ExperienceSignal[]) {
 
 function selectBestExperienceSignal(signals: ExperienceSignal[]) {
   return [...signals].sort(compareExperienceSignals)[0];
+}
+
+function selectConservativeExperienceSignal(signals: ExperienceSignal[]) {
+  const best = selectBestExperienceSignal(signals);
+  if (!best) {
+    return undefined;
+  }
+
+  const corroboratingSignals = signals.filter(
+    (signal) =>
+      signal !== best &&
+      signal.level === best.level &&
+      signal.confidence === best.confidence,
+  );
+  const conflictingSignals = signals.filter(
+    (signal) =>
+      signal.level !== best.level &&
+      signal.confidence === best.confidence,
+  );
+
+  return conflictingSignals.length > 0 && corroboratingSignals.length === 0
+    ? undefined
+    : best;
 }
 
 function compareExperienceSignals(left: ExperienceSignal, right: ExperienceSignal) {

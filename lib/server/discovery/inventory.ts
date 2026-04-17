@@ -76,6 +76,7 @@ export const sourceInventoryRecordSchema = z.object({
   lastCrawledAt: z.string().datetime().optional(),
   lastSucceededAt: z.string().datetime().optional(),
   lastFailedAt: z.string().datetime().optional(),
+  nextEligibleAt: z.string().datetime().optional(),
 });
 
 export type SourceInventoryRecord = z.infer<typeof sourceInventoryRecordSchema>;
@@ -234,6 +235,7 @@ export function toSourceInventoryRecord(
     firstSeenAt: input.now,
     lastSeenAt: input.now,
     lastRefreshedAt: input.now,
+    nextEligibleAt: input.now,
   });
 }
 

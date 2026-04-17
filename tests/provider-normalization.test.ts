@@ -31,6 +31,10 @@ describe("provider normalization", () => {
     expect(job.city).toBe("San Francisco");
     expect(job.experienceLevel).toBe("senior");
     expect(job.experienceClassification).toMatchObject({
+      experienceVersion: 2,
+      experienceBand: "senior",
+      experienceSource: "title",
+      experienceConfidence: "high",
       explicitLevel: "senior",
       confidence: "high",
       source: "title",
@@ -63,6 +67,8 @@ describe("provider normalization", () => {
     expect(job.sourceCompanySlug).toBe("figma");
     expect(job.experienceLevel).toBe("junior");
     expect(job.experienceClassification).toMatchObject({
+      experienceBand: "entry",
+      experienceSource: "title",
       explicitLevel: "junior",
       source: "title",
     });
@@ -89,6 +95,9 @@ describe("provider normalization", () => {
     expect(job.remoteType).toBe("remote");
     expect(job.descriptionSnippet).toContain("Minimum qualifications");
     expect(job.experienceClassification).toMatchObject({
+      experienceBand: "senior",
+      experienceSource: "description",
+      experienceConfidence: "medium",
       inferredLevel: "senior",
       confidence: "medium",
       source: "description",
@@ -115,6 +124,8 @@ describe("provider normalization", () => {
     expect(job.sourceCompanySlug).toBe("notion");
     expect(job.experienceLevel).toBe("staff");
     expect(job.experienceClassification).toMatchObject({
+      experienceBand: "advanced",
+      experienceSource: "title",
       explicitLevel: "staff",
       source: "title",
     });

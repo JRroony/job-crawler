@@ -13,7 +13,32 @@ type PersistableTestJob = Omit<JobListing, "_id" | "crawlRunIds">;
 function createPersistableJob(
   overrides: Partial<PersistableTestJob> = {},
 ): PersistableTestJob {
+  const sourcePlatform = overrides.sourcePlatform ?? "greenhouse";
+  const sourceCompanySlug =
+    "sourceCompanySlug" in overrides ? overrides.sourceCompanySlug : "acme";
+  const sourceJobId = overrides.sourceJobId ?? "role-1";
+  const discoveredAt = overrides.discoveredAt ?? "2026-03-29T00:00:00.000Z";
+  const crawledAt = overrides.crawledAt ?? "2026-03-29T00:00:00.000Z";
+  const canonicalUrl =
+    "canonicalUrl" in overrides ? overrides.canonicalUrl : "https://example.com/jobs/1";
+  const resolvedUrl =
+    "resolvedUrl" in overrides
+      ? overrides.resolvedUrl
+      : "https://example.com/jobs/1/apply";
+  const applyUrl = overrides.applyUrl ?? "https://example.com/jobs/1/apply";
+  const normalizedSourceJobId = sourceJobId.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const canonicalJobKey =
+    overrides.canonicalJobKey ??
+    (sourceCompanySlug && normalizedSourceJobId
+      ? `platform:${sourcePlatform}:${sourceCompanySlug}:${normalizedSourceJobId}`
+      : canonicalUrl
+        ? `canonical_url:${canonicalUrl.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`
+        : resolvedUrl
+          ? `resolved_url:${resolvedUrl.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`
+          : `apply_url:${applyUrl.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`);
+
   return {
+    canonicalJobKey,
     title: "Software Engineer",
     company: "Acme",
     normalizedCompany: "acme",
@@ -27,39 +52,45 @@ function createPersistableJob(
     remoteType: "onsite",
     seniority: "mid",
     experienceLevel: "mid",
-    sourcePlatform: "greenhouse",
-    sourceCompanySlug: "acme",
-    sourceJobId: "role-1",
+    sourcePlatform,
+    sourceCompanySlug,
+    sourceJobId,
     sourceUrl: "https://example.com/jobs/1",
-    applyUrl: "https://example.com/jobs/1/apply",
-    resolvedUrl: "https://example.com/jobs/1/apply",
-    canonicalUrl: "https://example.com/jobs/1",
+    applyUrl,
+    resolvedUrl,
+    canonicalUrl,
     postingDate: "2026-03-20T00:00:00.000Z",
     postedAt: "2026-03-20T00:00:00.000Z",
-    discoveredAt: "2026-03-29T00:00:00.000Z",
-    crawledAt: "2026-03-29T00:00:00.000Z",
+    discoveredAt,
+    crawledAt,
     sponsorshipHint: "unknown",
     linkStatus: "valid",
-    lastValidatedAt: "2026-03-29T00:00:00.000Z",
+    lastValidatedAt: overrides.lastValidatedAt ?? crawledAt,
     rawSourceMetadata: {},
     sourceProvenance: [
       {
-        sourcePlatform: "greenhouse",
-        sourceJobId: "role-1",
+        sourcePlatform,
+        sourceJobId,
         sourceUrl: "https://example.com/jobs/1",
-        applyUrl: "https://example.com/jobs/1/apply",
-        resolvedUrl: "https://example.com/jobs/1/apply",
-        canonicalUrl: "https://example.com/jobs/1",
-        discoveredAt: "2026-03-29T00:00:00.000Z",
+    applyUrl,
+    resolvedUrl,
+    canonicalUrl,
+        discoveredAt,
         rawSourceMetadata: {},
       },
     ],
-    sourceLookupKeys: ["greenhouse:role-1"],
+    sourceLookupKeys: overrides.sourceLookupKeys ?? [`${sourcePlatform}:${sourceJobId}`],
+    firstSeenAt: overrides.firstSeenAt ?? discoveredAt,
+    lastSeenAt: overrides.lastSeenAt ?? crawledAt,
+    indexedAt: overrides.indexedAt ?? crawledAt,
+    isActive: overrides.isActive ?? true,
+    closedAt: overrides.closedAt,
     dedupeFingerprint: "fingerprint-1",
     companyNormalized: "acme",
     titleNormalized: "software engineer",
     locationNormalized: "san francisco california united states",
     contentFingerprint: "fingerprint-1",
+    contentHash: overrides.contentHash ?? `content-hash:${sourceJobId}`,
     ...overrides,
   };
 }
@@ -132,6 +163,31 @@ describe("JobCrawlerRepository", () => {
     const firstDelta = await repository.getJobsByCrawlRunAfterSequence(crawlRun._id, 0);
 
     expect(await repository.getCrawlRunDeliveryCursor(crawlRun._id)).toBe(1);
+    expect(firstDelta.cursor).toBe(1);
+    expect(firstDelta.jobs.map((job) => job._id)).toEqual([savedJob._id]);
+  });
+
+  it("records an indexed-job cursor for newly persisted jobs so active sessions can poll index deltas", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      {
+        title: "Software Engineer",
+      },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const crawlRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+    );
+
+    const [savedJob] = await repository.persistJobs(crawlRun._id, [
+      createPersistableJob(),
+    ]);
+
+    const firstDelta = await repository.getIndexedJobsAfterSequence(0);
+
+    expect(await repository.getIndexedJobDeliveryCursor()).toBe(1);
     expect(firstDelta.cursor).toBe(1);
     expect(firstDelta.jobs.map((job) => job._id)).toEqual([savedJob._id]);
   });
@@ -267,6 +323,34 @@ describe("JobCrawlerRepository", () => {
     const delta = await repository.getJobsBySearchSessionAfterSequence(searchSession._id, 1);
 
     expect(await repository.getSearchSessionDeliveryCursor(searchSession._id)).toBe(1);
+    expect(delta.cursor).toBe(1);
+    expect(delta.jobs).toEqual([]);
+  });
+
+  it("does not advance the indexed cursor when a later crawl run only rediscovers the same job", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      {
+        title: "Software Engineer",
+      },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const firstRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+    );
+    const secondRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-30T00:00:00.000Z",
+    );
+
+    await repository.persistJobs(firstRun._id, [createPersistableJob()]);
+    await repository.persistJobs(secondRun._id, [createPersistableJob()]);
+
+    const delta = await repository.getIndexedJobsAfterSequence(1);
+
+    expect(await repository.getIndexedJobDeliveryCursor()).toBe(1);
     expect(delta.cursor).toBe(1);
     expect(delta.jobs).toEqual([]);
   });
@@ -484,6 +568,153 @@ describe("JobCrawlerRepository", () => {
     expect(storedJobs[0].linkStatus).toBe("valid");
     expect(storedJobs[0].resolvedUrl).toBe("https://example.com/jobs/1/apply");
     expect(storedJobs[0].postedAt).toBe("2026-03-21T00:00:00.000Z");
+  });
+
+  it("persists repeated observations idempotently around canonicalJobKey", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      { title: "Software Engineer" },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const firstRun = await repository.createCrawlRun(search._id, "2026-03-29T00:00:00.000Z");
+    const secondRun = await repository.createCrawlRun(search._id, "2026-03-30T00:00:00.000Z");
+
+    await repository.persistJobs(firstRun._id, [createPersistableJob()]);
+    const [savedAgain] = await repository.persistJobs(secondRun._id, [
+      createPersistableJob({
+        discoveredAt: "2026-03-30T00:00:00.000Z",
+        crawledAt: "2026-03-30T00:00:00.000Z",
+        lastSeenAt: "2026-03-30T00:00:00.000Z",
+        indexedAt: "2026-03-30T00:00:00.000Z",
+      }),
+    ]);
+
+    const storedJobs = db.snapshot<JobListing>(collectionNames.jobs);
+
+    expect(storedJobs).toHaveLength(1);
+    expect(savedAgain.canonicalJobKey).toBe("platform:greenhouse:acme:role 1");
+    expect(storedJobs[0]?.crawlRunIds).toEqual([firstRun._id, secondRun._id]);
+    expect(storedJobs[0]?.firstSeenAt).toBe("2026-03-29T00:00:00.000Z");
+    expect(storedJobs[0]?.lastSeenAt).toBe("2026-03-30T00:00:00.000Z");
+    expect(storedJobs[0]?.indexedAt).toBe("2026-03-30T00:00:00.000Z");
+    expect(storedJobs[0]?.isActive).toBe(true);
+  });
+
+  it("merges richer later observations while preserving lineage and lifecycle fields", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      { title: "Software Engineer" },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const firstRun = await repository.createCrawlRun(search._id, "2026-03-29T00:00:00.000Z");
+    const secondRun = await repository.createCrawlRun(search._id, "2026-03-30T00:00:00.000Z");
+
+    await repository.persistJobs(firstRun._id, [
+      createPersistableJob({
+        resolvedUrl: undefined,
+        linkStatus: "unknown",
+        lastValidatedAt: undefined,
+        sourceLookupKeys: ["greenhouse:role-1"],
+      }),
+    ]);
+
+    const [merged] = await repository.persistJobs(secondRun._id, [
+      createPersistableJob({
+        discoveredAt: "2026-03-30T00:00:00.000Z",
+        crawledAt: "2026-03-30T00:00:00.000Z",
+        descriptionSnippet: "Build retrieval infrastructure.",
+        sourceLookupKeys: ["greenhouse:role-1", "greenhouse:acme:role-1"],
+        sourceProvenance: [
+          {
+            sourcePlatform: "greenhouse",
+            sourceJobId: "role-1",
+            sourceUrl: "https://example.com/jobs/1",
+            applyUrl: "https://example.com/jobs/1/apply",
+            resolvedUrl: "https://example.com/jobs/1/apply",
+            canonicalUrl: "https://example.com/jobs/1",
+            discoveredAt: "2026-03-30T00:00:00.000Z",
+            rawSourceMetadata: { recoveredFrom: "detail-url" },
+          },
+          {
+            sourcePlatform: "greenhouse",
+            sourceJobId: "role-1-alt",
+            sourceUrl: "https://boards.greenhouse.io/acme",
+            applyUrl: "https://example.com/jobs/1/apply",
+            canonicalUrl: "https://example.com/jobs/1",
+            discoveredAt: "2026-03-30T00:00:00.000Z",
+            rawSourceMetadata: { recoveredSource: true },
+          },
+        ],
+      }),
+    ]);
+
+    expect(merged.descriptionSnippet).toBe("Build retrieval infrastructure.");
+    expect(merged.sourceLookupKeys).toEqual(["greenhouse:role-1", "greenhouse:acme:role-1"]);
+    expect(merged.sourceProvenance).toHaveLength(2);
+    expect(merged.crawlRunIds).toEqual([firstRun._id, secondRun._id]);
+    expect(merged.firstSeenAt).toBe("2026-03-29T00:00:00.000Z");
+    expect(merged.lastSeenAt).toBe("2026-03-30T00:00:00.000Z");
+    expect(merged.indexedAt).toBe("2026-03-30T00:00:00.000Z");
+  });
+
+  it("uses a conservative fallback canonical identity when URL and scoped source ids are unavailable", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      { title: "Software Engineer" },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const crawlRun = await repository.createCrawlRun(search._id, "2026-03-29T00:00:00.000Z");
+
+    const [savedJob] = await repository.persistJobs(crawlRun._id, [
+      createPersistableJob({
+        sourceCompanySlug: undefined,
+        canonicalUrl: undefined,
+        resolvedUrl: undefined,
+        applyUrl: "https://example.com/apply/opaque",
+        sourceUrl: "https://example.com/source/opaque",
+        sourceLookupKeys: [],
+      }),
+    ]);
+
+    expect(savedJob.canonicalJobKey).toBe("apply_url:https example com apply opaque");
+  });
+
+  it("tracks lifecycle closures and reactivations on the same logical job", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      { title: "Software Engineer" },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const firstRun = await repository.createCrawlRun(search._id, "2026-03-29T00:00:00.000Z");
+    const secondRun = await repository.createCrawlRun(search._id, "2026-03-30T00:00:00.000Z");
+    const thirdRun = await repository.createCrawlRun(search._id, "2026-03-31T00:00:00.000Z");
+
+    await repository.persistJobs(firstRun._id, [createPersistableJob()]);
+    const [closed] = await repository.persistJobs(secondRun._id, [
+      createPersistableJob({
+        crawledAt: "2026-03-30T00:00:00.000Z",
+        discoveredAt: "2026-03-30T00:00:00.000Z",
+        isActive: false,
+        closedAt: "2026-03-30T00:00:00.000Z",
+      }),
+    ]);
+    const [reopened] = await repository.persistJobs(thirdRun._id, [
+      createPersistableJob({
+        crawledAt: "2026-03-31T00:00:00.000Z",
+        discoveredAt: "2026-03-31T00:00:00.000Z",
+        isActive: true,
+      }),
+    ]);
+
+    expect(closed.isActive).toBe(false);
+    expect(closed.closedAt).toBe("2026-03-30T00:00:00.000Z");
+    expect(reopened.isActive).toBe(true);
+    expect(reopened.closedAt).toBeUndefined();
+    expect(reopened.lastSeenAt).toBe("2026-03-31T00:00:00.000Z");
   });
 
   it("returns a unique saved job list when duplicate candidates collapse during the same persist batch", async () => {
@@ -1001,6 +1232,120 @@ describe("JobCrawlerRepository", () => {
     ]);
   });
 
+  it("backfills structured experience classification fields for legacy stored jobs", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+
+    await db.collection(collectionNames.jobs).insertOne({
+      _id: "job-legacy-experience",
+      title: "Software Engineer",
+      company: "Acme",
+      country: "United States",
+      locationText: "Remote, United States",
+      experienceClassification: {
+        inferredLevel: "staff",
+        confidence: "high",
+        source: "structured_metadata",
+        reasons: ["Detected staff markers in structured metadata."],
+        isUnspecified: false,
+        diagnostics: {
+          originalTitle: "Software Engineer",
+          normalizedTitle: "software engineer",
+          finalSeniority: "staff",
+          matchedSignals: [
+            {
+              ruleId: "title_staff_keyword",
+              signalType: "structured_hint",
+              source: "structured_metadata",
+              level: "staff",
+              confidence: "high",
+              matchedText: "SMTS",
+              rationale: "Detected staff markers in structured metadata: \"SMTS\".",
+            },
+          ],
+          rationale: ["Detected staff markers in structured metadata."],
+        },
+      },
+      sourcePlatform: "greenhouse",
+      sourceJobId: "role-legacy-experience",
+      sourceUrl: "https://example.com/jobs/legacy-experience",
+      applyUrl: "https://example.com/jobs/legacy-experience/apply",
+      discoveredAt: "2026-03-29T00:00:00.000Z",
+      crawledAt: "2026-03-29T00:00:00.000Z",
+      linkStatus: "unknown",
+      rawSourceMetadata: {},
+      sourceProvenance: [
+        {
+          sourcePlatform: "greenhouse",
+          sourceJobId: "role-legacy-experience",
+          sourceUrl: "https://example.com/jobs/legacy-experience",
+          applyUrl: "https://example.com/jobs/legacy-experience/apply",
+          discoveredAt: "2026-03-29T00:00:00.000Z",
+          rawSourceMetadata: {},
+        },
+      ],
+      sourceLookupKeys: ["greenhouse:role legacy experience"],
+      crawlRunIds: ["run-legacy"],
+      companyNormalized: "acme",
+      titleNormalized: "software engineer",
+      locationNormalized: "remote united states",
+      contentFingerprint: "fingerprint-legacy-experience",
+    });
+
+    const job = await repository.getJob("job-legacy-experience");
+
+    expect(job?.experienceClassification).toMatchObject({
+      experienceVersion: 2,
+      experienceBand: "advanced",
+      experienceSource: "structured_metadata",
+      experienceConfidence: "high",
+      inferredLevel: "staff",
+      source: "structured_metadata",
+      confidence: "high",
+      experienceSignals: [
+        expect.objectContaining({
+          ruleId: "title_staff_keyword",
+          level: "staff",
+        }),
+      ],
+    });
+  });
+
+  it("persists query-friendly title search facets for indexed retrieval", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      { title: "Product Manager" },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const crawlRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+    );
+
+    await repository.persistJobs(crawlRun._id, [
+      createPersistableJob({
+        title: "Senior Product Manager",
+        normalizedTitle: "senior product manager",
+        titleNormalized: "senior product manager",
+        sourceJobId: "search-facet-product-manager",
+        sourceUrl: "https://example.com/jobs/search-facet-product-manager",
+        applyUrl: "https://example.com/jobs/search-facet-product-manager/apply",
+        canonicalUrl: "https://example.com/jobs/search-facet-product-manager",
+      }),
+    ]);
+
+    const [job] = await repository.listJobs();
+
+    expect(job?.searchIndex).toMatchObject({
+      titleFamily: "product",
+      titleNormalized: "senior product manager",
+      titleStrippedNormalized: "product manager",
+      titleConceptIds: expect.arrayContaining(["product_manager"]),
+      titleSearchTerms: expect.arrayContaining(["product manager"]),
+    });
+  });
+
   it("creates the expected MongoDB indexes", async () => {
     const db = new FakeDb();
     await ensureDatabaseIndexes(db);
@@ -1008,6 +1353,9 @@ describe("JobCrawlerRepository", () => {
     expect(
       db.collection(collectionNames.jobs).indexes.map((index) => index.name),
     ).toContain("jobs_listing_by_run_and_sort");
+    expect(
+      db.collection(collectionNames.jobs).indexes.map((index) => index.name),
+    ).toContain("jobs_canonical_job_key");
     expect(
       db.collection(collectionNames.linkValidations).indexes.map((index) => index.name),
     ).toContain("linkValidations_applyUrl_checkedAt_desc");
@@ -1017,6 +1365,21 @@ describe("JobCrawlerRepository", () => {
     expect(
       db.collection(collectionNames.jobs).indexes.map((index) => index.name),
     ).toContain("jobs_source_url");
+    expect(
+      db.collection(collectionNames.jobs).indexes.map((index) => index.name),
+    ).toContain("jobs_lifecycle_activity_lastSeenAt_desc");
+    expect(
+      db.collection(collectionNames.jobs).indexes.map((index) => index.name),
+    ).toContain("jobs_search_active_platform_family_recent");
+    expect(
+      db.collection(collectionNames.jobs).indexes.map((index) => index.name),
+    ).toContain("jobs_search_title_concepts_active_recent");
+    expect(
+      db.collection(collectionNames.jobs).indexes.map((index) => index.name),
+    ).toContain("jobs_search_location_activity_recent");
+    expect(
+      db.collection(collectionNames.jobs).indexes.map((index) => index.name),
+    ).toContain("jobs_search_experience_activity_recent");
     expect(
       db.collection(collectionNames.crawlRuns).indexes.map((index) => index.name),
     ).toContain("crawlRuns_validationMode_startedAt_desc");
@@ -1035,6 +1398,9 @@ describe("JobCrawlerRepository", () => {
     expect(
       db.collection(collectionNames.searchSessionJobEvents).indexes.map((index) => index.name),
     ).toContain("searchSessionJobEvents_session_sequence");
+    expect(
+      db.collection(collectionNames.indexedJobEvents).indexes.map((index) => index.name),
+    ).toContain("indexedJobEvents_sequence");
   });
 
   it("groups duplicate updates into a single bulk write instead of issuing per-job mutations", async () => {
@@ -1232,5 +1598,6 @@ describe("JobCrawlerRepository", () => {
       lastSucceededAt: recoveredAt,
       lastFailedAt: failedAt,
     });
+    expect(Date.parse(String(inventory[0]?.nextEligibleAt))).toBeGreaterThan(Date.parse(recoveredAt));
   });
 });

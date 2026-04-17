@@ -7,9 +7,16 @@ import {
 import { queueSearchRun } from "@/lib/server/crawler/background-runs";
 import { CrawlAbortedError, seedToPersistableJob } from "@/lib/server/crawler/pipeline";
 import { createId } from "@/lib/server/crawler/helpers";
-import { toDiscoveredSourceFromInventory } from "@/lib/server/discovery/inventory";
+import {
+  toDiscoveredSourceFromInventory,
+  type SourceInventoryRecord,
+} from "@/lib/server/discovery/inventory";
 import { getEnv } from "@/lib/server/env";
-import { refreshPersistentSourceInventory } from "@/lib/server/inventory/service";
+import {
+  planPersistentInventoryRecurringCrawl,
+  refreshPersistentSourceInventory,
+} from "@/lib/server/inventory/service";
+import { resolveObservedSourceNextEligibleAt } from "@/lib/server/inventory/selection";
 import { createDefaultProviders } from "@/lib/server/providers";
 import type { CrawlProvider } from "@/lib/server/providers/types";
 import type { JobCrawlerRepository } from "@/lib/server/db/repository";
@@ -29,6 +36,12 @@ type BackgroundIngestionRuntime = {
   intervalMs?: number;
   staleAfterMs?: number;
   runTimeoutMs?: number;
+  maxSources?: number;
+  schedulingIntervalMs?: number;
+  refreshInventory?: (runtime: {
+    repository: JobCrawlerRepository;
+    now: Date;
+  }) => Promise<SourceInventoryRecord[]>;
 };
 
 type BackgroundIngestionTriggerResult =
@@ -177,6 +190,12 @@ export async function triggerRecurringBackgroundIngestion(
           now,
           signal,
           runTimeoutMs: runtime.runTimeoutMs ?? env.BACKGROUND_INGESTION_RUN_TIMEOUT_MS,
+          maxSources: Math.max(1, Math.floor(runtime.maxSources ?? env.CRAWL_MAX_SOURCES)),
+          schedulingIntervalMs: Math.max(
+            1,
+            Math.floor(runtime.schedulingIntervalMs ?? env.BACKGROUND_INGESTION_INTERVAL_MS),
+          ),
+          refreshInventory: runtime.refreshInventory,
         },
       );
     },
@@ -212,6 +231,12 @@ async function executeRecurringInventoryIngestion(
     now: Date;
     signal?: AbortSignal;
     runTimeoutMs: number;
+    maxSources: number;
+    schedulingIntervalMs: number;
+    refreshInventory?: (runtime: {
+      repository: JobCrawlerRepository;
+      now: Date;
+    }) => Promise<SourceInventoryRecord[]>;
   },
 ) {
   const repository = runtime.repository;
@@ -220,6 +245,7 @@ async function executeRecurringInventoryIngestion(
   const sourceResults: CrawlSourceResult[] = [];
   const providerTimings: CrawlDiagnostics["performance"]["providerTimingsMs"] = [];
   const startMs = Date.now();
+  const startedAtMs = runtime.now.getTime();
   const timeoutController = new AbortController();
   const timeoutHandle = setTimeout(() => {
     timeoutController.abort(
@@ -240,6 +266,7 @@ async function executeRecurringInventoryIngestion(
   let totalFetchedJobs = 0;
   let totalMatchedJobs = 0;
   let totalSavedJobs = 0;
+  const runTimestamp = () => new Date(startedAtMs + Math.max(0, Date.now() - startMs)).toISOString();
 
   try {
     await repository.updateCrawlRunProgress(target.crawlRunId, {
@@ -255,16 +282,35 @@ async function executeRecurringInventoryIngestion(
 
     const discoveryStartedMs = Date.now();
     await runController.throwIfCanceled();
-    const inventory = await refreshPersistentSourceInventory({
+    const inventory = await (runtime.refreshInventory ?? refreshPersistentSourceInventory)({
       repository,
       now: runtime.now,
     });
     diagnostics.discoveredSources = inventory.length;
     diagnostics.performance.stageTimingsMs.discovery = Date.now() - discoveryStartedMs;
+    const selectionPlan = planPersistentInventoryRecurringCrawl({
+      inventory,
+      providers,
+      now: runtime.now,
+      maxSources: runtime.maxSources,
+      intervalMs: runtime.schedulingIntervalMs,
+    });
+    diagnostics.inventoryScheduling = selectionPlan.diagnostics;
+    const selectedRecordById = new Map(
+      selectionPlan.selectedRecords.map((record) => [record._id, record] as const),
+    );
+    const inventorySources = selectionPlan.selectedRecords.map(toDiscoveredSourceFromInventory);
 
-    const inventorySources = inventory
-      .map(toDiscoveredSourceFromInventory)
-      .slice(0, getEnv().CRAWL_MAX_SOURCES);
+    console.info("[background-ingestion:source-selection]", {
+      inventorySources: selectionPlan.diagnostics.inventorySources,
+      crawlableSources: selectionPlan.diagnostics.crawlableSources,
+      eligibleSources: selectionPlan.diagnostics.eligibleSources,
+      selectedSources: selectionPlan.diagnostics.selectedSources,
+      skippedByReason: selectionPlan.diagnostics.skippedByReason,
+      freshnessBuckets: selectionPlan.diagnostics.freshnessBuckets,
+      selectedByPlatform: selectionPlan.diagnostics.selectedByPlatform,
+      selectedByHealth: selectionPlan.diagnostics.selectedByHealth,
+    });
 
     await repository.updateCrawlRunProgress(target.crawlRunId, {
       status: "running",
@@ -280,7 +326,7 @@ async function executeRecurringInventoryIngestion(
       target.search._id,
       target.crawlRunId,
       "running",
-      new Date().toISOString(),
+      runTimestamp(),
     );
 
     for (const provider of providers) {
@@ -293,7 +339,7 @@ async function executeRecurringInventoryIngestion(
 
       diagnostics.providersEnqueued += 1;
       diagnostics.crawledSources += providerSources.length;
-      const providerStartedAt = new Date().toISOString();
+      const providerStartedAt = runTimestamp();
       const providerStartedMs = Date.now();
 
       try {
@@ -321,7 +367,7 @@ async function executeRecurringInventoryIngestion(
         diagnostics.dedupedOut = Math.max(0, diagnostics.jobsBeforeDedupe - diagnostics.jobsAfterDedupe);
         diagnostics.performance.persistenceBatchCount += 1;
 
-        const finishedAt = new Date().toISOString();
+        const finishedAt = runTimestamp();
         const sourceResult = createSourceResult({
           crawlRunId: target.crawlRunId,
           searchId: target.search._id,
@@ -343,8 +389,29 @@ async function executeRecurringInventoryIngestion(
             sourceId: source.id,
             observedAt: finishedAt,
             succeeded: result.status === "success" || result.status === "partial",
-            health: result.status === "failed" ? "degraded" : "healthy",
+            health:
+              result.status === "failed"
+                ? "failing"
+                : result.status === "partial"
+                  ? "degraded"
+                  : "healthy",
             lastFailureReason: result.status === "failed" ? result.errorMessage : undefined,
+            nextEligibleAt: resolveObservedSourceNextEligibleAt({
+              record: selectedRecordById.get(source.id) ?? inventory.find((record) => record._id === source.id)!,
+              observedAt: finishedAt,
+              intervalMs: runtime.schedulingIntervalMs,
+              health:
+                result.status === "failed"
+                  ? "failing"
+                  : result.status === "partial"
+                    ? "degraded"
+                    : "healthy",
+              consecutiveFailures:
+                result.status === "failed"
+                  ? (selectedRecordById.get(source.id)?.consecutiveFailures ?? 0) + 1
+                  : 0,
+              succeeded: result.status === "success" || result.status === "partial",
+            }),
           })),
         );
 
@@ -360,7 +427,7 @@ async function executeRecurringInventoryIngestion(
           diagnostics.providerFailures += 1;
         }
 
-        const finishedAt = new Date().toISOString();
+        const finishedAt = runTimestamp();
         const sourceResult = createSourceResult({
           crawlRunId: target.crawlRunId,
           searchId: target.search._id,
@@ -382,9 +449,17 @@ async function executeRecurringInventoryIngestion(
             sourceId: source.id,
             observedAt: finishedAt,
             succeeded: false,
-            health: "degraded",
+            health: "failing",
             lastFailureReason:
               error instanceof Error ? error.message : "Provider crawl failed unexpectedly.",
+            nextEligibleAt: resolveObservedSourceNextEligibleAt({
+              record: selectedRecordById.get(source.id) ?? inventory.find((record) => record._id === source.id)!,
+              observedAt: finishedAt,
+              intervalMs: runtime.schedulingIntervalMs,
+              health: "failing",
+              consecutiveFailures: (selectedRecordById.get(source.id)?.consecutiveFailures ?? 0) + 1,
+              succeeded: false,
+            }),
           })),
         );
 
@@ -408,7 +483,7 @@ async function executeRecurringInventoryIngestion(
     diagnostics.performance.stageTimingsMs.total = Date.now() - startMs;
     diagnostics.performance.progressUpdateCount = 2;
     diagnostics.performance.providerTimingsMs = providerTimings;
-    const finishedAt = new Date().toISOString();
+    const finishedAt = runTimestamp();
     const status = resolveFinalStatus(sourceResults, totalSavedJobs);
 
     await finalizeBackgroundRun({
@@ -427,7 +502,7 @@ async function executeRecurringInventoryIngestion(
   } catch (error) {
     diagnostics.performance.stageTimingsMs.total = Date.now() - startMs;
     diagnostics.performance.providerTimingsMs = providerTimings;
-    const finishedAt = new Date().toISOString();
+    const finishedAt = runTimestamp();
     const aborted = error instanceof Error && error.name === "AbortError";
 
     await finalizeBackgroundRun({
@@ -708,6 +783,18 @@ function createEmptyDiagnostics(): CrawlDiagnostics {
     excludedByExperience: 0,
     dedupedOut: 0,
     validationDeferred: 0,
+    inventoryScheduling: {
+      inventorySources: 0,
+      crawlableSources: 0,
+      eligibleSources: 0,
+      selectedSources: 0,
+      skippedByReason: {},
+      freshnessBuckets: {},
+      selectedByPlatform: {},
+      selectedByHealth: {},
+      selectedSourceIds: [],
+      skippedSourceSamples: [],
+    },
     performance: {
       stageTimingsMs: {
         discovery: 0,

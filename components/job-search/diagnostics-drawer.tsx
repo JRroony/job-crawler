@@ -21,6 +21,7 @@ type DiagnosticsDrawerProps = {
 
 export function DiagnosticsDrawer(props: DiagnosticsDrawerProps) {
   const sourceResults = props.activeResult?.sourceResults ?? [];
+  const sessionDiagnostics = props.activeResult?.diagnostics.session;
 
   return (
     <details className="group rounded-[20px] border border-ink/8 bg-white/92 px-5 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.05)]">
@@ -151,6 +152,22 @@ export function DiagnosticsDrawer(props: DiagnosticsDrawerProps) {
               </div>
               <div className="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <StatCard
+                  label="Indexed visible"
+                  value={`${sessionDiagnostics?.indexedResultsCount ?? 0}`}
+                />
+                <StatCard
+                  label="Supplemental visible"
+                  value={`${sessionDiagnostics?.supplementalResultsCount ?? 0}`}
+                />
+                <StatCard
+                  label="Supplemental status"
+                  value={describeSupplementalStatus(sessionDiagnostics)}
+                />
+                <StatCard
+                  label="Trigger"
+                  value={describeSupplementalReason(sessionDiagnostics?.triggerReason)}
+                />
+                <StatCard
                   label="Discovered sources"
                   value={`${props.activeResult.diagnostics.discoveredSources}`}
                 />
@@ -167,6 +184,11 @@ export function DiagnosticsDrawer(props: DiagnosticsDrawerProps) {
                   value={`${props.activeResult.diagnostics.validationDeferred}`}
                 />
               </div>
+              {sessionDiagnostics?.triggerExplanation ? (
+                <p className="mt-3 text-sm leading-6 text-slate">
+                  {sessionDiagnostics.triggerExplanation}
+                </p>
+              ) : null}
             </div>
 
             {sourceResults.length > 0 ? (
@@ -246,4 +268,44 @@ function StatCard(props: { label: string; value: string }) {
       <div className="mt-2 text-sm font-medium leading-6 text-ink">{props.value}</div>
     </div>
   );
+}
+
+function describeSupplementalStatus(
+  sessionDiagnostics: CrawlResponse["diagnostics"]["session"] | undefined,
+) {
+  if (sessionDiagnostics?.supplementalRunning) {
+    return "running";
+  }
+
+  if (sessionDiagnostics?.supplementalQueued) {
+    return "complete";
+  }
+
+  return "not queued";
+}
+
+function describeSupplementalReason(
+  reason: NonNullable<CrawlResponse["diagnostics"]["session"]>["triggerReason"] | undefined,
+) {
+  if (reason === "indexed_coverage_sufficient") {
+    return "strong index";
+  }
+
+  if (reason === "reused_completed_coverage") {
+    return "reused coverage";
+  }
+
+  if (reason === "freshness_recovery") {
+    return "freshness";
+  }
+
+  if (reason === "retry_incomplete_previous_run") {
+    return "retry incomplete";
+  }
+
+  if (reason === "insufficient_indexed_coverage") {
+    return "coverage gap";
+  }
+
+  return "n/a";
 }

@@ -108,6 +108,17 @@ export const experienceInferenceConfidenceSchema = z.enum(
   experienceInferenceConfidences,
 );
 
+export const experienceBands = [
+  "unknown",
+  "entry",
+  "mid",
+  "senior",
+  "leadership",
+  "advanced",
+] as const;
+
+export const experienceBandSchema = z.enum(experienceBands);
+
 export const experienceClassificationSources = [
   "title",
   "structured_metadata",
@@ -146,6 +157,8 @@ export const experienceClassificationDiagnosticsSchema = z.object({
   matchedSignals: z.array(experienceClassificationSignalSchema).default([]),
   rationale: z.array(z.string().min(1)).default([]),
 });
+
+export const experienceClassificationVersion = 2;
 
 export const experienceMatchModes = ["strict", "balanced", "broad"] as const;
 
@@ -258,10 +271,17 @@ export function resolveOperationalCrawlerPlatforms(
 }
 
 export const experienceClassificationSchema = z.object({
+  experienceVersion: z.number().int().positive().default(
+    experienceClassificationVersion,
+  ),
+  experienceBand: experienceBandSchema.default("unknown"),
+  experienceSource: experienceClassificationSourceSchema.default("unknown"),
+  experienceConfidence: experienceInferenceConfidenceSchema.default("none"),
+  experienceSignals: z.array(experienceClassificationSignalSchema).default([]),
   explicitLevel: experienceLevelSchema.optional(),
   inferredLevel: experienceLevelSchema.optional(),
-  confidence: experienceInferenceConfidenceSchema,
-  source: experienceClassificationSourceSchema,
+  confidence: experienceInferenceConfidenceSchema.default("none"),
+  source: experienceClassificationSourceSchema.default("unknown"),
   reasons: z.array(z.string().min(1)).default([]),
   isUnspecified: z.boolean(),
   diagnostics: experienceClassificationDiagnosticsSchema.optional(),
@@ -400,6 +420,48 @@ export const crawlDiagnosticsSchema = z.object({
   excludedByExperience: z.number().int().nonnegative().default(0),
   dedupedOut: z.number().int().nonnegative().default(0),
   validationDeferred: z.number().int().nonnegative().default(0),
+  inventoryScheduling: z
+    .object({
+      inventorySources: z.number().int().nonnegative().default(0),
+      crawlableSources: z.number().int().nonnegative().default(0),
+      eligibleSources: z.number().int().nonnegative().default(0),
+      selectedSources: z.number().int().nonnegative().default(0),
+      skippedByReason: z.record(z.string(), z.number().int().nonnegative()).default({}),
+      freshnessBuckets: z.record(z.string(), z.number().int().nonnegative()).default({}),
+      selectedByPlatform: z.record(z.string(), z.number().int().nonnegative()).default({}),
+      selectedByHealth: z.record(z.string(), z.number().int().nonnegative()).default({}),
+      selectedSourceIds: z.array(z.string().min(1)).max(12).default([]),
+      skippedSourceSamples: z.array(z.string().min(1)).max(12).default([]),
+    })
+    .optional(),
+  session: z
+    .object({
+      indexedResultsCount: z.number().int().nonnegative().default(0),
+      initialIndexedResultsCount: z.number().int().nonnegative().optional(),
+      supplementalResultsCount: z.number().int().nonnegative().default(0),
+      totalVisibleResultsCount: z.number().int().nonnegative().default(0),
+      indexedCandidateCount: z.number().int().nonnegative().default(0),
+      minimumIndexedCoverage: z.number().int().nonnegative().default(0),
+      targetJobCount: z.number().int().nonnegative().default(0),
+      supplementalQueued: z.boolean().default(false),
+      supplementalRunning: z.boolean().default(false),
+      triggerReason: z
+        .enum([
+          "indexed_coverage_sufficient",
+          "reused_completed_coverage",
+          "insufficient_indexed_coverage",
+          "freshness_recovery",
+          "retry_incomplete_previous_run",
+        ])
+        .optional(),
+      triggerExplanation: nullableOptional(z.string()),
+      reusedExistingSearch: z.boolean().optional(),
+      previousVisibleJobCount: z.number().int().nonnegative().optional(),
+      previousRunStatus: nullableOptional(crawlRunStatusSchema),
+      previousFinishedAt: nullableOptional(z.string().datetime()),
+      latestIndexedJobAgeMs: nullableOptional(z.number().int().nonnegative()),
+    })
+    .optional(),
   performance: z
     .object({
       timeToFirstVisibleResultMs: nullableOptional(z.number().nonnegative()),
@@ -661,9 +723,19 @@ export const resolvedLocationSchema = z.object({
   evidence: z.array(resolvedLocationEvidenceSchema).default([]),
 });
 
+export const jobSearchIndexSchema = z.object({
+  titleNormalized: z.string().min(1),
+  titleStrippedNormalized: z.string().min(1),
+  titleFamily: z.string().min(1).optional(),
+  titleRoleGroup: z.string().min(1).optional(),
+  titleConceptIds: z.array(z.string().min(1)).default([]),
+  titleSearchTerms: z.array(z.string().min(1)).default([]),
+});
+
 // Canonical job-search entity. Keep this aligned with docs/normalized-job-model.md.
 export const jobListingSchema = z.object({
   _id: z.string().min(1),
+  canonicalJobKey: z.string().min(1),
   title: z.string().min(1),
   company: z.string().min(1),
   normalizedCompany: z.string().min(1),
@@ -700,11 +772,18 @@ export const jobListingSchema = z.object({
   sourceProvenance: z.array(sourceProvenanceSchema).default([]),
   sourceLookupKeys: z.array(z.string().min(1)).default([]),
   crawlRunIds: z.array(z.string().min(1)).default([]),
+  firstSeenAt: z.string().datetime(),
+  lastSeenAt: z.string().datetime(),
+  indexedAt: z.string().datetime(),
+  isActive: z.boolean().default(true),
+  closedAt: z.string().datetime().optional(),
+  searchIndex: jobSearchIndexSchema.optional(),
   dedupeFingerprint: z.string().min(1),
   companyNormalized: z.string().min(1),
   titleNormalized: z.string().min(1),
   locationNormalized: z.string().min(1),
   contentFingerprint: z.string().min(1),
+  contentHash: z.string().min(1),
 });
 
 export const persistableJobSchema = jobListingSchema.omit({
@@ -814,6 +893,14 @@ export const searchSessionJobEventSchema = z.object({
   createdAt: z.string().datetime(),
 });
 
+export const indexedJobEventSchema = z.object({
+  _id: z.string().min(1),
+  jobId: z.string().min(1),
+  crawlRunId: z.string().min(1),
+  sequence: z.number().int().nonnegative(),
+  createdAt: z.string().datetime(),
+});
+
 export const linkValidationResultSchema = z.object({
   _id: z.string().min(1),
   jobId: z.string().min(1),
@@ -856,6 +943,7 @@ export const crawlResponseSchema = z.object({
   delivery: z.object({
     mode: z.literal("full"),
     cursor: z.number().int().nonnegative(),
+    indexedCursor: z.number().int().nonnegative().optional(),
   }).optional(),
 });
 
@@ -870,12 +958,18 @@ export const crawlDeltaResponseSchema = z.object({
     mode: z.literal("delta"),
     cursor: z.number().int().nonnegative(),
     previousCursor: z.number().int().nonnegative(),
+    indexedCursor: z.number().int().nonnegative().optional(),
+    previousIndexedCursor: z.number().int().nonnegative().optional(),
   }),
 });
 
 export type ExperienceLevel = z.infer<typeof experienceLevelSchema>;
+export type ExperienceBand = z.infer<typeof experienceBandSchema>;
 export type ExperienceInferenceConfidence = z.infer<
   typeof experienceInferenceConfidenceSchema
+>;
+export type ExperienceClassificationSource = z.infer<
+  typeof experienceClassificationSourceSchema
 >;
 export type ExperienceClassification = z.infer<
   typeof experienceClassificationSchema
@@ -900,6 +994,7 @@ export type ResolvedLocationEvidence = z.infer<
   typeof resolvedLocationEvidenceSchema
 >;
 export type ResolvedLocation = z.infer<typeof resolvedLocationSchema>;
+export type JobSearchIndex = z.infer<typeof jobSearchIndexSchema>;
 export type JobListing = z.infer<typeof jobListingSchema>;
 export type PersistableJobDocument = z.infer<typeof persistableJobSchema>;
 export type SearchDocument = z.infer<typeof searchDocumentSchema>;
@@ -909,6 +1004,7 @@ export type CrawlControlDocument = z.infer<typeof crawlControlDocumentSchema>;
 export type CrawlQueueDocument = z.infer<typeof crawlQueueDocumentSchema>;
 export type CrawlSourceResult = z.infer<typeof crawlSourceResultSchema>;
 export type SearchSessionJobEvent = z.infer<typeof searchSessionJobEventSchema>;
+export type IndexedJobEvent = z.infer<typeof indexedJobEventSchema>;
 export type CrawlProviderSummary = z.infer<typeof crawlProviderSummarySchema>;
 export type LinkValidationResult = z.infer<typeof linkValidationResultSchema>;
 export type SourceProvenance = z.infer<typeof sourceProvenanceSchema>;

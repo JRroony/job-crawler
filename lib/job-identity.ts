@@ -5,6 +5,7 @@ type IdentityInput = Omit<
     JobListing,
     | "_id"
     | "sourcePlatform"
+    | "sourceCompanySlug"
     | "sourceJobId"
     | "sourceUrl"
     | "applyUrl"
@@ -29,6 +30,7 @@ type IdentityInput = Omit<
 
 export type CanonicalJobIdentity = {
   databaseId?: string;
+  canonicalJobKey: string;
   originalIdentifiers: {
     sourcePlatform: ProviderPlatform;
     sourceJobId: string;
@@ -42,6 +44,7 @@ export type CanonicalJobIdentity = {
     company: string;
     title: string;
     location: string;
+    boardToken?: string;
     platformJobKeys: string[];
     sourceUrl: string;
     applyUrl: string;
@@ -76,12 +79,17 @@ export function buildCanonicalJobIdentity(job: IdentityInput): CanonicalJobIdent
     job.normalizedLocation ??
     job.locationNormalized ??
     normalizeComparableIdentityText(job.locationRaw ?? job.locationText);
-  const fallbackFingerprint =
-    job.dedupeFingerprint ||
-    job.contentFingerprint ||
-    [normalizedCompany, normalizedTitle, normalizedLocation].filter(Boolean).join("|");
-  const platformJobKeys = buildPlatformJobKeys(job);
+  const boardToken = resolveBoardCompanyToken(job);
+  const fallbackFingerprint = buildConservativeFallbackFingerprint(job, {
+    normalizedCompany,
+    normalizedTitle,
+    normalizedLocation,
+    boardToken,
+  });
+  const platformJobKeys = buildPlatformJobKeys(job, boardToken);
+  const canonicalJobKey = buildCanonicalJobKey(job, boardToken, fallbackFingerprint);
   const strongKeys = collectUniqueStrings([
+    canonicalJobKey,
     job.canonicalUrl ? `canonical:${job.canonicalUrl}` : undefined,
     job.resolvedUrl ? `resolved:${job.resolvedUrl}` : undefined,
     job.applyUrl ? `apply:${job.applyUrl}` : undefined,
@@ -89,10 +97,11 @@ export function buildCanonicalJobIdentity(job: IdentityInput): CanonicalJobIdent
     ...platformJobKeys.map((key) => `platform_job:${key}`),
   ]);
   const weakKeys = fallbackFingerprint ? [`fallback:${fallbackFingerprint}`] : [];
-  const primaryKey = strongKeys[0] ?? weakKeys[0] ?? `database:${job._id ?? "unknown"}`;
+  const primaryKey = canonicalJobKey || weakKeys[0] || `database:${job._id ?? "unknown"}`;
 
   return {
     databaseId: job._id,
+    canonicalJobKey,
     originalIdentifiers: {
       sourcePlatform: job.sourcePlatform,
       sourceJobId: job.sourceJobId,
@@ -106,6 +115,7 @@ export function buildCanonicalJobIdentity(job: IdentityInput): CanonicalJobIdent
       company: normalizedCompany,
       title: normalizedTitle,
       location: normalizedLocation,
+      boardToken,
       platformJobKeys,
       sourceUrl: normalizeComparableIdentityText(job.sourceUrl),
       applyUrl: normalizeComparableIdentityText(job.applyUrl),
@@ -120,29 +130,131 @@ export function buildCanonicalJobIdentity(job: IdentityInput): CanonicalJobIdent
     strongKeys,
     weakKeys,
     primaryKey,
-    hasStrongIdentity: strongKeys.length > 0,
+    hasStrongIdentity: !canonicalJobKey.startsWith("fallback:"),
   };
 }
 
 export function buildStableJobRenderIdentity(job: IdentityInput) {
-  const identity = buildCanonicalJobIdentity(job);
-  return identity.primaryKey;
+  return buildCanonicalJobIdentity(job).canonicalJobKey;
 }
 
-function buildPlatformJobKeys(job: IdentityInput) {
+function buildCanonicalJobKey(
+  job: IdentityInput,
+  boardToken: string | undefined,
+  fallbackFingerprint: string,
+) {
+  const normalizedSourceJobId = normalizeComparableIdentityText(job.sourceJobId);
+
+  if (boardToken && normalizedSourceJobId) {
+    return `platform:${job.sourcePlatform}:${boardToken}:${normalizedSourceJobId}`;
+  }
+
+  if (job.canonicalUrl) {
+    return `canonical_url:${normalizeComparableIdentityText(job.canonicalUrl)}`;
+  }
+
+  if (job.resolvedUrl) {
+    return `resolved_url:${normalizeComparableIdentityText(job.resolvedUrl)}`;
+  }
+
+  if (job.applyUrl) {
+    return `apply_url:${normalizeComparableIdentityText(job.applyUrl)}`;
+  }
+
+  return `fallback:${fallbackFingerprint}`;
+}
+
+function buildPlatformJobKeys(job: IdentityInput, boardToken?: string) {
+  const normalizedSourceJobId = normalizeComparableIdentityText(job.sourceJobId);
+  const explicitPlatformKey =
+    boardToken && normalizedSourceJobId
+      ? `${job.sourcePlatform}:${boardToken}:${normalizedSourceJobId}`
+      : undefined;
   const lookupKeys = collectUniqueStrings(
     job.sourceLookupKeys.map((key) => normalizeComparableIdentityText(key)).filter(Boolean),
   );
-  if (lookupKeys.length > 0) {
-    return lookupKeys;
+
+  if (explicitPlatformKey || lookupKeys.length > 0) {
+    return collectUniqueStrings([explicitPlatformKey, ...lookupKeys]);
   }
 
-  const normalizedSourceJobId = normalizeComparableIdentityText(job.sourceJobId);
   if (!normalizedSourceJobId) {
     return [];
   }
 
   return [`${job.sourcePlatform}:${normalizedSourceJobId}`];
+}
+
+function buildConservativeFallbackFingerprint(
+  job: IdentityInput,
+  normalized: {
+    normalizedCompany: string;
+    normalizedTitle: string;
+    normalizedLocation: string;
+    boardToken?: string;
+  },
+) {
+  if (job.dedupeFingerprint) {
+    return normalizeComparableIdentityText(job.dedupeFingerprint);
+  }
+
+  if (job.contentFingerprint) {
+    return normalizeComparableIdentityText(job.contentFingerprint);
+  }
+
+  return [
+    normalizeComparableIdentityText(job.sourcePlatform),
+    normalized.boardToken,
+    normalized.normalizedCompany,
+    normalized.normalizedTitle,
+    normalized.normalizedLocation,
+    normalizeComparableIdentityText(job.sourceUrl),
+  ]
+    .filter(Boolean)
+    .join("|");
+}
+
+function resolveBoardCompanyToken(job: IdentityInput) {
+  const platform = normalizeComparableIdentityText(job.sourcePlatform);
+  for (const lookupKey of job.sourceLookupKeys) {
+    const segments = lookupKey
+      .split(":")
+      .map((segment) => normalizeComparableIdentityText(segment))
+      .filter(Boolean);
+
+    if (segments[0] !== platform) {
+      continue;
+    }
+
+    if (segments.length >= 3) {
+      return segments[1];
+    }
+  }
+
+  const slugToken = normalizeComparableIdentityText(job.sourceCompanySlug);
+  if (slugToken) {
+    return slugToken;
+  }
+
+  return extractNonNumericLastPathToken(job.sourceUrl) ?? extractNonNumericLastPathToken(job.applyUrl);
+}
+
+function extractNonNumericLastPathToken(value?: string) {
+  if (!value) {
+    return undefined;
+  }
+
+  const segments = value
+    .split(/[/?#]/)
+    .map((segment) => normalizeComparableIdentityText(segment))
+    .filter(Boolean);
+  const candidate = segments[segments.length - 1];
+
+  if (!candidate || /^\d+$/.test(candidate)) {
+    return undefined;
+  }
+
+  return candidate;
 }
 
 function collectUniqueStrings(values: Array<string | undefined>) {

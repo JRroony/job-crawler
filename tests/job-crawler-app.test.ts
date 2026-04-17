@@ -110,6 +110,7 @@ function createResult(
 function createTestJob(jobId: string): CrawlResponse["jobs"][number] {
   return {
     _id: jobId,
+    canonicalJobKey: `platform:greenhouse:acme:${jobId.toLowerCase()}`,
     title: "Software Engineer",
     normalizedTitle: "software engineer",
     company: "Acme",
@@ -136,8 +137,13 @@ function createTestJob(jobId: string): CrawlResponse["jobs"][number] {
     sourceLookupKeys: [`greenhouse:${jobId}`],
     sourceProvenance: [],
     crawlRunIds: ["run-1"],
+    firstSeenAt: "2026-03-30T12:00:00.000Z",
+    lastSeenAt: "2026-03-30T12:00:00.000Z",
+    indexedAt: "2026-03-30T12:00:00.000Z",
+    isActive: true,
     dedupeFingerprint: jobId,
     contentFingerprint: jobId,
+    contentHash: `content-hash:${jobId}`,
     linkStatus: "unknown",
   };
 }
@@ -584,6 +590,7 @@ describe("Progressive index-first search UI behavior", () => {
       delivery: {
         mode: "full" as const,
         cursor: 1,
+        indexedCursor: 7,
       },
     } satisfies CrawlResponse;
 
@@ -617,6 +624,8 @@ describe("Progressive index-first search UI behavior", () => {
         mode: "delta" as const,
         previousCursor: 1,
         cursor: 2,
+        previousIndexedCursor: 7,
+        indexedCursor: 8,
       },
     } satisfies CrawlDeltaResponse;
 
@@ -625,6 +634,7 @@ describe("Progressive index-first search UI behavior", () => {
     expect(merged.jobs).toHaveLength(1);
     expect(merged.searchSession?._id).toBe("session-1");
     expect(merged.delivery?.cursor).toBe(2);
+    expect(merged.delivery?.indexedCursor).toBe(8);
   });
 
   it("shouldApplyQueuedResultImmediately returns true when jobs are visible during running state", () => {

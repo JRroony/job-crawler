@@ -13,6 +13,10 @@ describe("experience classification", () => {
     });
 
     expect(classification).toMatchObject({
+      experienceVersion: 2,
+      experienceBand: "advanced",
+      experienceSource: "title",
+      experienceConfidence: "high",
       explicitLevel: "principal",
       confidence: "high",
       source: "title",
@@ -43,6 +47,9 @@ describe("experience classification", () => {
     });
 
     expect(classification).toMatchObject({
+      experienceBand: "advanced",
+      experienceSource: "structured_metadata",
+      experienceConfidence: "high",
       inferredLevel: "staff",
       confidence: "high",
       source: "structured_metadata",
@@ -62,6 +69,9 @@ describe("experience classification", () => {
     });
 
     expect(classification).toMatchObject({
+      experienceBand: "entry",
+      experienceSource: "description",
+      experienceConfidence: "medium",
       inferredLevel: "new_grad",
       confidence: "medium",
       source: "description",
@@ -125,6 +135,9 @@ describe("experience classification", () => {
     });
 
     expect(classification).toMatchObject({
+      experienceBand: "unknown",
+      experienceSource: "unknown",
+      experienceConfidence: "none",
       confidence: "none",
       source: "unknown",
       reasons: [],
@@ -144,6 +157,9 @@ describe("experience classification", () => {
     });
 
     expect(classification).toMatchObject({
+      experienceBand: "unknown",
+      experienceSource: "unknown",
+      experienceConfidence: "none",
       confidence: "none",
       source: "unknown",
       reasons: [],
@@ -161,6 +177,9 @@ describe("experience classification", () => {
     });
 
     expect(classification).toMatchObject({
+      experienceBand: "unknown",
+      experienceSource: "unknown",
+      experienceConfidence: "none",
       confidence: "none",
       source: "unknown",
       isUnspecified: true,
@@ -178,12 +197,34 @@ describe("experience classification", () => {
     });
 
     expect(classification).toMatchObject({
+      experienceBand: "advanced",
+      experienceSource: "unknown",
+      experienceConfidence: "high",
       explicitLevel: "principal",
       confidence: "high",
       source: "unknown",
       isUnspecified: false,
       diagnostics: {
         finalSeniority: "principal",
+      },
+    });
+  });
+
+  it("keeps conflicting weak inferred levels unknown instead of promoting the highest one", () => {
+    const classification = classifyExperience({
+      title: "Software Engineer",
+      structuredExperienceHints: ["Software Engineer L6 / L7"],
+    });
+
+    expect(classification).toMatchObject({
+      experienceBand: "unknown",
+      experienceSource: "unknown",
+      experienceConfidence: "none",
+      confidence: "none",
+      source: "unknown",
+      isUnspecified: true,
+      diagnostics: {
+        finalSeniority: "unknown",
       },
     });
   });

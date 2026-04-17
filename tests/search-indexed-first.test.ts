@@ -11,6 +11,7 @@ import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
 import type { CrawlProvider } from "@/lib/server/providers/types";
+import { getIndexedJobsForSearch } from "@/lib/server/search/indexed-jobs";
 import type { JobListing } from "@/lib/types";
 
 import { FakeDb } from "@/tests/helpers/fake-db";
@@ -34,11 +35,16 @@ function createPersistableJob(
   const canonicalUrl = overrides.canonicalUrl ?? "https://example.com/jobs/role-1";
   const applyUrl = overrides.applyUrl ?? `${canonicalUrl}/apply`;
   const sourceUrl = overrides.sourceUrl ?? canonicalUrl;
+  const sourcePlatform = overrides.sourcePlatform ?? "greenhouse";
+  const sourceCompanySlug = overrides.sourceCompanySlug ?? companyNormalized;
   const sourceJobId = overrides.sourceJobId ?? "role-1";
   const discoveredAt = overrides.discoveredAt ?? "2026-04-10T12:00:00.000Z";
   const crawledAt = overrides.crawledAt ?? discoveredAt;
 
   return {
+    canonicalJobKey:
+      overrides.canonicalJobKey ??
+      `platform:${sourcePlatform}:${sourceCompanySlug}:${sourceJobId.toLowerCase()}`,
     title,
     company,
     normalizedCompany: companyNormalized,
@@ -55,8 +61,8 @@ function createPersistableJob(
     seniority: overrides.seniority,
     experienceLevel: overrides.experienceLevel,
     experienceClassification: overrides.experienceClassification,
-    sourcePlatform: overrides.sourcePlatform ?? "greenhouse",
-    sourceCompanySlug: overrides.sourceCompanySlug ?? companyNormalized,
+    sourcePlatform,
+    sourceCompanySlug,
     sourceJobId,
     sourceUrl,
     applyUrl,
@@ -74,7 +80,7 @@ function createPersistableJob(
     rawSourceMetadata: overrides.rawSourceMetadata ?? {},
     sourceProvenance: overrides.sourceProvenance ?? [
       {
-        sourcePlatform: overrides.sourcePlatform ?? "greenhouse",
+        sourcePlatform,
         sourceJobId,
         sourceUrl,
         applyUrl,
@@ -85,13 +91,19 @@ function createPersistableJob(
       },
     ],
     sourceLookupKeys: overrides.sourceLookupKeys ?? [
-      `${overrides.sourcePlatform ?? "greenhouse"}:${sourceJobId.toLowerCase()}`,
+      `${sourcePlatform}:${sourceJobId.toLowerCase()}`,
     ],
+    firstSeenAt: overrides.firstSeenAt ?? discoveredAt,
+    lastSeenAt: overrides.lastSeenAt ?? crawledAt,
+    indexedAt: overrides.indexedAt ?? crawledAt,
+    isActive: overrides.isActive ?? true,
+    closedAt: overrides.closedAt,
     dedupeFingerprint: overrides.dedupeFingerprint ?? `dedupe:${sourceJobId}`,
     companyNormalized,
     titleNormalized,
     locationNormalized,
     contentFingerprint: overrides.contentFingerprint ?? `content:${sourceJobId}`,
+    contentHash: overrides.contentHash ?? `content-hash:${sourceJobId}`,
   };
 }
 
@@ -125,7 +137,7 @@ function createDiscovery(): DiscoveryService {
 
 async function seedIndexedJobs(
   repository: JobCrawlerRepository,
-  jobs: PersistableTestJob[],
+  jobs: readonly PersistableTestJob[],
 ) {
   const search = await repository.createSearch(
     {
@@ -138,9 +150,40 @@ async function seedIndexedJobs(
     "2026-04-10T12:00:00.000Z",
   );
 
-  await repository.persistJobs(crawlRun._id, jobs);
+  await repository.persistJobs(crawlRun._id, [...jobs]);
 
   return { search, crawlRun };
+}
+
+async function createActiveSearchState(
+  repository: JobCrawlerRepository,
+  filters: {
+    title: string;
+    country?: string;
+    platforms?: Array<"greenhouse" | "lever" | "ashby" | "workday">;
+  },
+  now = "2026-04-15T12:00:00.000Z",
+) {
+  const search = await repository.createSearch(filters, now);
+  const searchSession = await repository.createSearchSession(search._id, now, {
+    status: "running",
+  });
+  const crawlRun = await repository.createCrawlRun(search._id, now, {
+    searchSessionId: searchSession._id,
+    stage: "discovering",
+  });
+
+  await Promise.all([
+    repository.updateSearchLatestSession(search._id, searchSession._id, "running", now),
+    repository.updateSearchLatestRun(search._id, crawlRun._id, "running", now),
+    repository.updateSearchSession(searchSession._id, {
+      latestCrawlRunId: crawlRun._id,
+      status: "running",
+      updatedAt: now,
+    }),
+  ]);
+
+  return { search, searchSession, crawlRun };
 }
 
 describe("jobs-first indexed search", () => {
@@ -156,6 +199,10 @@ describe("jobs-first indexed search", () => {
         canonicalUrl: "https://example.com/jobs/indexed-primary",
         applyUrl: "https://example.com/jobs/indexed-primary/apply",
         sourceUrl: "https://example.com/jobs/indexed-primary",
+        postingDate: "2026-04-15T00:00:00.000Z",
+        discoveredAt: "2026-04-15T11:55:00.000Z",
+        crawledAt: "2026-04-15T11:55:00.000Z",
+        indexedAt: "2026-04-15T11:55:00.000Z",
       }),
     ]);
 
@@ -209,6 +256,14 @@ describe("jobs-first indexed search", () => {
     expect(initial.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
     expect(initial.jobs[0]?.rawSourceMetadata.indexedSearch).toMatchObject({
       source: "jobs_collection",
+    });
+    expect(initial.diagnostics.session).toMatchObject({
+      indexedResultsCount: 1,
+      supplementalResultsCount: 0,
+      totalVisibleResultsCount: 1,
+      supplementalQueued: true,
+      supplementalRunning: true,
+      triggerReason: "insufficient_indexed_coverage",
     });
 
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -303,9 +358,10 @@ describe("jobs-first indexed search", () => {
         canonicalUrl: "https://example.com/jobs/indexed-seattle",
         applyUrl: "https://example.com/jobs/indexed-seattle/apply",
         sourceUrl: "https://example.com/jobs/indexed-seattle",
-        postingDate: "2026-04-10T00:00:00.000Z",
-        discoveredAt: "2026-04-10T12:00:00.000Z",
-        crawledAt: "2026-04-10T12:00:00.000Z",
+        postingDate: "2026-04-15T00:00:00.000Z",
+        discoveredAt: "2026-04-15T11:58:00.000Z",
+        crawledAt: "2026-04-15T11:58:00.000Z",
+        indexedAt: "2026-04-15T11:58:00.000Z",
       }),
     ]);
 
@@ -348,6 +404,15 @@ describe("jobs-first indexed search", () => {
       source: "jobs_collection",
     });
     expect(started.result.delivery?.cursor).toBe(1);
+    expect(started.result.crawlRun.status).toBe("running");
+    expect(started.result.diagnostics.session).toMatchObject({
+      indexedResultsCount: 1,
+      supplementalResultsCount: 0,
+      totalVisibleResultsCount: 1,
+      supplementalQueued: true,
+      supplementalRunning: true,
+      triggerReason: "insufficient_indexed_coverage",
+    });
 
     const initialDelta = await getSearchJobDeltas(started.result.search._id, 1, {
       repository,
@@ -451,6 +516,14 @@ describe("jobs-first indexed search", () => {
     expect(started.result.crawlRun.status).toBe("completed");
     expect(started.result.delivery?.cursor).toBe(5);
     expect(started.result.jobs).toHaveLength(5);
+    expect(started.result.diagnostics.session).toMatchObject({
+      indexedResultsCount: 5,
+      supplementalResultsCount: 0,
+      totalVisibleResultsCount: 5,
+      supplementalQueued: false,
+      supplementalRunning: false,
+      triggerReason: "indexed_coverage_sufficient",
+    });
 
     const delta = await getSearchJobDeltas(
       started.result.search._id,
@@ -460,6 +533,176 @@ describe("jobs-first indexed search", () => {
 
     expect(delta.jobs).toEqual([]);
     expect(delta.delivery.cursor).toBe(5);
+  });
+
+  it("does not fall back to a full listJobs scan when priming indexed search results", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    await seedIndexedJobs(repository, [
+      createPersistableJob({
+        title: "Software Engineer",
+        locationText: "Remote - United States",
+        sourceJobId: "no-full-scan-match",
+        canonicalUrl: "https://example.com/jobs/no-full-scan-match",
+        applyUrl: "https://example.com/jobs/no-full-scan-match/apply",
+        sourceUrl: "https://example.com/jobs/no-full-scan-match",
+      }),
+      createPersistableJob({
+        title: "Product Manager",
+        locationText: "Remote - United States",
+        sourceJobId: "no-full-scan-noise",
+        canonicalUrl: "https://example.com/jobs/no-full-scan-noise",
+        applyUrl: "https://example.com/jobs/no-full-scan-noise/apply",
+        sourceUrl: "https://example.com/jobs/no-full-scan-noise",
+      }),
+    ]);
+
+    const listJobsSpy = vi.spyOn(repository, "listJobs");
+    const provider = createStubProvider("greenhouse", async () => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: 0,
+      fetchedCount: 0,
+      matchedCount: 0,
+      warningCount: 0,
+      jobs: [],
+    }));
+
+    const started = await startSearchFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery: createDiscovery(),
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now: new Date("2026-04-15T12:04:00.000Z"),
+      },
+    );
+
+    expect(listJobsSpy).not.toHaveBeenCalled();
+    expect(started.result.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
+  });
+
+  it("returns matching background-indexed jobs in delta responses for an active search session", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const active = await createActiveSearchState(repository, {
+      title: "Software Engineer",
+      country: "United States",
+      platforms: ["greenhouse"],
+    });
+    const initial = await getSearchDetails(active.search._id, { repository });
+    const backgroundRun = await repository.createCrawlRun(
+      active.search._id,
+      "2026-04-15T12:01:00.000Z",
+    );
+
+    await repository.persistJobs(backgroundRun._id, [
+      createPersistableJob({
+        title: "Senior Software Engineer",
+        sourceJobId: "background-match",
+        canonicalUrl: "https://example.com/jobs/background-match",
+        applyUrl: "https://example.com/jobs/background-match/apply",
+        sourceUrl: "https://example.com/jobs/background-match",
+        locationText: "Remote - United States",
+      }),
+    ]);
+
+    const delta = await getSearchJobDeltas(active.search._id, initial.delivery?.cursor ?? 0, {
+      repository,
+      afterIndexedCursor: initial.delivery?.indexedCursor ?? 0,
+      now: new Date("2026-04-15T12:01:00.000Z"),
+    });
+
+    expect(delta.jobs.map((job) => job.sourceJobId)).toEqual(["background-match"]);
+    expect(delta.delivery.cursor).toBe(initial.delivery?.cursor ?? 0);
+    expect(delta.delivery.indexedCursor).toBeGreaterThan(initial.delivery?.indexedCursor ?? 0);
+  });
+
+  it("does not leak non-matching background-indexed jobs into an active session delta", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const active = await createActiveSearchState(repository, {
+      title: "Software Engineer",
+      country: "United States",
+      platforms: ["greenhouse"],
+    });
+    const initial = await getSearchDetails(active.search._id, { repository });
+    const backgroundRun = await repository.createCrawlRun(
+      active.search._id,
+      "2026-04-15T12:02:00.000Z",
+    );
+
+    await repository.persistJobs(backgroundRun._id, [
+      createPersistableJob({
+        title: "Product Manager",
+        sourceJobId: "background-non-match",
+        canonicalUrl: "https://example.com/jobs/background-non-match",
+        applyUrl: "https://example.com/jobs/background-non-match/apply",
+        sourceUrl: "https://example.com/jobs/background-non-match",
+        locationText: "Remote - United States",
+      }),
+    ]);
+
+    const delta = await getSearchJobDeltas(active.search._id, initial.delivery?.cursor ?? 0, {
+      repository,
+      afterIndexedCursor: initial.delivery?.indexedCursor ?? 0,
+      now: new Date("2026-04-15T12:02:00.000Z"),
+    });
+
+    expect(delta.jobs).toEqual([]);
+    expect(delta.delivery.cursor).toBe(initial.delivery?.cursor ?? 0);
+    expect(delta.delivery.indexedCursor).toBeGreaterThan(initial.delivery?.indexedCursor ?? 0);
+  });
+
+  it("dedupes overlapping session and indexed deltas when background and active-session writes converge on the same job", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const active = await createActiveSearchState(repository, {
+      title: "Software Engineer",
+      country: "United States",
+      platforms: ["greenhouse"],
+    });
+    const initial = await getSearchDetails(active.search._id, { repository });
+    const backgroundRun = await repository.createCrawlRun(
+      active.search._id,
+      "2026-04-15T12:03:00.000Z",
+    );
+
+    await repository.persistJobs(backgroundRun._id, [
+      createPersistableJob({
+        title: "Software Engineer",
+        sourceJobId: "shared-active-background",
+        canonicalUrl: "https://example.com/jobs/shared-active-background",
+        applyUrl: "https://example.com/jobs/shared-active-background/apply",
+        sourceUrl: "https://example.com/jobs/shared-active-background",
+        locationText: "Remote - United States",
+      }),
+    ]);
+    await repository.persistJobs(
+      active.crawlRun._id,
+      [
+        createPersistableJob({
+          title: "Software Engineer",
+          sourceJobId: "shared-active-background",
+          canonicalUrl: "https://example.com/jobs/shared-active-background",
+          applyUrl: "https://example.com/jobs/shared-active-background/apply",
+          sourceUrl: "https://example.com/jobs/shared-active-background",
+          locationText: "Remote - United States",
+        }),
+      ],
+      { searchSessionId: active.searchSession._id },
+    );
+
+    const delta = await getSearchJobDeltas(active.search._id, initial.delivery?.cursor ?? 0, {
+      repository,
+      afterIndexedCursor: initial.delivery?.indexedCursor ?? 0,
+      now: new Date("2026-04-15T12:03:00.000Z"),
+    });
+
+    expect(delta.jobs).toHaveLength(1);
+    expect(delta.jobs[0]?.sourceJobId).toBe("shared-active-background");
+    expect(delta.delivery.cursor).toBe(1);
+    expect(delta.delivery.indexedCursor).toBeGreaterThan(initial.delivery?.indexedCursor ?? 0);
   });
 
   it("reuses persisted results for repeated identical searches instead of re-crawling sparse completed searches", async () => {
@@ -561,6 +804,292 @@ describe("jobs-first indexed search", () => {
       "Business Analyst",
       "Business Systems Analyst",
     ]);
+    expect(repeatedSearch.result.diagnostics.session).toMatchObject({
+      supplementalQueued: false,
+      supplementalRunning: false,
+      triggerReason: "reused_completed_coverage",
+    });
+  });
+
+  it("triggers bounded supplemental freshness recovery when sparse indexed coverage is stale", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    await seedIndexedJobs(repository, [
+      createPersistableJob({
+        title: "Data Analyst",
+        sourceJobId: "stale-data-analyst",
+        canonicalUrl: "https://example.com/jobs/stale-data-analyst",
+        applyUrl: "https://example.com/jobs/stale-data-analyst/apply",
+        sourceUrl: "https://example.com/jobs/stale-data-analyst",
+        locationText: "Remote - United States",
+        postingDate: "2026-03-01T00:00:00.000Z",
+        discoveredAt: "2026-03-01T12:00:00.000Z",
+        crawledAt: "2026-03-01T12:00:00.000Z",
+        indexedAt: "2026-03-01T12:00:00.000Z",
+      }),
+    ]);
+
+    const crawlSources: CrawlProvider["crawlSources"] = vi.fn(async () => ({
+      provider: "greenhouse" as const,
+      status: "success" as const,
+      sourceCount: 1,
+      fetchedCount: 1,
+      matchedCount: 1,
+      warningCount: 0,
+      jobs: [
+        {
+          title: "Senior Data Analyst",
+          company: "Acme",
+          country: "United States",
+          locationText: "Chicago, IL",
+          state: "Illinois",
+          city: "Chicago",
+          sourcePlatform: "greenhouse" as const,
+          sourceJobId: "fresh-data-analyst",
+          sourceUrl: "https://example.com/jobs/fresh-data-analyst",
+          applyUrl: "https://example.com/jobs/fresh-data-analyst/apply",
+          canonicalUrl: "https://example.com/jobs/fresh-data-analyst",
+          discoveredAt: "2026-04-15T12:00:00.000Z",
+          rawSourceMetadata: {},
+        },
+      ],
+    }));
+    const provider = createStubProvider("greenhouse", crawlSources);
+
+    const started = await startSearchFromFilters(
+      {
+        title: "Data Analyst",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery: createDiscovery(),
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now: new Date("2026-04-15T12:00:00.000Z"),
+        requestOwnerKey: "stale-data-analyst-recovery",
+      },
+    );
+
+    expect(started.queued).toBe(true);
+    expect(started.result.diagnostics.session).toMatchObject({
+      indexedResultsCount: 1,
+      supplementalResultsCount: 0,
+      totalVisibleResultsCount: 1,
+      supplementalQueued: true,
+      supplementalRunning: true,
+      triggerReason: "freshness_recovery",
+    });
+    expect(started.result.diagnostics.session?.latestIndexedJobAgeMs).toBeGreaterThan(0);
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const final = await getSearchDetails(started.result.search._id, {
+      repository,
+      now: new Date("2026-04-15T12:00:01.000Z"),
+    });
+
+    expect(final.jobs.map((job) => job.title)).toEqual(
+      expect.arrayContaining(["Data Analyst", "Senior Data Analyst"]),
+    );
+    expect(final.diagnostics.session).toMatchObject({
+      indexedResultsCount: 1,
+      supplementalResultsCount: 1,
+      totalVisibleResultsCount: 2,
+      supplementalQueued: true,
+      supplementalRunning: false,
+      triggerReason: "freshness_recovery",
+    });
+  });
+
+  it("serves representative United States searches from the index first without supplemental crawl when coverage is already strong", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const scenarios = [
+      {
+        title: "Software Engineer",
+        jobs: [
+          createPersistableJob({
+            title: "Software Engineer",
+            sourceJobId: "scenario-se-1",
+            canonicalUrl: "https://example.com/jobs/scenario-se-1",
+            applyUrl: "https://example.com/jobs/scenario-se-1/apply",
+            sourceUrl: "https://example.com/jobs/scenario-se-1",
+            locationText: "Remote - United States",
+          }),
+          createPersistableJob({
+            title: "Backend Engineer",
+            sourceJobId: "scenario-se-2",
+            canonicalUrl: "https://example.com/jobs/scenario-se-2",
+            applyUrl: "https://example.com/jobs/scenario-se-2/apply",
+            sourceUrl: "https://example.com/jobs/scenario-se-2",
+            locationText: "Seattle, WA",
+            state: "Washington",
+            city: "Seattle",
+          }),
+          createPersistableJob({
+            title: "Full Stack Engineer",
+            sourceJobId: "scenario-se-3",
+            canonicalUrl: "https://example.com/jobs/scenario-se-3",
+            applyUrl: "https://example.com/jobs/scenario-se-3/apply",
+            sourceUrl: "https://example.com/jobs/scenario-se-3",
+            locationText: "Austin, TX",
+            state: "Texas",
+            city: "Austin",
+          }),
+        ],
+      },
+      {
+        title: "Data Analyst",
+        jobs: [
+          createPersistableJob({
+            title: "Data Analyst",
+            sourceJobId: "scenario-da-1",
+            canonicalUrl: "https://example.com/jobs/scenario-da-1",
+            applyUrl: "https://example.com/jobs/scenario-da-1/apply",
+            sourceUrl: "https://example.com/jobs/scenario-da-1",
+            locationText: "Remote - United States",
+          }),
+          createPersistableJob({
+            title: "Senior Data Analyst",
+            sourceJobId: "scenario-da-2",
+            canonicalUrl: "https://example.com/jobs/scenario-da-2",
+            applyUrl: "https://example.com/jobs/scenario-da-2/apply",
+            sourceUrl: "https://example.com/jobs/scenario-da-2",
+            locationText: "New York, NY",
+            state: "New York",
+            city: "New York",
+          }),
+          createPersistableJob({
+            title: "Product Data Analyst",
+            sourceJobId: "scenario-da-3",
+            canonicalUrl: "https://example.com/jobs/scenario-da-3",
+            applyUrl: "https://example.com/jobs/scenario-da-3/apply",
+            sourceUrl: "https://example.com/jobs/scenario-da-3",
+            locationText: "Chicago, IL",
+            state: "Illinois",
+            city: "Chicago",
+          }),
+        ],
+      },
+      {
+        title: "Business Analyst",
+        jobs: [
+          createPersistableJob({
+            title: "Business Analyst",
+            sourceJobId: "scenario-ba-1",
+            canonicalUrl: "https://example.com/jobs/scenario-ba-1",
+            applyUrl: "https://example.com/jobs/scenario-ba-1/apply",
+            sourceUrl: "https://example.com/jobs/scenario-ba-1",
+            locationText: "Chicago, IL",
+            state: "Illinois",
+            city: "Chicago",
+          }),
+          createPersistableJob({
+            title: "Senior Business Analyst",
+            sourceJobId: "scenario-ba-2",
+            canonicalUrl: "https://example.com/jobs/scenario-ba-2",
+            applyUrl: "https://example.com/jobs/scenario-ba-2/apply",
+            sourceUrl: "https://example.com/jobs/scenario-ba-2",
+            locationText: "Remote - United States",
+          }),
+          createPersistableJob({
+            title: "Business Systems Analyst",
+            sourceJobId: "scenario-ba-3",
+            canonicalUrl: "https://example.com/jobs/scenario-ba-3",
+            applyUrl: "https://example.com/jobs/scenario-ba-3/apply",
+            sourceUrl: "https://example.com/jobs/scenario-ba-3",
+            locationText: "Boston, MA",
+            state: "Massachusetts",
+            city: "Boston",
+          }),
+        ],
+      },
+      {
+        title: "Product Manager",
+        jobs: [
+          createPersistableJob({
+            title: "Product Manager",
+            sourceJobId: "scenario-pm-1",
+            canonicalUrl: "https://example.com/jobs/scenario-pm-1",
+            applyUrl: "https://example.com/jobs/scenario-pm-1/apply",
+            sourceUrl: "https://example.com/jobs/scenario-pm-1",
+            locationText: "Remote - United States",
+          }),
+          createPersistableJob({
+            title: "Senior Product Manager",
+            sourceJobId: "scenario-pm-2",
+            canonicalUrl: "https://example.com/jobs/scenario-pm-2",
+            applyUrl: "https://example.com/jobs/scenario-pm-2/apply",
+            sourceUrl: "https://example.com/jobs/scenario-pm-2",
+            locationText: "Seattle, WA",
+            state: "Washington",
+            city: "Seattle",
+          }),
+          createPersistableJob({
+            title: "Technical Product Manager",
+            sourceJobId: "scenario-pm-3",
+            canonicalUrl: "https://example.com/jobs/scenario-pm-3",
+            applyUrl: "https://example.com/jobs/scenario-pm-3/apply",
+            sourceUrl: "https://example.com/jobs/scenario-pm-3",
+            locationText: "Austin, TX",
+            state: "Texas",
+            city: "Austin",
+          }),
+        ],
+      },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      await seedIndexedJobs(repository, scenario.jobs);
+    }
+
+    const crawlSources: CrawlProvider["crawlSources"] = vi.fn(async () => ({
+      provider: "greenhouse" as const,
+      status: "success" as const,
+      sourceCount: 0,
+      fetchedCount: 0,
+      matchedCount: 0,
+      warningCount: 0,
+      jobs: [],
+    }));
+    const provider = createStubProvider("greenhouse", crawlSources);
+
+    for (const scenario of scenarios) {
+      const started = await startSearchFromFilters(
+        {
+          title: scenario.title,
+          country: "United States",
+          crawlMode: "fast",
+          platforms: ["greenhouse"],
+        },
+        {
+          repository,
+          providers: [provider],
+          discovery: createDiscovery(),
+          fetchImpl: vi.fn() as unknown as typeof fetch,
+          now: new Date("2026-04-15T12:20:00.000Z"),
+          requestOwnerKey: `representative-${scenario.title}`,
+        },
+      );
+
+      expect(started.queued).toBe(false);
+      expect(started.result.jobs.length).toBeGreaterThanOrEqual(3);
+      expect(
+        started.result.jobs.every(
+          (job) => job.resolvedLocation?.isUnitedStates ?? job.country === "United States",
+        ),
+      ).toBe(true);
+      expect(started.result.diagnostics.session).toMatchObject({
+        indexedResultsCount: started.result.jobs.length,
+        supplementalResultsCount: 0,
+        totalVisibleResultsCount: started.result.jobs.length,
+        supplementalQueued: false,
+        supplementalRunning: false,
+        triggerReason: "indexed_coverage_sufficient",
+      });
+    }
+
+    expect(crawlSources).not.toHaveBeenCalled();
   });
 
   it("keeps semantic title, US location, experience filters, and ranking on indexed jobs", async () => {
@@ -810,4 +1339,79 @@ describe("jobs-first indexed search", () => {
       ]),
     );
   }, 10_000);
+
+  it("uses a selective coarse indexed candidate set before final precision filtering", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const seededJobs = [
+      createPersistableJob({
+        title: "Product Manager",
+        locationText: "Remote - United States",
+        sourceJobId: "candidate-product-exact",
+        canonicalUrl: "https://example.com/jobs/candidate-product-exact",
+        applyUrl: "https://example.com/jobs/candidate-product-exact/apply",
+        sourceUrl: "https://example.com/jobs/candidate-product-exact",
+      }),
+      createPersistableJob({
+        title: "Senior Product Manager",
+        locationText: "Los Angeles, CA",
+        state: "California",
+        city: "Los Angeles",
+        sourceJobId: "candidate-product-senior",
+        canonicalUrl: "https://example.com/jobs/candidate-product-senior",
+        applyUrl: "https://example.com/jobs/candidate-product-senior/apply",
+        sourceUrl: "https://example.com/jobs/candidate-product-senior",
+      }),
+      createPersistableJob({
+        title: "Technical Program Manager",
+        locationText: "Remote - United States",
+        sourceJobId: "candidate-program-nearby",
+        canonicalUrl: "https://example.com/jobs/candidate-program-nearby",
+        applyUrl: "https://example.com/jobs/candidate-program-nearby/apply",
+        sourceUrl: "https://example.com/jobs/candidate-program-nearby",
+      }),
+      createPersistableJob({
+        title: "Business Analyst",
+        locationText: "Chicago, IL",
+        state: "Illinois",
+        city: "Chicago",
+        sourceJobId: "candidate-business-noise",
+        canonicalUrl: "https://example.com/jobs/candidate-business-noise",
+        applyUrl: "https://example.com/jobs/candidate-business-noise/apply",
+        sourceUrl: "https://example.com/jobs/candidate-business-noise",
+      }),
+      createPersistableJob({
+        title: "Recruiter",
+        locationText: "Remote - United States",
+        sourceJobId: "candidate-recruiter-noise",
+        canonicalUrl: "https://example.com/jobs/candidate-recruiter-noise",
+        applyUrl: "https://example.com/jobs/candidate-recruiter-noise/apply",
+        sourceUrl: "https://example.com/jobs/candidate-recruiter-noise",
+      }),
+    ];
+
+    await seedIndexedJobs(repository, seededJobs);
+
+    const indexedSearch = await getIndexedJobsForSearch(repository, {
+      title: "Product Manager",
+      country: "United States",
+    });
+
+    expect(indexedSearch.candidateCount).toBeLessThan(seededJobs.length);
+    expect(indexedSearch.candidateQuery).toMatchObject({
+      strategy: "coarse_prefilter",
+      titleFamily: "product",
+      usedLocationPrefilter: true,
+    });
+    expect(indexedSearch.matches.map(({ job }) => job.title)).toEqual([
+      "Product Manager",
+      "Senior Product Manager",
+    ]);
+    expect(indexedSearch.matches.every(({ job }) => job.rawSourceMetadata.indexedSearch)).toBe(true);
+    expect(indexedSearch.matches[0]?.job.rawSourceMetadata.indexedSearch).toMatchObject({
+      candidateCount: indexedSearch.candidateCount,
+      candidateQuery: expect.objectContaining({
+        strategy: "coarse_prefilter",
+      }),
+    });
+  });
 });

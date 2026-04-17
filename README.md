@@ -20,6 +20,19 @@ The project is intentionally conservative:
 
 ## Local setup
 
+### What you need installed
+
+- Node.js
+  Use Node 20 LTS or newer. This repo does not currently pin a version with `.nvmrc`, but the stack expects a modern Node runtime.
+- npm
+  Comes with Node.js.
+- MongoDB
+  Required for app data persistence.
+- Docker Desktop
+  Optional. Use this instead of installing MongoDB directly if you want to run the included container.
+
+### First-time setup
+
 1. Copy `.env.example` to `.env.local`.
 2. Start MongoDB locally.
 3. Install dependencies.
@@ -28,6 +41,12 @@ The project is intentionally conservative:
 ```bash
 npm install
 npm run dev
+```
+
+If you want to use the default local database settings, `.env.local` only needs:
+
+```bash
+MONGODB_URI=mongodb://127.0.0.1:27017/job_crawler
 ```
 
 Default MongoDB connection string:
@@ -45,6 +64,19 @@ docker compose up -d
 ```
 
 This exposes MongoDB on `127.0.0.1:27017`.
+
+### Suggested install methods
+
+Install Node.js:
+
+- macOS with Homebrew: `brew install node@20`
+- With `nvm`: install `nvm`, then run `nvm install 20 && nvm use 20`
+- Windows: install Node.js 20 LTS from the official installer
+
+Install MongoDB:
+
+- Use Docker Desktop, then run `docker compose up -d`
+- Or install MongoDB Community Edition locally and keep it running on port `27017`
 
 ## Scripts
 
@@ -107,7 +139,7 @@ Jobs store both:
 - `experienceLevel`
   The resolved level used for filtering and export.
 - `experienceClassification`
-  The richer explanation of explicit level, inferred level, confidence, source, reasons, and whether the job should be treated as unspecified.
+  The persisted explanation of explicit level, inferred level, band, source, confidence, matched signals, version, reasons, and whether the job should be treated as unspecified.
 
 ## Platform selection
 

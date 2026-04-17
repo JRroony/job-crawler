@@ -16,15 +16,26 @@ export async function GET(
     const { searchParams } = new URL(request.url);
     const mode = searchParams.get("mode");
     const afterParam = searchParams.get("after");
+    const indexedAfterParam = searchParams.get("indexedAfter");
     const afterCursor =
       typeof afterParam === "string" && afterParam.trim().length > 0
         ? Number.parseInt(afterParam, 10)
         : 0;
+    const afterIndexedCursor =
+      typeof indexedAfterParam === "string" && indexedAfterParam.trim().length > 0
+        ? Number.parseInt(indexedAfterParam, 10)
+        : undefined;
     const result =
       mode === "delta"
         ? await getSearchJobDeltas(
             params.id,
             Number.isFinite(afterCursor) && afterCursor >= 0 ? afterCursor : 0,
+            {
+              afterIndexedCursor:
+                Number.isFinite(afterIndexedCursor ?? Number.NaN) && (afterIndexedCursor ?? -1) >= 0
+                  ? afterIndexedCursor
+                  : undefined,
+            },
           )
         : await getSearchDetails(params.id);
     return NextResponse.json(result);

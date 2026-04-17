@@ -146,6 +146,7 @@ export function JobCrawlerApp({
   const [revalidatingIds, setRevalidatingIds] = useState<string[]>([]);
   const pollSequenceRef = useRef(0);
   const activeDeliveryCursorRef = useRef(0);
+  const activeIndexedDeliveryCursorRef = useRef(0);
   const clientRequestOwnerKeyRef = useRef(createClientRequestOwnerKey());
   const activeRequestControllerRef = useRef<AbortController | null>(null);
 
@@ -190,6 +191,7 @@ export function JobCrawlerApp({
 
     setActiveResult(normalizedPayload);
     activeDeliveryCursorRef.current = normalizedPayload.delivery?.cursor ?? 0;
+    activeIndexedDeliveryCursorRef.current = normalizedPayload.delivery?.indexedCursor ?? 0;
     hydrateSearchForm(normalizedPayload.search.filters);
     setViewState(resolveViewState(normalizedPayload));
     setErrorKind(null);
@@ -206,13 +208,17 @@ export function JobCrawlerApp({
     const deadline = Date.now() + queuedSearchPollTimeoutMs;
 
     while (options.pollToken === pollSequenceRef.current && Date.now() < deadline) {
-      await delay(resolveQueuedSearchPollIntervalMs(activeDeliveryCursorRef.current));
+      await delay(
+        resolveQueuedSearchPollIntervalMs(
+          Math.max(activeDeliveryCursorRef.current, activeIndexedDeliveryCursorRef.current),
+        ),
+      );
       if (options.pollToken !== pollSequenceRef.current) {
         return;
       }
 
       const response = await fetch(
-        `/api/searches/${searchId}?mode=delta&after=${activeDeliveryCursorRef.current}`,
+        `/api/searches/${searchId}?mode=delta&after=${activeDeliveryCursorRef.current}&indexedAfter=${activeIndexedDeliveryCursorRef.current}`,
         {
         signal: options.signal,
         },
@@ -540,6 +546,7 @@ export function JobCrawlerApp({
 
     setActiveResult(normalizedPayload);
     activeDeliveryCursorRef.current = normalizedPayload.delivery?.cursor ?? 0;
+    activeIndexedDeliveryCursorRef.current = normalizedPayload.delivery?.indexedCursor ?? 0;
     hydrateSearchForm(normalizedPayload.search.filters);
     setViewState(resolveViewState(normalizedPayload));
     setErrorKind(null);
@@ -550,6 +557,7 @@ export function JobCrawlerApp({
     let mergedResult: CrawlResponse | null = null;
 
     activeDeliveryCursorRef.current = normalizedPayload.delivery.cursor;
+    activeIndexedDeliveryCursorRef.current = normalizedPayload.delivery.indexedCursor ?? 0;
     setActiveResult((current) => {
       mergedResult = mergeCrawlDeltaIntoResult(current, normalizedPayload);
       return mergedResult;
@@ -572,6 +580,8 @@ export function JobCrawlerApp({
     setMessage("");
     setErrorKind(null);
     pollSequenceRef.current += 1;
+    activeDeliveryCursorRef.current = 0;
+    activeIndexedDeliveryCursorRef.current = 0;
     clearSearchForm();
 
     if (runningSearchId) {
@@ -1256,6 +1266,7 @@ export function mergeCrawlDeltaIntoResult(
     delivery: {
       mode: "full",
       cursor: payload.delivery.cursor,
+      indexedCursor: payload.delivery.indexedCursor ?? current?.delivery?.indexedCursor,
     },
   };
 }

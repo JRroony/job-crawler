@@ -9,14 +9,17 @@ import { abortOwnerSearchRun, abortSearchRun, isSearchRunPending } from "@/lib/s
 import { createId } from "@/lib/server/crawler/helpers";
 import { sortJobsWithDiagnostics } from "@/lib/server/crawler/sort";
 import {
+  getIndexedJobDeltasForSearch,
   getIndexedJobsForSearch,
   mergeSearchResultJobs,
 } from "@/lib/server/search/indexed-jobs";
 import { getEnv } from "@/lib/server/env";
 import { resolveRepository, type JobCrawlerRuntime } from "@/lib/server/services/runtime";
 import {
+  crawlDiagnosticsSchema,
   crawlDeltaResponseSchema,
   crawlResponseSchema,
+  type CrawlDiagnostics,
   type JobListing,
   type SearchDocument,
 } from "@/lib/types";
@@ -218,12 +221,14 @@ export async function getInitialSearchResult(
 export async function getSearchDetails(searchId: string, runtime: JobCrawlerRuntime = {}) {
   const repository = await resolveRepository(runtime.repository);
   const resolved = await loadSearchState(searchId, repository);
+  const indexedCursor = await repository.getIndexedJobDeliveryCursor();
 
   if (!resolved.crawlRun) {
     return buildSyntheticCrawlResponse(
       resolved.search,
       await loadIndexedSearchJobs(resolved.search, repository),
       (await isSearchRunPending(searchId, repository)) ? "running" : undefined,
+      indexedCursor,
     );
   }
 
@@ -239,6 +244,13 @@ export async function getSearchDetails(searchId: string, runtime: JobCrawlerRunt
     ? await repository.getSearchSessionDeliveryCursor(resolved.searchSession._id)
     : await repository.getCrawlRunDeliveryCursor(resolved.crawlRun._id);
   const mergedJobs = mergeSearchResultJobs(indexedJobs, jobs.map(applyResolvedExperienceLevel));
+  const diagnostics = attachSessionDiagnostics(
+    resolved.crawlRun.diagnostics,
+    indexedJobs.length,
+    mergedJobs.length,
+    deliveryCursor,
+    resolved.crawlRun,
+  );
 
   return crawlResponseSchema.parse({
     search: resolved.search,
@@ -250,10 +262,11 @@ export async function getSearchDetails(searchId: string, runtime: JobCrawlerRunt
       resolved.search.filters.title,
       runtime.now ?? new Date(),
     ),
-    diagnostics: resolved.crawlRun.diagnostics,
+    diagnostics,
     delivery: {
       mode: "full",
       cursor: deliveryCursor,
+      indexedCursor,
     },
   });
 }
@@ -261,22 +274,33 @@ export async function getSearchDetails(searchId: string, runtime: JobCrawlerRunt
 export async function getSearchJobDeltas(
   searchId: string,
   afterCursor: number,
-  runtime: JobCrawlerRuntime = {},
+  runtime: JobCrawlerRuntime & {
+    afterIndexedCursor?: number;
+  } = {},
 ) {
   const repository = await resolveRepository(runtime.repository);
   const resolved = await loadSearchState(searchId, repository);
+  const afterIndexedCursor = Math.max(0, Math.floor(runtime.afterIndexedCursor ?? afterCursor));
+  const indexedDelta = await getIndexedJobDeltasForSearch(
+    repository,
+    resolved.search.filters,
+    afterIndexedCursor,
+  );
 
   if (!resolved.crawlRun) {
     return crawlDeltaResponseSchema.parse({
       ...buildSyntheticCrawlResponse(
         resolved.search,
-        [],
+        indexedDelta.jobs,
         (await isSearchRunPending(searchId, repository)) ? "running" : undefined,
+        indexedDelta.cursor,
       ),
       delivery: {
         mode: "delta",
         previousCursor: afterCursor,
         cursor: 0,
+        previousIndexedCursor: afterIndexedCursor,
+        indexedCursor: indexedDelta.cursor,
       },
     });
   }
@@ -287,6 +311,17 @@ export async function getSearchJobDeltas(
       ? repository.getJobsBySearchSessionAfterSequence(resolved.searchSession._id, afterCursor)
       : repository.getJobsByCrawlRunAfterSequence(resolved.crawlRun._id, afterCursor),
   ]);
+  const mergedDeltaJobs = mergeSearchResultJobs(
+    indexedDelta.jobs,
+    jobDelta.jobs.map(applyResolvedExperienceLevel),
+  );
+  const diagnostics = attachSessionDiagnostics(
+    resolved.crawlRun.diagnostics,
+    (resolved.crawlRun.diagnostics.session?.indexedResultsCount ?? 0) + indexedDelta.jobs.length,
+    (resolved.crawlRun.diagnostics.session?.totalVisibleResultsCount ?? 0) + mergedDeltaJobs.length,
+    jobDelta.cursor,
+    resolved.crawlRun,
+  );
 
   return crawlDeltaResponseSchema.parse({
     search: resolved.search,
@@ -294,15 +329,17 @@ export async function getSearchJobDeltas(
     crawlRun: resolved.crawlRun,
     sourceResults,
     jobs: sortJobsWithDiagnostics(
-      jobDelta.jobs.map(applyResolvedExperienceLevel),
+      mergedDeltaJobs,
       resolved.search.filters.title,
       runtime.now ?? new Date(),
     ),
-    diagnostics: resolved.crawlRun.diagnostics,
+    diagnostics,
     delivery: {
       mode: "delta",
       previousCursor: afterCursor,
       cursor: jobDelta.cursor,
+      previousIndexedCursor: afterIndexedCursor,
+      indexedCursor: indexedDelta.cursor,
     },
   });
 }
@@ -415,6 +452,7 @@ function buildSyntheticCrawlResponse(
   search: SearchDocument,
   jobs: JobListing[],
   status?: "running" | "aborted",
+  indexedCursor = 0,
 ) {
   const crawlStatus = status ?? search.lastStatus ?? "completed";
   const diagnostics = {
@@ -426,6 +464,17 @@ function buildSyntheticCrawlResponse(
     excludedByExperience: 0,
     dedupedOut: 0,
     validationDeferred: 0,
+    session: {
+      indexedResultsCount: jobs.length,
+      initialIndexedResultsCount: jobs.length,
+      supplementalResultsCount: 0,
+      totalVisibleResultsCount: jobs.length,
+      indexedCandidateCount: jobs.length,
+      minimumIndexedCoverage: 0,
+      targetJobCount: 0,
+      supplementalQueued: false,
+      supplementalRunning: status === "running",
+    },
   };
 
   return crawlResponseSchema.parse({
@@ -458,6 +507,7 @@ function buildSyntheticCrawlResponse(
     delivery: {
       mode: "full",
       cursor: 0,
+      indexedCursor,
     },
   });
 }
@@ -513,8 +563,57 @@ async function loadIndexedSearchJobs(
   search: SearchDocument,
   repository: Awaited<ReturnType<typeof resolveRepository>>,
 ) {
-  const indexedMatches = await getIndexedJobsForSearch(repository, search.filters);
-  return indexedMatches.map(({ job }) => job);
+  const indexedSearch = await getIndexedJobsForSearch(repository, search.filters);
+  return indexedSearch.matches.map(({ job }) => job);
+}
+
+function attachSessionDiagnostics(
+  diagnostics: CrawlDiagnostics | undefined,
+  indexedResultsCount: number,
+  totalVisibleResultsCount: number,
+  searchSessionVisibleCount: number | undefined,
+  crawlRun: {
+    status: "running" | "completed" | "partial" | "failed" | "aborted";
+    finishedAt?: string | null;
+  },
+): CrawlDiagnostics {
+  const baseDiagnostics = crawlDiagnosticsSchema.parse(diagnostics ?? {});
+  const safeTotalVisibleResultsCount = Math.max(totalVisibleResultsCount, indexedResultsCount);
+  const initialIndexedResultsCount =
+    baseDiagnostics.session?.initialIndexedResultsCount ?? indexedResultsCount;
+  const sessionVisibleCount = Math.max(
+    searchSessionVisibleCount ?? safeTotalVisibleResultsCount,
+    initialIndexedResultsCount,
+  );
+  const supplementalResultsCount = Math.max(0, sessionVisibleCount - initialIndexedResultsCount);
+  const visibleIndexedResultsCount = Math.max(
+    0,
+    safeTotalVisibleResultsCount - supplementalResultsCount,
+  );
+
+  return {
+    ...baseDiagnostics,
+    session: {
+      indexedResultsCount: visibleIndexedResultsCount,
+      initialIndexedResultsCount,
+      supplementalResultsCount,
+      totalVisibleResultsCount: safeTotalVisibleResultsCount,
+      indexedCandidateCount: baseDiagnostics.session?.indexedCandidateCount ?? indexedResultsCount,
+      minimumIndexedCoverage: baseDiagnostics.session?.minimumIndexedCoverage ?? 0,
+      targetJobCount: baseDiagnostics.session?.targetJobCount ?? 0,
+      supplementalQueued:
+        baseDiagnostics.session?.supplementalQueued ??
+        (crawlRun.status === "running" || supplementalResultsCount > 0),
+      supplementalRunning: crawlRun.status === "running" && !crawlRun.finishedAt,
+      triggerReason: baseDiagnostics.session?.triggerReason,
+      triggerExplanation: baseDiagnostics.session?.triggerExplanation,
+      reusedExistingSearch: baseDiagnostics.session?.reusedExistingSearch,
+      previousVisibleJobCount: baseDiagnostics.session?.previousVisibleJobCount,
+      previousRunStatus: baseDiagnostics.session?.previousRunStatus,
+      previousFinishedAt: baseDiagnostics.session?.previousFinishedAt,
+      latestIndexedJobAgeMs: baseDiagnostics.session?.latestIndexedJobAgeMs,
+    },
+  };
 }
 
 async function resolveSearchForNewSession(
@@ -564,11 +663,13 @@ async function loadSearchReuseBaseline(
   const previousCrawlRun = previousCrawlRunId
     ? await repository.getCrawlRun(previousCrawlRunId)
     : null;
-  const previousVisibleJobCount = previousSearchSession
-    ? previousSearchSession.lastEventSequence
+  const indexedJobs = await loadIndexedSearchJobs(search, repository);
+  const supplementalJobs = previousSearchSession
+    ? await repository.getJobsBySearchSession(previousSearchSession._id)
     : previousCrawlRun
-      ? await repository.getCrawlRunDeliveryCursor(previousCrawlRun._id)
-      : 0;
+      ? await repository.getJobsByCrawlRun(previousCrawlRun._id)
+      : [];
+  const previousVisibleJobCount = mergeSearchResultJobs(indexedJobs, supplementalJobs).length;
 
   return {
     reusedExistingSearch,

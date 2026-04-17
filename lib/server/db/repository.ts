@@ -1,7 +1,13 @@
 import "server-only";
 
+import { createHash } from "node:crypto";
 import type { Db } from "mongodb";
 
+import {
+  currentExperienceClassificationVersion,
+  resolveExperienceBand,
+  resolveExperienceLevel,
+} from "@/lib/experience";
 import { buildCanonicalJobIdentity, normalizeComparableIdentityText } from "@/lib/job-identity";
 import { isBackgroundIngestionSearchFilters } from "@/lib/server/background/constants";
 import { dedupeJobs, dedupeStoredJobs } from "@/lib/server/crawler/dedupe";
@@ -14,6 +20,12 @@ import {
   toSourceInventoryRecord,
   type SourceInventoryRecord,
 } from "@/lib/server/discovery/inventory";
+import { getEnv } from "@/lib/server/env";
+import { resolveObservedSourceNextEligibleAt } from "@/lib/server/inventory/selection";
+import {
+  buildIndexedJobCandidateQuery,
+  buildJobSearchIndex,
+} from "@/lib/server/search/job-search-index";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import type {
   CrawlControlDocument,
@@ -25,6 +37,7 @@ import type {
   CrawlRunStatus,
   CrawlSourceResult,
   CrawlValidationMode,
+  IndexedJobEvent,
   JobListing,
   LinkValidationResult,
   PersistableJobDocument,
@@ -44,6 +57,7 @@ import {
   employmentTypeSchema,
   experienceClassificationSchema,
   experienceLevelSchema,
+  indexedJobEventSchema,
   jobListingSchema,
   linkValidationResultSchema,
   persistableJobSchema,
@@ -124,6 +138,11 @@ type CrawlRunJobEvent = {
   savedAt: string;
 };
 
+type IndexedJobDelta = {
+  cursor: number;
+  jobs: JobListing[];
+};
+
 export type SearchSessionControlState = Pick<
   SearchSessionDocument,
   "_id" | "searchId" | "latestCrawlRunId" | "status" | "finishedAt" | "lastEventSequence" | "lastEventAt"
@@ -136,6 +155,7 @@ export type SourceInventoryObservation = {
   health?: SourceInventoryRecord["health"];
   lastFailureReason?: string;
   succeeded?: boolean;
+  nextEligibleAt?: string;
 };
 
 let hasWarnedMemoryFallback = false;
@@ -793,6 +813,15 @@ export class JobCrawlerRepository {
     return searchSession?.lastEventSequence ?? 0;
   }
 
+  async getIndexedJobDeliveryCursor() {
+    const latestEvent = await this.indexedJobEvents().findOne(
+      {},
+      { sort: { sequence: -1 } },
+    );
+
+    return latestEvent ? parseStoredIndexedJobEvent(latestEvent).sequence : 0;
+  }
+
   async appendExistingJobsToSearchSession(
     searchSessionId: string,
     crawlRunId: string,
@@ -870,6 +899,48 @@ export class JobCrawlerRepository {
     };
   }
 
+  async getIndexedJobsAfterSequence(afterSequence = 0): Promise<IndexedJobDelta> {
+    const allEvents = (await this.indexedJobEvents()
+      .find({}, { sort: { sequence: 1 } })
+      .toArray())
+      .map((document) => parseStoredIndexedJobEvent(document));
+    const cursor = allEvents[allEvents.length - 1]?.sequence ?? 0;
+    const nextEvents = allEvents.filter((event) => event.sequence > afterSequence);
+
+    if (nextEvents.length === 0) {
+      return {
+        cursor,
+        jobs: [],
+      };
+    }
+
+    const latestEventByJobId = new Map<string, IndexedJobEvent>();
+    nextEvents.forEach((event) => {
+      latestEventByJobId.set(event.jobId, event);
+    });
+    const orderedEvents = Array.from(latestEventByJobId.values()).sort(
+      (left, right) => left.sequence - right.sequence,
+    );
+    const jobDocuments = await this.jobs()
+      .find({ _id: { $in: orderedEvents.map((event) => event.jobId) } })
+      .toArray();
+    const jobsById = new Map(
+      jobDocuments.map((document) => {
+        const job = parseStoredJob(document);
+        return [job._id, job] as const;
+      }),
+    );
+
+    return {
+      cursor,
+      jobs: dedupeStoredJobs(
+        orderedEvents
+          .map((event) => jobsById.get(event.jobId))
+          .filter((job): job is JobListing => Boolean(job)),
+      ),
+    };
+  }
+
   async getJob(jobId: string) {
     const document = await this.jobs().findOne({ _id: jobId });
     return document ? parseStoredJob(document) : null;
@@ -886,6 +957,21 @@ export class JobCrawlerRepository {
     return dedupeStoredJobs(documents.map((document) => parseStoredJob(document)));
   }
 
+  async getIndexedJobCandidatesForSearch(filters: SearchFilters) {
+    const candidateQuery = buildIndexedJobCandidateQuery(filters);
+    const documents = await this.jobs()
+      .find(candidateQuery.filter, {
+        sort: candidateQuery.sort,
+        limit: candidateQuery.limit,
+      })
+      .toArray();
+
+    return {
+      jobs: dedupeStoredJobs(documents.map((document) => parseStoredJob(document))),
+      query: candidateQuery,
+    };
+  }
+
   async persistJobs(
     crawlRunId: string,
     jobs: PersistableJob[],
@@ -894,11 +980,15 @@ export class JobCrawlerRepository {
     } = {},
   ) {
     const savedJobsById = new Map<string, JobListing>();
-    const sanitizedJobs = dedupeJobs(jobs.map((job) => sanitizePersistableJob(job)));
+    const sanitizedJobs = coalescePersistableJobs(
+      dedupeJobs(jobs.map((job) => sanitizePersistableJob(job))),
+      crawlRunId,
+    );
     const existingJobs = await this.findExistingJobsForBatch(sanitizedJobs);
-    const inserts: JobListing[] = [];
-    const updates = new Map<string, JobListing>();
+    const nextIndexSequenceBase = await this.getIndexedJobDeliveryCursor();
     const newToRunJobIds = new Set<string>();
+    const indexedJobIds: string[] = [];
+    const upserts = new Map<string, JobListing>();
 
     for (const job of sanitizedJobs) {
       const existing = resolveExistingJobForPersistable(existingJobs, job);
@@ -908,26 +998,33 @@ export class JobCrawlerRepository {
           ...job,
           crawlRunIds: [crawlRunId],
         });
-        inserts.push(document);
         savedJobsById.set(document._id, document);
         newToRunJobIds.add(document._id);
+        indexedJobIds.push(document._id);
+        upserts.set(document.canonicalJobKey, document);
         indexJobForBatchLookup(existingJobs, document);
         continue;
       }
 
       const merged = mergeJobRecords(existing, job, crawlRunId);
       savedJobsById.set(merged._id, merged);
-      updates.set(merged._id, merged);
+      upserts.set(merged.canonicalJobKey, merged);
       if (!existing.crawlRunIds.includes(crawlRunId)) {
         newToRunJobIds.add(merged._id);
+      }
+      if (shouldEmitIndexedJobEvent(existing, merged)) {
+        indexedJobIds.push(merged._id);
       }
       indexJobForBatchLookup(existingJobs, merged);
     }
 
-    await persistBatchMutations(this.jobs(), {
-      inserts,
-      updates: Array.from(updates.values()),
+    await persistJobUpserts(this.jobs(), {
+      upserts: Array.from(upserts.values()),
     });
+
+    if (indexedJobIds.length > 0) {
+      await this.appendIndexedJobEvents(crawlRunId, indexedJobIds, nextIndexSequenceBase);
+    }
 
     if (newToRunJobIds.size > 0) {
       await this.appendCrawlRunJobEvents(crawlRunId, Array.from(newToRunJobIds));
@@ -972,6 +1069,7 @@ export class JobCrawlerRepository {
           lastCrawledAt: parsedExisting.lastCrawledAt,
           lastSucceededAt: parsedExisting.lastSucceededAt,
           lastFailedAt: parsedExisting.lastFailedAt,
+          nextEligibleAt: parsedExisting.nextEligibleAt ?? record.nextEligibleAt,
         });
         const { _id, ...updateFields } = merged;
         await this.sourceInventory().updateOne({ _id }, { $set: updateFields });
@@ -1049,6 +1147,18 @@ export class JobCrawlerRepository {
             ? "failing"
             : "degraded");
       const status = observation.status ?? parsedExisting.status;
+      const nextEligibleAt =
+        observation.nextEligibleAt ??
+        (!hasOutcome
+          ? parsedExisting.nextEligibleAt
+          : resolveObservedSourceNextEligibleAt({
+              record: parsedExisting,
+              observedAt: observation.observedAt,
+              intervalMs: getEnv().BACKGROUND_INGESTION_INTERVAL_MS,
+              health,
+              consecutiveFailures: nextConsecutiveFailures,
+              succeeded,
+            }));
       const merged = sourceInventoryRecordSchema.parse({
         ...parsedExisting,
         status,
@@ -1063,6 +1173,7 @@ export class JobCrawlerRepository {
         lastSucceededAt: succeeded ? observation.observedAt : parsedExisting.lastSucceededAt,
         lastFailedAt:
           hasOutcome && !succeeded ? observation.observedAt : parsedExisting.lastFailedAt,
+        nextEligibleAt,
       });
       const { _id, ...updateFields } = merged;
       await this.sourceInventory().updateOne({ _id }, { $set: updateFields });
@@ -1083,18 +1194,33 @@ export class JobCrawlerRepository {
 
   private async findExistingJobsForBatch(jobs: PersistableJob[]) {
     const lookup = createPersistBatchLookup();
-    const canonicalUrls = collectUniqueStrings(jobs.map((job) => job.canonicalUrl));
-    const resolvedUrls = collectUniqueStrings(jobs.map((job) => job.resolvedUrl));
-    const applyUrls = collectUniqueStrings(jobs.map((job) => job.applyUrl));
-    const sourceUrls = collectUniqueStrings(jobs.map((job) => job.sourceUrl));
-    const sourceLookupKeys = collectUniqueStrings(jobs.flatMap((job) => job.sourceLookupKeys));
+    const canonicalJobKeys = collectUniqueStrings(jobs.map((job) => job.canonicalJobKey));
+    const directMatches = await fetchJobsByField(this.jobs(), "canonicalJobKey", canonicalJobKeys);
+
+    directMatches
+      .map((document) => parseStoredJob(document))
+      .forEach((job) => indexJobForBatchLookup(lookup, job));
+
+    const unresolvedJobs = jobs.filter(
+      (job) => !lookup.byCanonicalJobKey.has(job.canonicalJobKey),
+    );
+    if (unresolvedJobs.length === 0) {
+      return lookup;
+    }
+
+    const canonicalUrls = collectUniqueStrings(unresolvedJobs.map((job) => job.canonicalUrl));
+    const resolvedUrls = collectUniqueStrings(unresolvedJobs.map((job) => job.resolvedUrl));
+    const applyUrls = collectUniqueStrings(unresolvedJobs.map((job) => job.applyUrl));
+    const sourceUrls = collectUniqueStrings(unresolvedJobs.map((job) => job.sourceUrl));
+    const sourceLookupKeys = collectUniqueStrings(
+      unresolvedJobs.flatMap((job) => job.sourceLookupKeys),
+    );
     const contentFingerprints = collectUniqueStrings(
-      jobs
+      unresolvedJobs
         .filter((job) => !buildCanonicalJobIdentity(job).hasStrongIdentity)
         .map((job) => job.contentFingerprint),
     );
-
-    const queryResults = await Promise.all([
+    const legacyMatches = await Promise.all([
       fetchJobsByField(this.jobs(), "canonicalUrl", canonicalUrls),
       fetchJobsByField(this.jobs(), "resolvedUrl", resolvedUrls),
       fetchJobsByField(this.jobs(), "applyUrl", applyUrls),
@@ -1103,7 +1229,7 @@ export class JobCrawlerRepository {
       fetchJobsByField(this.jobs(), "contentFingerprint", contentFingerprints),
     ]);
 
-    queryResults
+    legacyMatches
       .flat()
       .map((document) => parseStoredJob(document))
       .forEach((job) => indexJobForBatchLookup(lookup, job));
@@ -1147,6 +1273,10 @@ export class JobCrawlerRepository {
     return this.db.collection<SearchSessionJobEvent>(collectionNames.searchSessionJobEvents);
   }
 
+  private indexedJobEvents() {
+    return this.db.collection<IndexedJobEvent>(collectionNames.indexedJobEvents);
+  }
+
   private linkValidations() {
     return this.db.collection<LinkValidationResult>(collectionNames.linkValidations);
   }
@@ -1168,6 +1298,29 @@ export class JobCrawlerRepository {
         sequence: latestSequence + index + 1,
         savedAt,
       })),
+      updates: [],
+    });
+  }
+
+  private async appendIndexedJobEvents(
+    crawlRunId: string,
+    jobIds: string[],
+    latestSequence: number,
+  ) {
+    const createdAt = new Date().toISOString();
+    const uniqueJobIds = dedupeStrings(jobIds);
+    const inserts = uniqueJobIds.map((jobId, index) =>
+      indexedJobEventSchema.parse({
+        _id: createId(),
+        jobId,
+        crawlRunId,
+        sequence: latestSequence + index + 1,
+        createdAt,
+      }),
+    );
+
+    await persistBatchMutations(this.indexedJobEvents(), {
+      inserts,
       updates: [],
     });
   }
@@ -1254,9 +1407,17 @@ function mergeJobRecords(
   return {
     ...existing,
     ...selectPrimaryRecord(existing, incoming),
+    canonicalJobKey: existing.canonicalJobKey,
     sourceLookupKeys: mergedProvenance,
     crawlRunIds,
     sourceProvenance,
+    firstSeenAt: earliestDate(existing.firstSeenAt, incoming.firstSeenAt) ?? existing.firstSeenAt,
+    lastSeenAt: latestDate(existing.lastSeenAt, incoming.lastSeenAt) ?? existing.lastSeenAt,
+    indexedAt: latestDate(existing.indexedAt, incoming.indexedAt) ?? existing.indexedAt,
+    isActive: incoming.isActive,
+    closedAt: incoming.isActive
+      ? undefined
+      : latestDate(existing.closedAt, incoming.closedAt) ?? incoming.closedAt,
     discoveredAt:
       existing.discoveredAt < incoming.discoveredAt
         ? existing.discoveredAt
@@ -1265,6 +1426,18 @@ function mergeJobRecords(
     postingDate: latestDate(existing.postingDate, incoming.postingDate),
     postedAt: latestDate(existing.postedAt, incoming.postedAt),
   };
+}
+
+function earliestDate(left?: string, right?: string) {
+  if (!left) {
+    return right;
+  }
+
+  if (!right) {
+    return left;
+  }
+
+  return left < right ? left : right;
 }
 
 function stableSerialize(value: unknown): string {
@@ -1281,6 +1454,10 @@ function stableSerialize(value: unknown): string {
   }
 
   return JSON.stringify(value);
+}
+
+function buildContentHash(value: unknown) {
+  return createHash("sha256").update(stableSerialize(value)).digest("hex");
 }
 
 function parseStoredSourceInventory(document: Record<string, unknown>) {
@@ -1347,6 +1524,31 @@ function sanitizePersistableJob(job: PersistableJob): PersistableJob {
   return persistableJobSchema.parse(persistable);
 }
 
+function coalescePersistableJobs(jobs: PersistableJob[], crawlRunId: string) {
+  const byCanonicalJobKey = new Map<string, JobListing>();
+
+  for (const job of jobs) {
+    const existing = byCanonicalJobKey.get(job.canonicalJobKey);
+    if (!existing) {
+      byCanonicalJobKey.set(
+        job.canonicalJobKey,
+        jobListingSchema.parse({
+          _id: createId(),
+          ...job,
+          crawlRunIds: [crawlRunId],
+        }),
+      );
+      continue;
+    }
+
+    byCanonicalJobKey.set(job.canonicalJobKey, mergeJobRecords(existing, job, crawlRunId));
+  }
+
+  return Array.from(byCanonicalJobKey.values()).map(({ _id, crawlRunIds: _ignored, ...job }) =>
+    persistableJobSchema.parse(job),
+  );
+}
+
 function sanitizeSourceInventoryRecord(
   record: SourceInventoryRecord | Record<string, unknown>,
 ): SourceInventoryRecord {
@@ -1366,7 +1568,47 @@ function dedupeProvenance(records: JobListing["sourceProvenance"]) {
   return Array.from(map.values());
 }
 
+function shouldEmitIndexedJobEvent(existing: JobListing, merged: JobListing) {
+  return buildIndexedJobEventFingerprint(existing) !== buildIndexedJobEventFingerprint(merged);
+}
+
+function buildIndexedJobEventFingerprint(job: JobListing) {
+  return stableSerialize({
+    canonicalJobKey: job.canonicalJobKey,
+    title: job.title,
+    normalizedTitle: job.normalizedTitle,
+    company: job.company,
+    normalizedCompany: job.normalizedCompany,
+    country: job.country,
+    state: job.state,
+    city: job.city,
+    locationRaw: job.locationRaw,
+    normalizedLocation: job.normalizedLocation,
+    locationText: job.locationText,
+    remoteType: job.remoteType,
+    employmentType: job.employmentType,
+    seniority: job.seniority,
+    experienceLevel: job.experienceLevel,
+    experienceClassification: job.experienceClassification,
+    canonicalUrl: job.canonicalUrl,
+    resolvedUrl: job.resolvedUrl,
+    applyUrl: job.applyUrl,
+    sourceUrl: job.sourceUrl,
+    postingDate: job.postingDate,
+    postedAt: job.postedAt,
+    descriptionSnippet: job.descriptionSnippet,
+    salaryInfo: job.salaryInfo,
+    sponsorshipHint: job.sponsorshipHint,
+    linkStatus: job.linkStatus,
+    lastValidatedAt: job.lastValidatedAt,
+    isActive: job.isActive,
+    closedAt: job.closedAt,
+    contentHash: job.contentHash,
+  });
+}
+
 type PersistBatchLookup = {
+  byCanonicalJobKey: Map<string, JobListing>;
   byCanonicalUrl: Map<string, JobListing>;
   byResolvedUrl: Map<string, JobListing>;
   byApplyUrl: Map<string, JobListing>;
@@ -1377,6 +1619,7 @@ type PersistBatchLookup = {
 
 function createPersistBatchLookup(): PersistBatchLookup {
   return {
+    byCanonicalJobKey: new Map<string, JobListing>(),
     byCanonicalUrl: new Map<string, JobListing>(),
     byResolvedUrl: new Map<string, JobListing>(),
     byApplyUrl: new Map<string, JobListing>(),
@@ -1388,6 +1631,7 @@ function createPersistBatchLookup(): PersistBatchLookup {
 
 function indexJobForBatchLookup(lookup: PersistBatchLookup, job: JobListing) {
   const identity = buildCanonicalJobIdentity(job);
+  lookup.byCanonicalJobKey.set(identity.canonicalJobKey, job);
 
   if (job.canonicalUrl) {
     lookup.byCanonicalUrl.set(job.canonicalUrl, job);
@@ -1414,6 +1658,10 @@ function resolveExistingJobForPersistable(
   job: PersistableJob,
 ) {
   const identity = buildCanonicalJobIdentity(job);
+  const byCanonicalJobKey = lookup.byCanonicalJobKey.get(identity.canonicalJobKey);
+  if (byCanonicalJobKey) {
+    return byCanonicalJobKey;
+  }
 
   if (job.canonicalUrl) {
     const byCanonical = lookup.byCanonicalUrl.get(job.canonicalUrl);
@@ -1456,6 +1704,7 @@ function resolveExistingJobForPersistable(
 async function fetchJobsByField(
   collection: CollectionAdapter<JobListing>,
   field:
+    | "canonicalJobKey"
     | "canonicalUrl"
     | "resolvedUrl"
     | "applyUrl"
@@ -1469,6 +1718,46 @@ async function fetchJobsByField(
   }
 
   return collection.find({ [field]: { $in: values } }).toArray();
+}
+
+async function persistJobUpserts<TDocument extends { _id: string; canonicalJobKey: string }>(
+  collection: CollectionAdapter<TDocument>,
+  operations: {
+    upserts: TDocument[];
+  },
+) {
+  const bulkOperations = operations.upserts.map((document) => {
+    const { _id, canonicalJobKey, ...updateFields } = document;
+    return {
+      updateOne: {
+        filter: { canonicalJobKey },
+        update: {
+          $set: updateFields,
+          $setOnInsert: {
+            _id,
+            canonicalJobKey,
+          },
+        },
+        options: { upsert: true },
+      },
+    } as const;
+  });
+
+  if (bulkOperations.length === 0) {
+    return;
+  }
+
+  if (collection.bulkWrite) {
+    await collection.bulkWrite(bulkOperations);
+    return;
+  }
+
+  for (const operation of bulkOperations) {
+    await collection.updateOne(
+      operation.updateOne.filter,
+      operation.updateOne.update,
+    );
+  }
 }
 
 async function persistBatchMutations<TDocument extends { _id: string }>(
@@ -1654,6 +1943,18 @@ function parseStoredSearchSessionJobEvent(document: Record<string, unknown>): Se
     searchSessionId: String(normalizedDocument.searchSessionId),
     crawlRunId: String(normalizedDocument.crawlRunId),
     jobId: String(normalizedDocument.jobId),
+    sequence: Number(normalizedDocument.sequence),
+    createdAt: String(normalizedDocument.createdAt),
+  });
+}
+
+function parseStoredIndexedJobEvent(document: Record<string, unknown>): IndexedJobEvent {
+  const normalizedDocument = normalizeLegacyStoredRecord(document);
+
+  return indexedJobEventSchema.parse({
+    _id: String(normalizedDocument._id),
+    jobId: String(normalizedDocument.jobId),
+    crawlRunId: String(normalizedDocument.crawlRunId),
     sequence: Number(normalizedDocument.sequence),
     createdAt: String(normalizedDocument.createdAt),
   });
@@ -1881,9 +2182,69 @@ function normalizeStoredJobFields(document: Record<string, unknown>) {
     normalizeOptionalDocumentString(document.dedupeFingerprint) ??
     normalizeOptionalDocumentString(document.contentFingerprint) ??
     [normalizedCompany, normalizedTitle, normalizedLocation].filter(Boolean).join("|");
+  const discoveredAt =
+    normalizeOptionalDocumentString(document.discoveredAt) ?? new Date(0).toISOString();
+  const firstSeenAt =
+    normalizeOptionalDocumentString(document.firstSeenAt) ?? discoveredAt;
+  const lastSeenAt =
+    normalizeOptionalDocumentString(document.lastSeenAt) ?? crawledAt ?? discoveredAt;
+  const indexedAt =
+    normalizeOptionalDocumentString(document.indexedAt) ?? crawledAt ?? discoveredAt;
+  const isActive = typeof document.isActive === "boolean" ? document.isActive : true;
+  const closedAt = isActive
+    ? undefined
+    : normalizeOptionalDocumentString(document.closedAt) ?? lastSeenAt;
+  const contentHash =
+    normalizeOptionalDocumentString(document.contentHash) ??
+    buildContentHash({
+      title,
+      company,
+      locationRaw,
+      descriptionSnippet: normalizeOptionalDocumentString(document.descriptionSnippet),
+      employmentType: normalizeEmploymentType(document.employmentType),
+      remoteType: normalizeRemoteType(document.remoteType, resolvedLocation, locationRaw),
+      seniority:
+        normalizeOptionalExperienceLevel(document.seniority) ??
+        normalizeOptionalExperienceLevel(document.experienceLevel),
+      experienceLevel: normalizeOptionalExperienceLevel(document.experienceLevel),
+      canonicalUrl: normalizeOptionalDocumentString(document.canonicalUrl),
+      applyUrl: normalizeOptionalDocumentString(document.applyUrl),
+      salaryInfo: normalizeSalaryInfo(document.salaryInfo),
+      postingDate,
+    });
+  const canonicalJobKey =
+    normalizeOptionalDocumentString(document.canonicalJobKey) ??
+    buildCanonicalJobIdentity({
+      _id: normalizeOptionalDocumentString(document._id),
+      sourcePlatform: document.sourcePlatform as JobListing["sourcePlatform"],
+      sourceCompanySlug: normalizeOptionalDocumentString(document.sourceCompanySlug),
+      sourceJobId: normalizeOptionalDocumentString(document.sourceJobId) ?? "",
+      sourceUrl: normalizeOptionalDocumentString(document.sourceUrl) ?? "",
+      applyUrl: normalizeOptionalDocumentString(document.applyUrl) ?? "",
+      resolvedUrl: normalizeOptionalDocumentString(document.resolvedUrl),
+      canonicalUrl: normalizeOptionalDocumentString(document.canonicalUrl),
+      sourceLookupKeys,
+      company,
+      title,
+      locationRaw,
+      locationText: normalizeOptionalDocumentString(document.locationText) ?? locationRaw,
+      normalizedCompany,
+      normalizedTitle,
+      normalizedLocation,
+      dedupeFingerprint,
+      companyNormalized: normalizedCompany,
+      titleNormalized: normalizedTitle,
+      locationNormalized: normalizedLocation,
+      contentFingerprint: dedupeFingerprint,
+    }).canonicalJobKey;
+  const searchIndex = buildJobSearchIndex({
+    title,
+    normalizedTitle,
+  });
 
   return {
     ...document,
+    canonicalJobKey,
     company,
     title,
     normalizedCompany,
@@ -1908,7 +2269,7 @@ function normalizeStoredJobFields(document: Record<string, unknown>) {
     postingDate,
     postedAt: postingDate,
     lastValidatedAt: normalizeOptionalDocumentString(document.lastValidatedAt),
-    discoveredAt: normalizeOptionalDocumentString(document.discoveredAt),
+    discoveredAt,
     crawledAt,
     descriptionSnippet: normalizeOptionalDocumentString(document.descriptionSnippet),
     salaryInfo: normalizeSalaryInfo(document.salaryInfo),
@@ -1917,12 +2278,19 @@ function normalizeStoredJobFields(document: Record<string, unknown>) {
     sourceProvenance,
     sourceLookupKeys,
     crawlRunIds,
+    firstSeenAt,
+    lastSeenAt,
+    indexedAt,
+    isActive,
+    closedAt,
+    searchIndex,
     dedupeFingerprint,
     linkStatus: typeof document.linkStatus === "string" ? document.linkStatus : "unknown",
     companyNormalized: normalizedCompany,
     titleNormalized: normalizedTitle,
     locationNormalized: normalizedLocation,
     contentFingerprint: dedupeFingerprint,
+    contentHash,
   };
 }
 
@@ -1962,6 +2330,7 @@ function normalizeStoredSourceInventoryFields(document: Record<string, unknown>)
     lastCrawledAt: normalizeOptionalDocumentString(normalizedDocument.lastCrawledAt),
     lastSucceededAt: normalizeOptionalDocumentString(normalizedDocument.lastSucceededAt),
     lastFailedAt: normalizeOptionalDocumentString(normalizedDocument.lastFailedAt),
+    nextEligibleAt: normalizeOptionalDocumentString(normalizedDocument.nextEligibleAt),
   };
 }
 
@@ -1994,8 +2363,47 @@ function normalizeExperienceClassification(value: unknown) {
     return undefined;
   }
 
+  const normalizedValue = normalizeLegacyStoredValue(value);
+  if (!isRecord(normalizedValue)) {
+    return undefined;
+  }
+
+  const explicitLevel = normalizeOptionalExperienceLevel(normalizedValue.explicitLevel);
+  const inferredLevel = normalizeOptionalExperienceLevel(normalizedValue.inferredLevel);
+  const resolvedLevel = explicitLevel ?? inferredLevel;
+  const diagnostics = isRecord(normalizedValue.diagnostics)
+    ? {
+        ...normalizedValue.diagnostics,
+        matchedSignals: Array.isArray(normalizedValue.diagnostics.matchedSignals)
+          ? normalizedValue.diagnostics.matchedSignals
+          : [],
+      }
+    : undefined;
   const parsed = experienceClassificationSchema.safeParse(
-    normalizeLegacyStoredValue(value),
+    {
+      ...normalizedValue,
+      experienceVersion:
+        typeof normalizedValue.experienceVersion === "number"
+          ? normalizedValue.experienceVersion
+          : currentExperienceClassificationVersion,
+      experienceBand:
+        typeof normalizedValue.experienceBand === "string"
+          ? normalizedValue.experienceBand
+          : resolveExperienceBand(resolvedLevel ?? "unknown"),
+      experienceSource:
+        typeof normalizedValue.experienceSource === "string"
+          ? normalizedValue.experienceSource
+          : normalizedValue.source,
+      experienceConfidence:
+        typeof normalizedValue.experienceConfidence === "string"
+          ? normalizedValue.experienceConfidence
+          : normalizedValue.confidence,
+      experienceSignals: Array.isArray(normalizedValue.experienceSignals)
+        ? normalizedValue.experienceSignals
+        : diagnostics?.matchedSignals,
+      explicitLevel,
+      inferredLevel,
+    },
   );
   return parsed.success ? parsed.data : undefined;
 }
