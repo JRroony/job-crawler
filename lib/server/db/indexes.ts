@@ -1,5 +1,11 @@
 import "server-only";
 
+import { collectionNames } from "@/lib/server/db/collections";
+import {
+  JobsCanonicalKeyMigrationError,
+  migrateLegacyJobsForCanonicalKey,
+} from "@/lib/server/db/job-migration";
+
 type IndexSpec = {
   key: Record<string, 1 | -1>;
   name: string;
@@ -15,20 +21,7 @@ export type DatabaseLike = {
   collection(name: string): CollectionLike;
 };
 
-export const collectionNames = {
-  searches: "searches",
-  searchSessions: "searchSessions",
-  jobs: "jobs",
-  crawlRuns: "crawlRuns",
-  crawlControls: "crawlControls",
-  crawlQueue: "crawlQueue",
-  crawlSourceResults: "crawlSourceResults",
-  crawlRunJobEvents: "crawlRunJobEvents",
-  searchSessionJobEvents: "searchSessionJobEvents",
-  indexedJobEvents: "indexedJobEvents",
-  linkValidations: "linkValidations",
-  sourceInventory: "sourceInventory",
-} as const;
+export { collectionNames } from "@/lib/server/db/collections";
 
 let indexesEnsured = false;
 
@@ -70,93 +63,124 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     },
   ]);
 
-  await db.collection(collectionNames.jobs).createIndexes([
-    {
-      key: { canonicalJobKey: 1 },
-      name: "jobs_canonical_job_key",
-      unique: true,
-    },
-    {
-      key: { crawlRunIds: 1, postedAt: -1, sourcePlatform: 1, title: 1 },
-      name: "jobs_listing_by_run_and_sort",
-    },
-    {
-      key: { sourcePlatform: 1, postedAt: -1, companyNormalized: 1, titleNormalized: 1 },
-      name: "jobs_export_by_platform_and_postedAt",
-    },
-    {
-      key: { sourceLookupKeys: 1 },
-      name: "jobs_source_lookup_keys",
-    },
-    {
-      key: { canonicalUrl: 1 },
-      name: "jobs_canonical_url",
-      sparse: true,
-    },
-    {
-      key: { resolvedUrl: 1 },
-      name: "jobs_resolved_url",
-      sparse: true,
-    },
-    {
-      key: { applyUrl: 1 },
-      name: "jobs_apply_url",
-    },
-    {
-      key: { sourceUrl: 1 },
-      name: "jobs_source_url",
-    },
-    {
-      key: { contentFingerprint: 1 },
-      name: "jobs_content_fingerprint",
-    },
-    {
-      key: { isActive: 1, lastSeenAt: -1, postedAt: -1 },
-      name: "jobs_lifecycle_activity_lastSeenAt_desc",
-    },
-    {
-      key: {
-        isActive: 1,
-        sourcePlatform: 1,
-        "searchIndex.titleFamily": 1,
-        postingDate: -1,
-        lastSeenAt: -1,
+  try {
+    const migration = await migrateLegacyJobsForCanonicalKey(db as never);
+    if (
+      migration.rewrittenCount > 0 ||
+      migration.deletedCount > 0 ||
+      migration.canonicalBackfillCount > 0 ||
+      migration.lifecycleBackfillCount > 0
+    ) {
+      console.info("[db:jobs-migration]", migration);
+    }
+  } catch (error) {
+    if (error instanceof JobsCanonicalKeyMigrationError) {
+      throw new Error(
+        `${error.message} scanned=${error.diagnostics.scannedCount} rewritten=${error.diagnostics.rewrittenCount} merged=${error.diagnostics.mergedDocumentCount} deleted=${error.diagnostics.deletedCount}`,
+        { cause: error },
+      );
+    }
+
+    throw new Error(
+      "Failed to migrate legacy jobs before creating jobs_canonical_job_key.",
+      { cause: error },
+    );
+  }
+
+  try {
+    await db.collection(collectionNames.jobs).createIndexes([
+      {
+        key: { canonicalJobKey: 1 },
+        name: "jobs_canonical_job_key",
+        unique: true,
       },
-      name: "jobs_search_active_platform_family_recent",
-    },
-    {
-      key: {
-        "searchIndex.titleConceptIds": 1,
-        isActive: 1,
-        sourcePlatform: 1,
-        postingDate: -1,
+      {
+        key: { crawlRunIds: 1, postedAt: -1, sourcePlatform: 1, title: 1 },
+        name: "jobs_listing_by_run_and_sort",
       },
-      name: "jobs_search_title_concepts_active_recent",
-    },
-    {
-      key: {
-        "resolvedLocation.isUnitedStates": 1,
-        "resolvedLocation.state": 1,
-        city: 1,
-        isActive: 1,
-        postingDate: -1,
+      {
+        key: { sourcePlatform: 1, postedAt: -1, companyNormalized: 1, titleNormalized: 1 },
+        name: "jobs_export_by_platform_and_postedAt",
       },
-      name: "jobs_search_location_activity_recent",
-    },
-    {
-      key: {
-        experienceLevel: 1,
-        "experienceClassification.inferredLevel": 1,
-        isActive: 1,
-        postingDate: -1,
+      {
+        key: { sourceLookupKeys: 1 },
+        name: "jobs_source_lookup_keys",
       },
-      name: "jobs_search_experience_activity_recent",
-    },
-    {
-      key: { linkStatus: 1, lastValidatedAt: -1 },
-      name: "jobs_linkStatus_lastValidatedAt_desc",
-    },
-  ]);
+      {
+        key: { canonicalUrl: 1 },
+        name: "jobs_canonical_url",
+        sparse: true,
+      },
+      {
+        key: { resolvedUrl: 1 },
+        name: "jobs_resolved_url",
+        sparse: true,
+      },
+      {
+        key: { applyUrl: 1 },
+        name: "jobs_apply_url",
+      },
+      {
+        key: { sourceUrl: 1 },
+        name: "jobs_source_url",
+      },
+      {
+        key: { contentFingerprint: 1 },
+        name: "jobs_content_fingerprint",
+      },
+      {
+        key: { isActive: 1, lastSeenAt: -1, postedAt: -1 },
+        name: "jobs_lifecycle_activity_lastSeenAt_desc",
+      },
+      {
+        key: {
+          isActive: 1,
+          sourcePlatform: 1,
+          "searchIndex.titleFamily": 1,
+          postingDate: -1,
+          lastSeenAt: -1,
+        },
+        name: "jobs_search_active_platform_family_recent",
+      },
+      {
+        key: {
+          "searchIndex.titleConceptIds": 1,
+          isActive: 1,
+          sourcePlatform: 1,
+          postingDate: -1,
+        },
+        name: "jobs_search_title_concepts_active_recent",
+      },
+      {
+        key: {
+          "resolvedLocation.isUnitedStates": 1,
+          "resolvedLocation.state": 1,
+          city: 1,
+          isActive: 1,
+          postingDate: -1,
+        },
+        name: "jobs_search_location_activity_recent",
+      },
+      {
+        key: {
+          experienceLevel: 1,
+          "experienceClassification.inferredLevel": 1,
+          isActive: 1,
+          postingDate: -1,
+        },
+        name: "jobs_search_experience_activity_recent",
+      },
+      {
+        key: { linkStatus: 1, lastValidatedAt: -1 },
+        name: "jobs_linkStatus_lastValidatedAt_desc",
+      },
+    ]);
+  } catch (error) {
+    throw new Error(
+      "MongoDB jobs index creation failed after legacy canonicalJobKey migration.",
+      { cause: error },
+    );
+  }
 
   await db.collection(collectionNames.crawlRuns).createIndexes([
     {
@@ -300,4 +324,8 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
   ]);
 
   indexesEnsured = true;
+}
+
+export function resetDatabaseIndexesForTests() {
+  indexesEnsured = false;
 }

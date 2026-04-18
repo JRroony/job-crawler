@@ -31,13 +31,16 @@ export class FakeCollection<TDocument extends Record<string, unknown>>
 
   async insertOne(document: TDocument) {
     this.stats.insertOneCalls += 1;
-    this.documents.push(clone(document));
+    const nextDocuments = [...this.documents, clone(document)];
+    assertIndexesAllowDocuments(this.indexes, nextDocuments);
+    this.documents = nextDocuments;
     return { insertedId: document._id };
   }
 
   async bulkWrite(
     operations: Array<
       | { insertOne: { document: TDocument } }
+      | { deleteOne: { filter: Record<string, unknown> } }
       | {
           updateOne: {
             filter: Record<string, unknown>;
@@ -55,6 +58,18 @@ export class FakeCollection<TDocument extends Record<string, unknown>>
       if ("insertOne" in operation) {
         await this.insertOne(operation.insertOne.document);
         insertedCount += 1;
+        continue;
+      }
+
+      if ("deleteOne" in operation) {
+        const targetIndex = this.documents.findIndex((document) =>
+          matches(document, operation.deleteOne.filter),
+        );
+        if (targetIndex >= 0) {
+          const nextDocuments = clone(this.documents);
+          nextDocuments.splice(targetIndex, 1);
+          this.documents = nextDocuments;
+        }
         continue;
       }
 
@@ -89,7 +104,9 @@ export class FakeCollection<TDocument extends Record<string, unknown>>
         ...clone((update.$setOnInsert as Record<string, unknown>) ?? {}),
         ...clone((update.$set as Record<string, unknown>) ?? {}),
       } as TDocument;
-      this.documents.push(inserted);
+      const nextDocuments = [...this.documents, inserted];
+      assertIndexesAllowDocuments(this.indexes, nextDocuments);
+      this.documents = nextDocuments;
       return { matchedCount: 0, modifiedCount: 0, upsertedCount: 1 };
     }
 
@@ -98,7 +115,11 @@ export class FakeCollection<TDocument extends Record<string, unknown>>
       throw new Error("MongoDB does not allow updates to the immutable _id field.");
     }
 
-    Object.assign(target as TDocument, clone(nextValues as Record<string, unknown>));
+    const nextDocuments = clone(this.documents);
+    const nextTarget = nextDocuments.find((document) => matches(document, filter));
+    Object.assign(nextTarget as TDocument, clone(nextValues as Record<string, unknown>));
+    assertIndexesAllowDocuments(this.indexes, nextDocuments);
+    this.documents = nextDocuments;
     return { matchedCount: 1, modifiedCount: 1 };
   }
 
@@ -110,6 +131,7 @@ export class FakeCollection<TDocument extends Record<string, unknown>>
   }
 
   async createIndexes(indexes: IndexSpec[]) {
+    assertIndexesAllowDocuments([...this.indexes, ...indexes], this.documents);
     this.indexes.push(...indexes);
     return indexes.map((index) => index.name);
   }
@@ -146,4 +168,54 @@ function matches(document: Record<string, unknown>, filter: Record<string, unkno
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function assertIndexesAllowDocuments<TDocument extends Record<string, unknown>>(
+  indexes: IndexSpec[],
+  documents: TDocument[],
+) {
+  for (const index of indexes.filter((candidate) => candidate.unique)) {
+    const seen = new Set<string>();
+    for (const document of documents) {
+      const key = buildUniqueIndexKey(document, index);
+      if (!key) {
+        continue;
+      }
+
+      if (seen.has(key)) {
+        throw new Error(
+          `E11000 duplicate key error collection: fake index: ${index.name} dup key: ${key}`,
+        );
+      }
+
+      seen.add(key);
+    }
+  }
+}
+
+function buildUniqueIndexKey(document: Record<string, unknown>, index: IndexSpec) {
+  const entries = Object.keys(index.key).map((field) => {
+    const value = getValueByPath(document, field);
+    if (index.sparse && typeof value === "undefined") {
+      return undefined;
+    }
+
+    return `${field}:${JSON.stringify(typeof value === "undefined" ? null : value)}`;
+  });
+
+  if (entries.some((entry) => typeof entry === "undefined")) {
+    return undefined;
+  }
+
+  return entries.join("|");
+}
+
+function getValueByPath(document: Record<string, unknown>, path: string): unknown {
+  return path.split(".").reduce<unknown>((value, segment) => {
+    if (!value || typeof value !== "object") {
+      return undefined;
+    }
+
+    return (value as Record<string, unknown>)[segment];
+  }, document);
 }

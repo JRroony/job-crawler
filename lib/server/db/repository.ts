@@ -12,7 +12,7 @@ import { buildCanonicalJobIdentity, normalizeComparableIdentityText } from "@/li
 import { isBackgroundIngestionSearchFilters } from "@/lib/server/background/constants";
 import { dedupeJobs, dedupeStoredJobs } from "@/lib/server/crawler/dedupe";
 import { buildSourceLookupKey, createId } from "@/lib/server/crawler/helpers";
-import { collectionNames } from "@/lib/server/db/indexes";
+import { collectionNames } from "@/lib/server/db/collections";
 import { getMemoryDb } from "@/lib/server/db/memory";
 import {
   inventoryOriginFromDiscoveryMethod,
@@ -82,6 +82,7 @@ export type CollectionAdapter<TDocument extends Record<string, unknown>> = {
   bulkWrite?(
     operations: Array<
       | { insertOne: { document: TDocument } }
+      | { deleteOne: { filter: Record<string, unknown> } }
       | {
           updateOne: {
             filter: Record<string, unknown>;
@@ -1380,9 +1381,13 @@ export async function getRepository(db?: DatabaseAdapter | Db) {
   } catch (error) {
     if (!hasWarnedMemoryFallback) {
       hasWarnedMemoryFallback = true;
+      const message =
+        error instanceof Error ? error.message : "Unknown MongoDB initialization error.";
       console.warn(
-        "[db:fallback] MongoDB is unavailable; using in-memory persistence for this process.",
-        error instanceof Error ? { message: error.message } : { error },
+        /bootstrap failed|migration|index initialization|jobs_canonical_job_key/i.test(message)
+          ? "[db:fallback] MongoDB bootstrap failed; using in-memory persistence for this process."
+          : "[db:fallback] MongoDB is unavailable; using in-memory persistence for this process.",
+        error instanceof Error ? { message } : { error },
       );
     }
 
@@ -1395,37 +1400,11 @@ function mergeJobRecords(
   incoming: PersistableJob,
   crawlRunId: string,
 ): JobListing {
-  const mergedProvenance = dedupeStrings(
-    [...existing.sourceLookupKeys, ...incoming.sourceLookupKeys],
-  );
-  const crawlRunIds = dedupeStrings([...existing.crawlRunIds, crawlRunId]);
-  const sourceProvenance = dedupeProvenance([
-    ...existing.sourceProvenance,
-    ...incoming.sourceProvenance,
-  ]);
-
-  return {
-    ...existing,
-    ...selectPrimaryRecord(existing, incoming),
-    canonicalJobKey: existing.canonicalJobKey,
-    sourceLookupKeys: mergedProvenance,
-    crawlRunIds,
-    sourceProvenance,
-    firstSeenAt: earliestDate(existing.firstSeenAt, incoming.firstSeenAt) ?? existing.firstSeenAt,
-    lastSeenAt: latestDate(existing.lastSeenAt, incoming.lastSeenAt) ?? existing.lastSeenAt,
-    indexedAt: latestDate(existing.indexedAt, incoming.indexedAt) ?? existing.indexedAt,
-    isActive: incoming.isActive,
-    closedAt: incoming.isActive
-      ? undefined
-      : latestDate(existing.closedAt, incoming.closedAt) ?? incoming.closedAt,
-    discoveredAt:
-      existing.discoveredAt < incoming.discoveredAt
-        ? existing.discoveredAt
-        : incoming.discoveredAt,
-    crawledAt: latestDate(existing.crawledAt, incoming.crawledAt) ?? existing.crawledAt,
-    postingDate: latestDate(existing.postingDate, incoming.postingDate),
-    postedAt: latestDate(existing.postedAt, incoming.postedAt),
-  };
+  return mergeNormalizedJobRecord(existing, incoming, {
+    additionalCrawlRunIds: [crawlRunId],
+    forceCanonicalJobKey: existing.canonicalJobKey,
+    preserveId: existing._id,
+  });
 }
 
 function earliestDate(left?: string, right?: string) {
@@ -1466,10 +1445,20 @@ function parseStoredSourceInventory(document: Record<string, unknown>) {
   );
 }
 
-function selectPrimaryRecord(existing: JobListing, incoming: PersistableJob) {
-  const incomingScore = recordScore(incoming);
-  const existingScore = recordScore(existing);
-  return incomingScore >= existingScore ? incoming : existing;
+function selectPrimaryRecord<TJob extends Pick<
+  JobListing,
+  | "_id"
+  | "applyUrl"
+  | "canonicalUrl"
+  | "resolvedUrl"
+  | "sourceUrl"
+  | "linkStatus"
+  | "lastValidatedAt"
+> & Partial<Pick<JobListing, "crawlRunIds" | "sourceLookupKeys" | "sourceProvenance" | "firstSeenAt" | "lastSeenAt">>>(
+  left: TJob,
+  right: TJob,
+) {
+  return compareJobRecordQuality(left, right) >= 0 ? left : right;
 }
 
 function recordScore(job: Pick<JobListing, "linkStatus" | "resolvedUrl" | "canonicalUrl" | "lastValidatedAt">) {
@@ -1479,6 +1468,68 @@ function recordScore(job: Pick<JobListing, "linkStatus" | "resolvedUrl" | "canon
     (job.canonicalUrl ? 1 : 0) +
     (job.lastValidatedAt ? 1 : 0)
   );
+}
+
+function compareJobRecordQuality<
+  TJob extends Pick<
+    JobListing,
+    | "_id"
+    | "applyUrl"
+    | "canonicalUrl"
+    | "resolvedUrl"
+    | "sourceUrl"
+    | "linkStatus"
+    | "lastValidatedAt"
+  > &
+    Partial<
+      Pick<
+        JobListing,
+        "crawlRunIds" | "sourceLookupKeys" | "sourceProvenance" | "firstSeenAt" | "lastSeenAt"
+      >
+    >,
+>(left: TJob, right: TJob) {
+  const scoreDelta = recordScore(left) - recordScore(right);
+  if (scoreDelta !== 0) {
+    return scoreDelta;
+  }
+
+  const populatedUrlDelta = countPresentStrings(left) - countPresentStrings(right);
+  if (populatedUrlDelta !== 0) {
+    return populatedUrlDelta;
+  }
+
+  const provenanceDelta =
+    (left.sourceProvenance?.length ?? 0) - (right.sourceProvenance?.length ?? 0);
+  if (provenanceDelta !== 0) {
+    return provenanceDelta;
+  }
+
+  const lookupDelta =
+    (left.sourceLookupKeys?.length ?? 0) - (right.sourceLookupKeys?.length ?? 0);
+  if (lookupDelta !== 0) {
+    return lookupDelta;
+  }
+
+  const crawlRunDelta = (left.crawlRunIds?.length ?? 0) - (right.crawlRunIds?.length ?? 0);
+  if (crawlRunDelta !== 0) {
+    return crawlRunDelta;
+  }
+
+  if ((left.lastSeenAt ?? "") !== (right.lastSeenAt ?? "")) {
+    return (left.lastSeenAt ?? "") > (right.lastSeenAt ?? "") ? 1 : -1;
+  }
+
+  if ((left.firstSeenAt ?? "") !== (right.firstSeenAt ?? "")) {
+    return (left.firstSeenAt ?? "") < (right.firstSeenAt ?? "") ? 1 : -1;
+  }
+
+  return (left._id ?? "") <= (right._id ?? "") ? 1 : -1;
+}
+
+function countPresentStrings(
+  job: Pick<JobListing, "applyUrl" | "canonicalUrl" | "resolvedUrl" | "sourceUrl">,
+) {
+  return [job.canonicalUrl, job.resolvedUrl, job.applyUrl, job.sourceUrl].filter(Boolean).length;
 }
 
 function linkScore(status: JobListing["linkStatus"]) {
@@ -1511,6 +1562,88 @@ function latestDate(left?: string, right?: string) {
 
 function dedupeStrings(values: string[]) {
   return Array.from(new Set(values));
+}
+
+function pickPreferredValue<T>(preferred: T | undefined, alternate: T | undefined) {
+  return preferred ?? alternate;
+}
+
+function mergeNormalizedJobRecord(
+  existing: JobListing,
+  incoming: PersistableJob | JobListing,
+  options: {
+    additionalCrawlRunIds?: string[];
+    forceCanonicalJobKey?: string;
+    preserveId?: string;
+    preserveAnyActiveState?: boolean;
+  } = {},
+): JobListing {
+  const preferred = selectPrimaryRecord(existing, incoming as JobListing);
+  const alternate = preferred === existing ? incoming : existing;
+  const sourceLookupKeys = dedupeStrings([
+    ...existing.sourceLookupKeys,
+    ...incoming.sourceLookupKeys,
+  ]);
+  const crawlRunIds = dedupeStrings([
+    ...existing.crawlRunIds,
+    ...("crawlRunIds" in incoming && Array.isArray(incoming.crawlRunIds)
+      ? incoming.crawlRunIds
+      : []),
+    ...(options.additionalCrawlRunIds ?? []),
+  ]);
+  const sourceProvenance = dedupeProvenance([
+    ...existing.sourceProvenance,
+    ...incoming.sourceProvenance,
+  ]);
+  const isActive = options.preserveAnyActiveState
+    ? existing.isActive || incoming.isActive
+    : incoming.isActive;
+  const lastSeenAt = latestDate(existing.lastSeenAt, incoming.lastSeenAt) ?? existing.lastSeenAt;
+  const mergedId =
+    options.preserveId ??
+    pickPreferredValue(preferred._id, "_id" in alternate ? alternate._id : undefined) ??
+    existing._id;
+
+  return jobListingSchema.parse({
+    ...alternate,
+    ...preferred,
+    _id: mergedId,
+    canonicalJobKey:
+      options.forceCanonicalJobKey ??
+      pickPreferredValue(preferred.canonicalJobKey, alternate.canonicalJobKey),
+    sourceLookupKeys,
+    crawlRunIds,
+    sourceProvenance,
+    canonicalUrl: pickPreferredValue(preferred.canonicalUrl, alternate.canonicalUrl),
+    resolvedUrl: pickPreferredValue(preferred.resolvedUrl, alternate.resolvedUrl),
+    applyUrl: pickPreferredValue(preferred.applyUrl, alternate.applyUrl),
+    sourceUrl: pickPreferredValue(preferred.sourceUrl, alternate.sourceUrl),
+    sourceCompanySlug: pickPreferredValue(
+      preferred.sourceCompanySlug,
+      alternate.sourceCompanySlug,
+    ),
+    sourceJobId: pickPreferredValue(preferred.sourceJobId, alternate.sourceJobId),
+    firstSeenAt: earliestDate(existing.firstSeenAt, incoming.firstSeenAt) ?? existing.firstSeenAt,
+    lastSeenAt,
+    indexedAt: latestDate(existing.indexedAt, incoming.indexedAt) ?? existing.indexedAt,
+    isActive,
+    closedAt: isActive
+      ? undefined
+      : latestDate(existing.closedAt, incoming.closedAt) ?? lastSeenAt,
+    discoveredAt:
+      earliestDate(existing.discoveredAt, incoming.discoveredAt) ?? existing.discoveredAt,
+    crawledAt: latestDate(existing.crawledAt, incoming.crawledAt) ?? existing.crawledAt,
+    postingDate: latestDate(existing.postingDate, incoming.postingDate),
+    postedAt: latestDate(existing.postedAt, incoming.postedAt),
+    contentHash: pickPreferredValue(preferred.contentHash, alternate.contentHash),
+  });
+}
+
+export function mergeStoredJobs(existing: JobListing, incoming: JobListing) {
+  return mergeNormalizedJobRecord(existing, incoming, {
+    forceCanonicalJobKey: existing.canonicalJobKey,
+    preserveAnyActiveState: true,
+  });
 }
 
 function sanitizePersistableJob(job: PersistableJob): PersistableJob {
@@ -1561,11 +1694,48 @@ function dedupeProvenance(records: JobListing["sourceProvenance"]) {
   const map = new Map<string, JobListing["sourceProvenance"][number]>();
 
   for (const record of records) {
-    const key = `${record.sourcePlatform}:${record.sourceJobId}:${record.applyUrl}`;
-    map.set(key, record);
+    const key = stableSerialize({
+      sourcePlatform: record.sourcePlatform,
+      sourceJobId: record.sourceJobId,
+      sourceUrl: record.sourceUrl,
+      applyUrl: record.applyUrl,
+    });
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, record);
+      continue;
+    }
+
+    const preferred = selectPreferredProvenanceRecord(existing, record);
+    const alternate = preferred === existing ? record : existing;
+    map.set(key, {
+      ...alternate,
+      ...preferred,
+      discoveredAt:
+        earliestDate(existing.discoveredAt, record.discoveredAt) ?? preferred.discoveredAt,
+      resolvedUrl: preferred.resolvedUrl ?? alternate.resolvedUrl,
+      canonicalUrl: preferred.canonicalUrl ?? alternate.canonicalUrl,
+      rawSourceMetadata: {
+        ...existing.rawSourceMetadata,
+        ...record.rawSourceMetadata,
+      },
+    });
   }
 
   return Array.from(map.values());
+}
+
+function selectPreferredProvenanceRecord(
+  left: JobListing["sourceProvenance"][number],
+  right: JobListing["sourceProvenance"][number],
+) {
+  const leftScore = Number(Boolean(left.resolvedUrl)) + Number(Boolean(left.canonicalUrl));
+  const rightScore = Number(Boolean(right.resolvedUrl)) + Number(Boolean(right.canonicalUrl));
+  if (leftScore !== rightScore) {
+    return leftScore > rightScore ? left : right;
+  }
+
+  return left.discoveredAt <= right.discoveredAt ? left : right;
 }
 
 function shouldEmitIndexedJobEvent(existing: JobListing, merged: JobListing) {
@@ -1960,7 +2130,7 @@ function parseStoredIndexedJobEvent(document: Record<string, unknown>): IndexedJ
   });
 }
 
-function parseStoredJob(document: Record<string, unknown>) {
+export function parseStoredJob(document: Record<string, unknown>) {
   return jobListingSchema.parse(normalizeStoredJobFields(document));
 }
 

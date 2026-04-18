@@ -30,7 +30,16 @@ export async function getMongoDb(): Promise<Db> {
 
   const client = await getMongoClient();
   const db = client.db(databaseNameFromUri(env.MONGODB_URI));
-  await ensureDatabaseIndexes(db);
+  try {
+    await ensureDatabaseIndexes(db);
+  } catch (error) {
+    throw new Error(
+      `MongoDB bootstrap failed during migration/index initialization: ${
+        error instanceof Error ? error.message : "unknown bootstrap error"
+      }`,
+      { cause: error },
+    );
+  }
   return db;
 }
 

@@ -611,11 +611,14 @@ async function resolveDurableBackgroundRepository(repository?: JobCrawlerReposit
 
     return new JobCrawlerRepository((await getMongoDb()) as never);
   } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "MongoDB is unavailable for recurring background ingestion.";
     console.warn("[background-ingestion:mongo-unavailable]", {
-      message:
-        error instanceof Error
-          ? error.message
-          : "MongoDB is unavailable for recurring background ingestion.",
+      message,
+      bootstrapFailure:
+        /bootstrap failed|migration|index initialization|jobs_canonical_job_key/i.test(message),
     });
     return null;
   }

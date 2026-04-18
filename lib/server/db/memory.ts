@@ -26,6 +26,7 @@ class MemoryCollection<TDocument extends Record<string, unknown>>
   async bulkWrite(
     operations: Array<
       | { insertOne: { document: TDocument } }
+      | { deleteOne: { filter: Record<string, unknown> } }
       | {
           updateOne: {
             filter: Record<string, unknown>;
@@ -42,6 +43,16 @@ class MemoryCollection<TDocument extends Record<string, unknown>>
       if ("insertOne" in operation) {
         await this.insertOne(operation.insertOne.document);
         insertedCount += 1;
+        continue;
+      }
+
+      if ("deleteOne" in operation) {
+        const index = this.documents.findIndex((document) =>
+          matches(document, operation.deleteOne.filter),
+        );
+        if (index >= 0) {
+          this.documents.splice(index, 1);
+        }
         continue;
       }
 
