@@ -16,6 +16,7 @@ import {
   discoverSupplementalSourcesDetailed,
   discoverSources,
   discoverSourcesDetailed,
+  expandSourceInventory,
   refreshSourceInventory,
   resolvePublicSearchExecutionOptions,
 } from "@/lib/server/discovery/service";
@@ -2112,6 +2113,105 @@ describe("source capping with platform diversity", () => {
     ).toMatchObject({
       inventoryOrigin: "public_search",
       lastSeenAt: "2026-04-15T00:00:00.000Z",
+    });
+  });
+
+  it("expands persistent source inventory from a bounded background public-search portfolio", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-15T00:00:00.000Z");
+    const refreshedInventory = await refreshSourceInventory({
+      repository,
+      now,
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+      },
+    });
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      if (url.startsWith("https://www.bing.com/search")) {
+        return new Response(
+          `
+            <rss>
+              <channel>
+                <item>
+                  <link>https://job-boards.greenhouse.io/novelcoverageco/jobs/8455464002?gh_jid=8455464002</link>
+                </item>
+              </channel>
+            </rss>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/rss+xml",
+            },
+          },
+        );
+      }
+
+      if (url.startsWith("https://html.duckduckgo.com/html/")) {
+        return new Response("<html><body></body></html>", {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        });
+      }
+
+      if (url === "https://boards-api.greenhouse.io/v1/boards/novelcoverageco/jobs/8455464002?content=true") {
+        return new Response(
+          JSON.stringify({
+            id: "8455464002",
+            title: "Software Engineer",
+            absolute_url: "https://job-boards.greenhouse.io/novelcoverageco/jobs/8455464002",
+            company_name: "Novel Coverage Co",
+            location: { name: "Remote - United States" },
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const result = await expandSourceInventory({
+      repository,
+      now,
+      fetchImpl,
+      intervalMs: 600_000,
+      maxSources: 4,
+      refreshedInventory,
+      maxExpansionSearches: 1,
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
+        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
+        PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 4,
+        PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 2,
+        GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 1,
+      },
+    });
+
+    expect(result.inventory.some((record) => record._id === "greenhouse:novelcoverageco")).toBe(true);
+    expect(result.diagnostics).toMatchObject({
+      beforeCount: refreshedInventory.length,
+      afterExpansionCount: refreshedInventory.length + 1,
+      candidateSources: 1,
+      newSourcesAdded: 1,
+      newSourceIds: ["greenhouse:novelcoverageco"],
     });
   });
 

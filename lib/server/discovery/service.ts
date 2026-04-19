@@ -8,11 +8,14 @@ import { expandCompanyPageSources } from "@/lib/server/discovery/company-page-ex
 import { lookupGreenhouseCompanyHint } from "@/lib/server/discovery/greenhouse-registry";
 import {
   buildSourceInventorySeeds,
+  inventoryOriginFromDiscoveryMethod,
   toDiscoveredSourceFromInventory,
   toSourceInventoryRecord,
+  type SourceInventoryRecord,
 } from "@/lib/server/discovery/inventory";
 import { discoverSourcesFromPublicSearchDetailed } from "@/lib/server/discovery/public-search";
 import { resolveOperationalCrawlerPlatforms, type CrawlMode } from "@/lib/types";
+import type { CrawlDiagnostics, SearchFilters } from "@/lib/types";
 import type {
   DiscoveryExecution,
   DiscoveryExecutionStage,
@@ -40,6 +43,30 @@ type DiscoveryRuntime = {
   repository?: JobCrawlerRepository;
   env?: DiscoveryEnvSnapshot;
 };
+
+type SourceInventoryExpansionDiagnostics = NonNullable<CrawlDiagnostics["inventoryExpansion"]>;
+
+export type SourceInventoryExpansionResult = {
+  inventory: SourceInventoryRecord[];
+  diagnostics: SourceInventoryExpansionDiagnostics;
+};
+
+const defaultInventoryExpansionSearchesPerCycle = 2;
+
+const backgroundInventoryExpansionPortfolio: SearchFilters[] = [
+  { title: "software engineer", country: "United States", crawlMode: "balanced" },
+  { title: "data analyst", country: "United States", crawlMode: "balanced" },
+  { title: "business analyst", country: "United States", crawlMode: "balanced" },
+  { title: "product manager", country: "United States", crawlMode: "balanced" },
+  { title: "ai engineer", country: "United States", crawlMode: "balanced" },
+  { title: "customer success manager", country: "United States", crawlMode: "balanced" },
+  { title: "sales engineer", country: "United States", crawlMode: "balanced" },
+  { title: "technical writer", country: "United States", crawlMode: "balanced" },
+  { title: "software engineer", country: "United States", state: "CA", crawlMode: "balanced" },
+  { title: "data analyst", country: "United States", state: "NY", crawlMode: "balanced" },
+  { title: "product manager", country: "United States", state: "TX", crawlMode: "balanced" },
+  { title: "business analyst", country: "United States", state: "WA", crawlMode: "balanced" },
+];
 
 export function createDiscoveryService(runtime: DiscoveryRuntime = {}): DiscoveryService {
   return {
@@ -468,6 +495,195 @@ export async function refreshSourceInventory(input: {
   return persisted;
 }
 
+export async function expandSourceInventory(input: {
+  repository: JobCrawlerRepository;
+  now: Date;
+  env?: DiscoveryEnvSnapshot;
+  fetchImpl?: typeof fetch;
+  intervalMs: number;
+  maxSources: number;
+  refreshedInventory?: SourceInventoryRecord[];
+  maxExpansionSearches?: number;
+}): Promise<SourceInventoryExpansionResult> {
+  const env = input.env ?? getEnv();
+  const beforeRecords = input.refreshedInventory ?? await input.repository.listSourceInventory();
+  const beforeIds = new Set(beforeRecords.map((record) => record._id));
+  const selectedFilters = selectBackgroundInventoryExpansionFilters({
+    now: input.now,
+    intervalMs: input.intervalMs,
+    maxSearches: input.maxExpansionSearches ?? defaultInventoryExpansionSearchesPerCycle,
+  });
+  const baseDiagnostics: SourceInventoryExpansionDiagnostics = {
+    beforeCount: beforeRecords.length,
+    afterRefreshCount: beforeRecords.length,
+    afterExpansionCount: beforeRecords.length,
+    selectedSearches: selectedFilters.length,
+    candidateSources: 0,
+    newSourcesAdded: 0,
+    selectedSearchTitles: selectedFilters.map(formatExpansionFilterLabel).slice(0, 12),
+    selectedSourceIds: [],
+    newSourceIds: [],
+    platformCountsBefore: summarizeInventoryRecordPlatformCounts(beforeRecords),
+    platformCountsAfter: summarizeInventoryRecordPlatformCounts(beforeRecords),
+    searchDiagnostics: [],
+  };
+
+  if (!env.PUBLIC_SEARCH_DISCOVERY_ENABLED) {
+    return {
+      inventory: beforeRecords,
+      diagnostics: {
+        ...baseDiagnostics,
+        selectedSearches: 0,
+        skippedReason: "public_search_disabled",
+      },
+    };
+  }
+
+  if (selectedFilters.length === 0) {
+    return {
+      inventory: beforeRecords,
+      diagnostics: {
+        ...baseDiagnostics,
+        skippedReason: "no_expansion_searches_selected",
+      },
+    };
+  }
+
+  const sourceBudget = Math.max(
+    1,
+    Math.min(
+      env.PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES,
+      Math.max(input.maxSources, selectedFilters.length * 4),
+    ),
+  );
+  const perSearchSourceBudget = Math.max(
+    1,
+    Math.ceil(sourceBudget / selectedFilters.length),
+  );
+  const candidates = new Map<string, DiscoveredSource>();
+  const searchDiagnostics: SourceInventoryExpansionDiagnostics["searchDiagnostics"] = [];
+
+  for (const filters of selectedFilters) {
+    const remainingBudget = sourceBudget - candidates.size;
+    if (remainingBudget <= 0) {
+      break;
+    }
+
+    const discovery = await discoverSourcesDetailed({
+      filters,
+      now: input.now,
+      fetchImpl: input.fetchImpl,
+      repository: input.repository,
+      env: {
+        ...env,
+        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: Math.min(
+          env.PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS,
+          8,
+        ),
+        PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: Math.min(
+          perSearchSourceBudget,
+          remainingBudget,
+        ),
+        PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: Math.min(
+          env.PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES,
+          16,
+        ),
+        GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: Math.min(
+          env.GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES,
+          6,
+        ),
+      },
+    });
+
+    searchDiagnostics.push({
+      title: filters.title,
+      country: filters.country,
+      state: filters.state,
+      city: filters.city,
+      discoveredSources: discovery.sources.length,
+      publicSources: discovery.diagnostics.publicSources,
+      publicJobs: discovery.diagnostics.publicJobs,
+      publicSearch: discovery.diagnostics.publicSearch,
+    });
+
+    for (const source of discovery.sources) {
+      if (beforeIds.has(source.id) || source.platform === "unknown") {
+        continue;
+      }
+
+      if (!candidates.has(source.id)) {
+        candidates.set(source.id, source);
+      }
+
+      if (candidates.size >= sourceBudget) {
+        break;
+      }
+    }
+  }
+
+  const now = input.now.toISOString();
+  const candidateSources = Array.from(candidates.values());
+  if (candidateSources.length > 0) {
+    await input.repository.upsertSourceInventory(
+      candidateSources.map((source, index) =>
+        toSourceInventoryRecord(source, {
+          now,
+          inventoryOrigin: inventoryOriginFromDiscoveryMethod(source.discoveryMethod),
+          inventoryRank: 60_000 + index,
+        }),
+      ),
+    );
+  }
+
+  const afterRecords = await input.repository.listSourceInventory();
+  const newSourceIds = afterRecords
+    .filter((record) => !beforeIds.has(record._id))
+    .map((record) => record._id);
+
+  return {
+    inventory: afterRecords,
+    diagnostics: {
+      ...baseDiagnostics,
+      candidateSources: candidateSources.length,
+      newSourcesAdded: newSourceIds.length,
+      selectedSourceIds: candidateSources.slice(0, 12).map((source) => source.id),
+      newSourceIds: newSourceIds.slice(0, 12),
+      afterExpansionCount: afterRecords.length,
+      platformCountsAfter: summarizeInventoryRecordPlatformCounts(afterRecords),
+      searchDiagnostics: searchDiagnostics.slice(0, 12),
+    },
+  };
+}
+
+export function selectBackgroundInventoryExpansionFilters(input: {
+  now: Date;
+  intervalMs: number;
+  maxSearches: number;
+}) {
+  const maxSearches = Math.max(0, Math.floor(input.maxSearches));
+  if (maxSearches <= 0) {
+    return [];
+  }
+
+  const cycle = Math.floor(input.now.getTime() / Math.max(1, input.intervalMs));
+  const startIndex = cycle % backgroundInventoryExpansionPortfolio.length;
+  const selected: SearchFilters[] = [];
+
+  for (
+    let offset = 0;
+    offset < Math.min(maxSearches, backgroundInventoryExpansionPortfolio.length);
+    offset += 1
+  ) {
+    selected.push(
+      backgroundInventoryExpansionPortfolio[
+        (startIndex + offset) % backgroundInventoryExpansionPortfolio.length
+      ],
+    );
+  }
+
+  return selected;
+}
+
 function buildConfiguredSources(input: DiscoveryInput & { env: DiscoveryEnvSnapshot }) {
   const candidates = [
     ...input.env.greenhouseBoardTokens.map((token) =>
@@ -627,6 +843,19 @@ function summarizePlatformCounts(sources: DiscoveredSource[]) {
     counts[source.platform] = (counts[source.platform] ?? 0) + 1;
     return counts;
   }, {});
+}
+
+function summarizeInventoryRecordPlatformCounts(records: SourceInventoryRecord[]) {
+  return records.reduce<Record<string, number>>((counts, record) => {
+    counts[record.platform] = (counts[record.platform] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function formatExpansionFilterLabel(filters: SearchFilters) {
+  return [filters.title, filters.city, filters.state, filters.country]
+    .filter(Boolean)
+    .join(" / ");
 }
 
 function summarizeDiscoveryMethodCounts(sources: DiscoveredSource[]) {

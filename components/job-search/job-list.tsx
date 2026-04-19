@@ -8,13 +8,17 @@ import { buildStableJobRenderKeys } from "@/components/job-search/helpers";
 
 type JobListProps = {
   jobs: JobListing[];
+  jobRenderKeys?: string[];
   selectedJobKey?: string;
   onSelect: (selectionKey: string) => void;
   emptyMessage?: string;
 };
 
 export function JobList(props: JobListProps) {
-  const renderKeys = buildStableJobRenderKeys(props.jobs);
+  const renderKeys =
+    props.jobRenderKeys?.length === props.jobs.length
+      ? props.jobRenderKeys
+      : buildStableJobRenderKeys(props.jobs);
 
   if (props.jobs.length === 0) {
     return (

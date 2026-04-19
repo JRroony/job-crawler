@@ -14,7 +14,9 @@ import {
 import { getEnv } from "@/lib/server/env";
 import {
   planPersistentInventoryRecurringCrawl,
+  runPersistentInventoryExpansion,
   refreshPersistentSourceInventory,
+  type InventoryExpansionResult,
 } from "@/lib/server/inventory/service";
 import { resolveObservedSourceNextEligibleAt } from "@/lib/server/inventory/selection";
 import { createDefaultProviders } from "@/lib/server/providers";
@@ -42,11 +44,28 @@ type BackgroundIngestionRuntime = {
     repository: JobCrawlerRepository;
     now: Date;
   }) => Promise<SourceInventoryRecord[]>;
+  expandInventory?: (runtime: {
+    repository: JobCrawlerRepository;
+    now: Date;
+    fetchImpl?: typeof fetch;
+    intervalMs: number;
+    maxSources: number;
+  }) => Promise<InventoryExpansionResult>;
+  resolveRepository?: () => Promise<JobCrawlerRepository>;
 };
 
 type BackgroundIngestionTriggerResult =
   | { status: "started"; searchId: string; crawlRunId: string }
-  | { status: "skipped-disabled" | "skipped-active" | "skipped-no-mongo"; searchId?: string };
+  | {
+      status:
+        | "skipped-disabled"
+        | "skipped-active"
+        | "skipped-no-mongo"
+        | "skipped-bootstrap-failed";
+      searchId?: string;
+      reason?: "mongo_unavailable" | "bootstrap_failed";
+      message?: string;
+    };
 
 type BackgroundSchedulerState = {
   startedAt: string;
@@ -135,10 +154,18 @@ export async function triggerRecurringBackgroundIngestion(
     return { status: "skipped-disabled" };
   }
 
-  const repository = await resolveDurableBackgroundRepository(runtime.repository);
-  if (!repository) {
-    return { status: "skipped-no-mongo" };
+  const repositoryResolution = await resolveDurableBackgroundRepository(runtime);
+  if (!repositoryResolution.repository) {
+    return {
+      status:
+        repositoryResolution.reason === "bootstrap_failed"
+          ? "skipped-bootstrap-failed"
+          : "skipped-no-mongo",
+      reason: repositoryResolution.reason,
+      message: repositoryResolution.message,
+    };
   }
+  const repository = repositoryResolution.repository;
 
   const now = runtime.now ?? new Date();
   const search = await ensureBackgroundSearch(repository, now);
@@ -196,6 +223,7 @@ export async function triggerRecurringBackgroundIngestion(
             Math.floor(runtime.schedulingIntervalMs ?? env.BACKGROUND_INGESTION_INTERVAL_MS),
           ),
           refreshInventory: runtime.refreshInventory,
+          expandInventory: runtime.expandInventory,
         },
       );
     },
@@ -237,6 +265,13 @@ async function executeRecurringInventoryIngestion(
       repository: JobCrawlerRepository;
       now: Date;
     }) => Promise<SourceInventoryRecord[]>;
+    expandInventory?: (runtime: {
+      repository: JobCrawlerRepository;
+      now: Date;
+      fetchImpl?: typeof fetch;
+      intervalMs: number;
+      maxSources: number;
+    }) => Promise<InventoryExpansionResult>;
   },
 ) {
   const repository = runtime.repository;
@@ -282,11 +317,23 @@ async function executeRecurringInventoryIngestion(
 
     const discoveryStartedMs = Date.now();
     await runController.throwIfCanceled();
-    const inventory = await (runtime.refreshInventory ?? refreshPersistentSourceInventory)({
+    const refreshedInventory = await (runtime.refreshInventory ?? refreshPersistentSourceInventory)({
       repository,
       now: runtime.now,
     });
+    const inventoryExpansion = await resolveInventoryExpansion({
+      repository,
+      now: runtime.now,
+      fetchImpl: runtime.fetchImpl,
+      intervalMs: runtime.schedulingIntervalMs,
+      maxSources: runtime.maxSources,
+      refreshedInventory,
+      refreshInventoryProvided: Boolean(runtime.refreshInventory),
+      expandInventory: runtime.expandInventory,
+    });
+    const inventory = inventoryExpansion.inventory;
     diagnostics.discoveredSources = inventory.length;
+    diagnostics.inventoryExpansion = inventoryExpansion.diagnostics;
     diagnostics.performance.stageTimingsMs.discovery = Date.now() - discoveryStartedMs;
     const selectionPlan = planPersistentInventoryRecurringCrawl({
       inventory,
@@ -301,6 +348,17 @@ async function executeRecurringInventoryIngestion(
     );
     const inventorySources = selectionPlan.selectedRecords.map(toDiscoveredSourceFromInventory);
 
+    console.info("[background-ingestion:inventory-expansion]", {
+      beforeCount: inventoryExpansion.diagnostics.beforeCount,
+      afterRefreshCount: inventoryExpansion.diagnostics.afterRefreshCount,
+      afterExpansionCount: inventoryExpansion.diagnostics.afterExpansionCount,
+      selectedSearches: inventoryExpansion.diagnostics.selectedSearches,
+      candidateSources: inventoryExpansion.diagnostics.candidateSources,
+      newSourcesAdded: inventoryExpansion.diagnostics.newSourcesAdded,
+      newSourceIds: inventoryExpansion.diagnostics.newSourceIds,
+      skippedReason: inventoryExpansion.diagnostics.skippedReason,
+    });
+
     console.info("[background-ingestion:source-selection]", {
       inventorySources: selectionPlan.diagnostics.inventorySources,
       crawlableSources: selectionPlan.diagnostics.crawlableSources,
@@ -310,6 +368,8 @@ async function executeRecurringInventoryIngestion(
       freshnessBuckets: selectionPlan.diagnostics.freshnessBuckets,
       selectedByPlatform: selectionPlan.diagnostics.selectedByPlatform,
       selectedByHealth: selectionPlan.diagnostics.selectedByHealth,
+      selectedSourceIds: selectionPlan.diagnostics.selectedSourceIds,
+      skippedSourceSamples: selectionPlan.diagnostics.skippedSourceSamples,
     });
 
     await repository.updateCrawlRunProgress(target.crawlRunId, {
@@ -598,30 +658,130 @@ async function ensureBackgroundSearch(repository: JobCrawlerRepository, now: Dat
   return repository.createSearch(backgroundIngestionSearchFilters, now.toISOString());
 }
 
-async function resolveDurableBackgroundRepository(repository?: JobCrawlerRepository) {
-  if (repository) {
-    return repository;
+async function resolveInventoryExpansion(input: {
+  repository: JobCrawlerRepository;
+  now: Date;
+  fetchImpl?: typeof fetch;
+  intervalMs: number;
+  maxSources: number;
+  refreshedInventory: SourceInventoryRecord[];
+  refreshInventoryProvided: boolean;
+  expandInventory?: (runtime: {
+    repository: JobCrawlerRepository;
+    now: Date;
+    fetchImpl?: typeof fetch;
+    intervalMs: number;
+    maxSources: number;
+  }) => Promise<InventoryExpansionResult>;
+}): Promise<InventoryExpansionResult> {
+  if (input.expandInventory) {
+    return input.expandInventory({
+      repository: input.repository,
+      now: input.now,
+      fetchImpl: input.fetchImpl,
+      intervalMs: input.intervalMs,
+      maxSources: input.maxSources,
+    });
+  }
+
+  if (input.refreshInventoryProvided) {
+    return {
+      inventory: input.refreshedInventory,
+      diagnostics: {
+        beforeCount: input.refreshedInventory.length,
+        afterRefreshCount: input.refreshedInventory.length,
+        afterExpansionCount: input.refreshedInventory.length,
+        selectedSearches: 0,
+        candidateSources: 0,
+        newSourcesAdded: 0,
+        selectedSearchTitles: [],
+        selectedSourceIds: [],
+        newSourceIds: [],
+        platformCountsBefore: summarizeInventoryPlatforms(input.refreshedInventory),
+        platformCountsAfter: summarizeInventoryPlatforms(input.refreshedInventory),
+        skippedReason: "legacy_refresh_inventory_override",
+        searchDiagnostics: [],
+      },
+    };
+  }
+
+  return runPersistentInventoryExpansion({
+    repository: input.repository,
+    now: input.now,
+    fetchImpl: input.fetchImpl,
+    intervalMs: input.intervalMs,
+    maxSources: input.maxSources,
+    refreshedInventory: input.refreshedInventory,
+  });
+}
+
+function summarizeInventoryPlatforms(records: SourceInventoryRecord[]) {
+  return records.reduce<Record<string, number>>((counts, record) => {
+    counts[record.platform] = (counts[record.platform] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+async function resolveDurableBackgroundRepository(runtime: BackgroundIngestionRuntime): Promise<
+  | { repository: JobCrawlerRepository; reason?: never; message?: never }
+  | { repository: null; reason: "mongo_unavailable" | "bootstrap_failed"; message: string }
+> {
+  if (runtime.repository) {
+    return { repository: runtime.repository };
   }
 
   try {
+    if (runtime.resolveRepository) {
+      return { repository: await runtime.resolveRepository() };
+    }
+
     const [{ JobCrawlerRepository }, { getMongoDb }] = await Promise.all([
       import("@/lib/server/db/repository"),
       import("@/lib/server/mongodb"),
     ]);
 
-    return new JobCrawlerRepository((await getMongoDb()) as never);
+    return { repository: new JobCrawlerRepository((await getMongoDb()) as never) };
   } catch (error) {
     const message =
       error instanceof Error
         ? error.message
         : "MongoDB is unavailable for recurring background ingestion.";
-    console.warn("[background-ingestion:mongo-unavailable]", {
-      message,
-      bootstrapFailure:
-        /bootstrap failed|migration|index initialization|jobs_canonical_job_key/i.test(message),
-    });
-    return null;
+    const failure = classifyBackgroundRepositoryFailure(error);
+    console.warn(
+      failure.reason === "bootstrap_failed"
+        ? "[background-ingestion:bootstrap-failed]"
+        : "[background-ingestion:mongo-unavailable]",
+      {
+        message,
+        reason: failure.reason,
+        bootstrapFailure: failure.reason === "bootstrap_failed",
+      },
+    );
+    return failure;
   }
+}
+
+export function classifyBackgroundRepositoryFailure(error: unknown): {
+  repository: null;
+  reason: "mongo_unavailable" | "bootstrap_failed";
+  message: string;
+} {
+  const message =
+    error instanceof Error
+      ? error.message
+      : "MongoDB is unavailable for recurring background ingestion.";
+  const reason =
+    /bootstrap failed|migration|index initialization|index init|jobs_canonical_job_key/i.test(
+      message,
+    )
+      ? "bootstrap_failed"
+      : "mongo_unavailable";
+
+  return {
+    repository: null,
+    reason,
+    message,
+  };
 }
 
 async function recoverStaleBackgroundRunIfNeeded(
@@ -797,6 +957,20 @@ function createEmptyDiagnostics(): CrawlDiagnostics {
       selectedByHealth: {},
       selectedSourceIds: [],
       skippedSourceSamples: [],
+    },
+    inventoryExpansion: {
+      beforeCount: 0,
+      afterRefreshCount: 0,
+      afterExpansionCount: 0,
+      selectedSearches: 0,
+      candidateSources: 0,
+      newSourcesAdded: 0,
+      selectedSearchTitles: [],
+      selectedSourceIds: [],
+      newSourceIds: [],
+      platformCountsBefore: {},
+      platformCountsAfter: {},
+      searchDiagnostics: [],
     },
     performance: {
       stageTimingsMs: {

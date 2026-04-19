@@ -443,6 +443,37 @@ export const crawlDiagnosticsSchema = z.object({
       skippedSourceSamples: z.array(z.string().min(1)).max(12).default([]),
     })
     .optional(),
+  inventoryExpansion: z
+    .object({
+      beforeCount: z.number().int().nonnegative().default(0),
+      afterRefreshCount: z.number().int().nonnegative().default(0),
+      afterExpansionCount: z.number().int().nonnegative().default(0),
+      selectedSearches: z.number().int().nonnegative().default(0),
+      candidateSources: z.number().int().nonnegative().default(0),
+      newSourcesAdded: z.number().int().nonnegative().default(0),
+      selectedSearchTitles: z.array(z.string().min(1)).max(12).default([]),
+      selectedSourceIds: z.array(z.string().min(1)).max(12).default([]),
+      newSourceIds: z.array(z.string().min(1)).max(12).default([]),
+      platformCountsBefore: z.record(z.string(), z.number().int().nonnegative()).default({}),
+      platformCountsAfter: z.record(z.string(), z.number().int().nonnegative()).default({}),
+      skippedReason: nullableOptional(z.string()),
+      searchDiagnostics: z
+        .array(
+          z.object({
+            title: z.string().min(1),
+            country: nullableOptional(z.string()),
+            state: nullableOptional(z.string()),
+            city: nullableOptional(z.string()),
+            discoveredSources: z.number().int().nonnegative().default(0),
+            publicSources: z.number().int().nonnegative().default(0),
+            publicJobs: z.number().int().nonnegative().default(0),
+            publicSearch: nullableOptional(publicSearchDiscoveryDiagnosticsSchema),
+          }),
+        )
+        .max(12)
+        .default([]),
+    })
+    .optional(),
   session: z
     .object({
       indexedResultsCount: z.number().int().nonnegative().default(0),

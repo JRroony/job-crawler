@@ -4,7 +4,11 @@ import type {
   JobCrawlerRepository,
   SourceInventoryObservation,
 } from "@/lib/server/db/repository";
-import { refreshSourceInventory } from "@/lib/server/discovery/service";
+import {
+  expandSourceInventory,
+  refreshSourceInventory,
+  type SourceInventoryExpansionResult,
+} from "@/lib/server/discovery/service";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import type { SourceInventoryRecord } from "@/lib/server/discovery/inventory";
 import type { CrawlProvider } from "@/lib/server/providers/types";
@@ -14,6 +18,8 @@ import {
 } from "@/lib/server/inventory/selection";
 import { resolveRepository } from "@/lib/server/services/runtime";
 
+export type InventoryExpansionResult = SourceInventoryExpansionResult;
+
 export async function refreshPersistentSourceInventory(runtime: {
   repository?: JobCrawlerRepository;
   now?: Date;
@@ -22,6 +28,25 @@ export async function refreshPersistentSourceInventory(runtime: {
   return refreshSourceInventory({
     repository,
     now: runtime.now ?? new Date(),
+  });
+}
+
+export async function runPersistentInventoryExpansion(runtime: {
+  repository?: JobCrawlerRepository;
+  now?: Date;
+  fetchImpl?: typeof fetch;
+  intervalMs: number;
+  maxSources: number;
+  refreshedInventory?: SourceInventoryRecord[];
+}) {
+  const repository = await resolveRepository(runtime.repository);
+  return expandSourceInventory({
+    repository,
+    now: runtime.now ?? new Date(),
+    fetchImpl: runtime.fetchImpl,
+    intervalMs: runtime.intervalMs,
+    maxSources: runtime.maxSources,
+    refreshedInventory: runtime.refreshedInventory,
   });
 }
 

@@ -26,7 +26,7 @@ import {
   parseLocationInput,
 } from "@/components/job-search/helpers";
 import { SearchBar } from "@/components/job-search/search-bar";
-import { ResultsTable } from "@/components/results-table";
+import { buildResultsExportFilename, ResultsTable } from "@/components/results-table";
 import { buildStableJobRenderIdentity } from "@/lib/job-identity";
 import type {
   CrawlDeltaResponse,
@@ -866,6 +866,7 @@ export function JobCrawlerApp({
               <ResultsTable
                 jobs={visibleJobs}
                 totalJobs={activeResult.jobs.length}
+                exportFilename={buildResultsExportFilename(activeResult.search.filters)}
                 emptyMessage="No jobs match the current browse filters. Clear a few filters or rerun the search."
                 onRevalidate={revalidateSingleJob}
                 revalidatingIds={revalidatingIds}
