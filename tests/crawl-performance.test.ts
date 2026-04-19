@@ -7,7 +7,11 @@ import {
 } from "@/lib/server/crawler/service";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
-import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
+import type {
+  DiscoveredSource,
+  DiscoveryExecutionStage,
+  DiscoveryService,
+} from "@/lib/server/discovery/types";
 import type { CrawlProvider, NormalizedJobSeed } from "@/lib/server/providers/types";
 
 import { FakeDb } from "@/tests/helpers/fake-db";
@@ -36,6 +40,51 @@ function createDiscovery(): DiscoveryService {
           discoveryMethod: "configured_env",
         }),
       ];
+    },
+  };
+}
+
+function createStagedDiscovery(sourceCounts: number[]): DiscoveryService {
+  const buildStages = (): DiscoveryExecutionStage[] =>
+    sourceCounts.map((count, stageIndex) => {
+      const sources = Array.from({ length: count }, (_, sourceIndex) =>
+        classifySourceCandidate({
+          url: `https://boards.greenhouse.io/acme${stageIndex}-${sourceIndex}`,
+          token: `acme${stageIndex}-${sourceIndex}`,
+          confidence: "high",
+          discoveryMethod: stageIndex === 0 ? "configured_env" : "future_search",
+        }),
+      );
+
+      const label: DiscoveryExecutionStage["label"] =
+        stageIndex === 0 ? "baseline" : "public_search";
+
+      return {
+        label,
+        sources,
+        jobs: [],
+        diagnostics: {
+          inventorySources: stageIndex === 0 ? count : 0,
+          configuredSources: stageIndex === 0 ? count : 0,
+          curatedSources: 0,
+          publicSources: stageIndex === 0 ? 0 : count,
+          publicJobs: 0,
+          discoveredBeforeFiltering: count,
+          discoveredAfterFiltering: count,
+          platformCounts: {
+            greenhouse: count,
+          },
+          publicJobPlatformCounts: {},
+        },
+      };
+    });
+
+  return {
+    async discover() {
+      return buildStages().flatMap((stage) => stage.sources);
+    },
+    async discoverInStages() {
+      return buildStages();
     },
   };
 }
@@ -295,6 +344,62 @@ describe("crawl performance optimizations", () => {
       // Should complete successfully
       expect(result.crawlRun.status).toBe("completed");
       expect(result.jobs.length).toBeGreaterThan(0);
+    });
+
+    it("keeps staged discovery provider routing bounded by the global source cap", async () => {
+      const repository = new JobCrawlerRepository(new FakeDb());
+      const now = new Date("2026-04-13T13:15:00.000Z");
+      const routedSourceIds: string[] = [];
+
+      const provider = createStubProvider("greenhouse", async (_context, sources) => {
+        routedSourceIds.push(...sources.map((source) => source.id));
+
+        return {
+          provider: "greenhouse",
+          status: "success",
+          sourceCount: sources.length,
+          fetchedCount: sources.length,
+          matchedCount: sources.length,
+          warningCount: 0,
+          jobs: sources.map((source, index) =>
+            createProviderJob("Software Engineer", source.id, index, now),
+          ),
+        };
+      });
+
+      const started = await startSearchFromFilters(
+        {
+          title: "Software Engineer",
+          country: "United States",
+          platforms: ["greenhouse"],
+        },
+        {
+          repository,
+          providers: [provider],
+          discovery: createStagedDiscovery([30, 30]),
+          now,
+          requestOwnerKey: "client-staged-source-cap",
+          progressUpdateIntervalMs: 1,
+        },
+      );
+
+      await waitForBackgroundRunToSettle();
+
+      const result = await getSearchDetails(started.result.search._id, { repository });
+
+      expect(result.crawlRun.status).toBe("completed");
+      expect(routedSourceIds).toHaveLength(40);
+      expect(new Set(routedSourceIds)).toHaveLength(40);
+      expect(result.diagnostics.discoveredSources).toBe(40);
+      expect(result.diagnostics.crawledSources).toBe(40);
+      expect(result.diagnostics.budgetExhausted).toBe(true);
+      expect(result.diagnostics.dropReasonCounts.crawl_source_budget).toBe(20);
+      expect(result.diagnostics.discovery).toMatchObject({
+        sourcesTruncated: true,
+        sourcesTruncatedCount: 20,
+        sourcesBeforeTruncation: 60,
+        sourcesAfterTruncation: 40,
+      });
     });
 
     it("returns an early visible batch before the crawl fully finishes and preserves delta delivery", async () => {

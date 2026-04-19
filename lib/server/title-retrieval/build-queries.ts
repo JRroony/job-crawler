@@ -20,20 +20,31 @@ import type {
 
 const alternateHeadWords: Partial<Record<string, string[]>> = {
   architect: ["engineer"],
+  administrator: ["engineer", "specialist"],
+  analyst: ["scientist"],
+  consultant: ["engineer"],
+  coordinator: ["specialist"],
   developer: ["engineer"],
   engineer: ["developer"],
-  recruiter: ["sourcer"],
-  sourcer: ["recruiter"],
-  tester: ["engineer"],
-  writer: ["specialist"],
-  analyst: ["scientist"],
   manager: ["lead"],
   owner: ["manager"],
-  coordinator: ["specialist"],
+  researcher: ["scientist"],
+  recruiter: ["sourcer"],
+  scientist: ["engineer", "analyst"],
+  sourcer: ["recruiter"],
   specialist: ["coordinator"],
+  tester: ["engineer"],
+  writer: ["specialist"],
 };
 
 const softwareFamilyHeadWords = new Set(["architect", "developer", "engineer"]);
+const familiesWithLimitedBroadening = new Set([
+  "business_operations_people",
+  "design_content_marketing",
+  "qa_support_it",
+]);
+const titleQueryVariantCache = new Map<string, TitleQueryVariant[]>();
+const titleQueryVariantCacheLimit = 512;
 
 export function buildTitleQueryVariants(
   title: string,
@@ -41,6 +52,13 @@ export function buildTitleQueryVariants(
     maxQueries?: number;
   } = {},
 ) {
+  const maxQueries = options.maxQueries ?? 16;
+  const cacheKey = `${title}::${maxQueries}`;
+  const cached = titleQueryVariantCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const analysis = analyzeTitle(title);
   const variants: TitleQueryVariant[] = [];
   const seen = new Set<string>();
@@ -144,13 +162,15 @@ export function buildTitleQueryVariants(
       );
     });
 
-    dedupeNormalizedValues(getTitleFamily(concept.family)?.broadDiscoveryQueries ?? []).forEach(
-      (query) =>
-        push(query, "family_broadening", {
-          family: concept.family,
-          conceptId: concept.id,
-        }),
-    );
+    if (shouldUseFamilyBroadening(concept.family)) {
+      dedupeNormalizedValues(getTitleFamily(concept.family)?.broadDiscoveryQueries ?? []).forEach(
+        (query) =>
+          push(query, "family_broadening", {
+            family: concept.family,
+            conceptId: concept.id,
+          }),
+      );
+    }
   } else {
     buildFallbackVariants(analysis).forEach((query) =>
       push(query, "fallback_variant", {
@@ -159,16 +179,25 @@ export function buildTitleQueryVariants(
     );
   }
 
-  const maxQueries = options.maxQueries ?? 16;
   const minimumQueries = analysis.family === "software_engineering" ? 20 : 18;
   const effectiveMaxQueries = Math.max(minimumQueries, maxQueries);
-  return variants
+  const resolvedVariants = variants
     .sort(compareTitleQueryVariants)
     .slice(0, effectiveMaxQueries)
     .map((variant, index) => ({
       ...variant,
       priority: index,
     }));
+
+  if (titleQueryVariantCache.size >= titleQueryVariantCacheLimit) {
+    const firstKey = titleQueryVariantCache.keys().next().value;
+    if (firstKey) {
+      titleQueryVariantCache.delete(firstKey);
+    }
+  }
+
+  titleQueryVariantCache.set(cacheKey, resolvedVariants);
+  return resolvedVariants;
 }
 
 function classifyConceptQueryKind(
@@ -507,6 +536,10 @@ function getAlternateHeadWords(headWord: string) {
   return alternateHeadWords[headWord] ?? [];
 }
 
+function shouldUseFamilyBroadening(family?: string) {
+  return Boolean(family) && !familiesWithLimitedBroadening.has(family!);
+}
+
 function buildCandidateConceptVariants(analysis: TitleAnalysis) {
   const variants = new Set<string>();
   const normalizedFamilyAnchor = normalizeTitleText(
@@ -524,6 +557,10 @@ function buildCandidateConceptVariants(analysis: TitleAnalysis) {
   analysis.candidateConceptIds.slice(0, 3).forEach((conceptId) => {
     const concept = getTitleConcept(conceptId);
     if (!concept) {
+      return;
+    }
+
+    if (analysis.family && concept.family !== analysis.family) {
       return;
     }
 
@@ -582,7 +619,15 @@ function buildHeadWordSwapVariant(analysis: TitleAnalysis) {
 }
 
 function buildFamilyAnchorVariant(analysis: TitleAnalysis) {
-  if (!analysis.family || analysis.primaryConceptId || analysis.modifierTokens.length > 0) {
+  if (!analysis.family || analysis.primaryConceptId) {
+    return undefined;
+  }
+
+  if (
+    analysis.modifierTokens.length > 0 &&
+    analysis.candidateConceptIds.length > 0 &&
+    analysis.family === "software_engineering"
+  ) {
     return undefined;
   }
 

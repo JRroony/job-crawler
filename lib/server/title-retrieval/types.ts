@@ -19,16 +19,15 @@ export type TitleMatchTier = (typeof titleMatchTiers)[number];
 
 export const titleRoleFamilies = [
   "software_engineering",
-  "data_engineering",
+  "data_platform",
   "data_analytics",
+  "ai_ml_science",
   "product",
-  "program_management",
-  "recruiting",
-  "quality_assurance",
-  "writing_documentation",
-  "support",
-  "sales",
-  "operations",
+  "cloud_devops_security",
+  "qa_support_it",
+  "architecture_solutions",
+  "design_content_marketing",
+  "business_operations_people",
 ] as const;
 
 export type TitleRoleFamily = (typeof titleRoleFamilies)[number];
@@ -37,6 +36,8 @@ export const titleRoleGroups = [
   "engineering",
   "analysis",
   "management",
+  "solutions",
+  "design",
   "recruiting",
   "quality",
   "writing",

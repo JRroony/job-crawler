@@ -1114,9 +1114,39 @@ describe("source discovery", () => {
     expect(selected.some((query) => query.roleQuery === "software developer")).toBe(true);
     expect(selected.some((query) => query.roleQuery === "backend engineer")).toBe(true);
     expect(selected.some((query) => query.roleQuery === "application developer")).toBe(true);
-    expect(selected.some((query) => query.roleQuery === "java developer")).toBe(true);
     expect(selected.some((query) => query.roleQuery === "mobile engineer")).toBe(true);
+    expect(selected.some((query) => query.roleQuery === "platform engineer")).toBe(true);
     expect(selected.some((query) => query.hostKind === "embed")).toBe(false);
+  });
+
+  it("reserves balanced broad-US execution for representative title and location coverage", () => {
+    const titles = [
+      "Software Engineer",
+      "Data Analyst",
+      "Business Analyst",
+      "Product Manager",
+    ];
+
+    for (const title of titles) {
+      const plan = buildPublicSearchQueryPlan(
+        {
+          title,
+          country: "United States",
+          platforms: ["greenhouse"],
+        },
+        {
+          maxResultsPerQuery: 4,
+          maxQueries: 24,
+        },
+      );
+      const selected = selectQueriesForExecution(plan);
+
+      expect(selected).toHaveLength(24);
+      expect(new Set(selected.map((query) => query.roleQuery)).size).toBeGreaterThan(4);
+      expect(selected.some((query) => query.locationKind !== "blank")).toBe(true);
+      expect(selected.some((query) => query.locationKind === "country")).toBe(true);
+      expect(selected.every((query) => query.hostKind !== "embed")).toBe(true);
+    }
   });
 
   it("brings Greenhouse embed-board queries into the plan after the higher-yield ATS detail hosts", () => {
@@ -1155,15 +1185,14 @@ describe("source discovery", () => {
     expect(plan.roleQueries).toEqual(
       expect.arrayContaining([
         "data analyst",
-        "analytics analyst",
+        "product analyst",
         "business intelligence analyst",
         "reporting analyst",
-        "insights analyst",
-        "product analyst",
-        "decision scientist",
+        "marketing analyst",
+        "sales analyst",
+        "strategy analyst",
         "business analyst",
-        "operations analyst",
-        "business operations analyst",
+        "financial analyst",
       ]),
     );
   });
@@ -1431,6 +1460,7 @@ describe("source discovery", () => {
       sourcesAdded: 32,
     });
     expect(result.diagnostics.dropReasonCounts.query_budget).toBe(plan.queries.length - 8);
+    expect(result.diagnostics.stopReason).toBe("query_budget_exhausted");
     expect(requestedQueries).toEqual([
       "site:boards.greenhouse.io software engineer",
       "site:boards.greenhouse.io software developer",
@@ -1441,6 +1471,63 @@ describe("source discovery", () => {
       "site:job-boards.greenhouse.io software development engineer",
       "site:job-boards.greenhouse.io backend engineer",
     ]);
+  });
+
+  it("does not declare a public-search plateau until most of the selected representative plan has run", async () => {
+    const requestedQueries: string[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const requestUrl = String(input);
+      const query = new URL(requestUrl).searchParams.get("q") ?? "";
+
+      if (requestUrl.startsWith("https://www.bing.com/search")) {
+        requestedQueries.push(query);
+        return new Response(
+          `<?xml version="1.0" encoding="utf-8" ?>
+            <rss version="2.0">
+              <channel>
+                <item>
+                  <link>https://boards.greenhouse.io/acme/jobs/123</link>
+                </item>
+              </channel>
+            </rss>`,
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/rss+xml",
+            },
+          },
+        );
+      }
+
+      return new Response("<html><body></body></html>", {
+        status: 200,
+        headers: {
+          "content-type": "text/html",
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await discoverSourcesFromPublicSearchDetailed(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        fetchImpl,
+        maxResultsPerQuery: 4,
+        maxQueries: 96,
+        maxSources: 100,
+        queryConcurrency: 4,
+      },
+    );
+
+    expect(result.sources).toHaveLength(1);
+    expect(result.diagnostics.stopReason).toBe("stagnant_query_plateau");
+    expect(result.diagnostics.executedQueries).toBeGreaterThanOrEqual(72);
+    expect(result.diagnostics.executedQueries).toBeLessThan(96);
+    expect(result.diagnostics.dropReasonCounts.stagnant_query_plateau).toBeGreaterThan(0);
+    expect(requestedQueries).toHaveLength(result.diagnostics.executedQueries);
   });
 
   it("builds United States discovery tokens from country aliases, state aliases, metros, and remote variants", () => {
@@ -1466,6 +1553,43 @@ describe("source discovery", () => {
         "tx usa",
         "seattle wa",
         "seattle washington",
+      ]),
+    );
+  });
+
+  it("builds non-US discovery clauses from country, region, metro, and remote variants instead of falling back to blank-only queries", () => {
+    const plan = buildPublicSearchQueryPlan(
+      {
+        title: "Software Engineer",
+        country: "Canada",
+        platforms: ["greenhouse"],
+      },
+      {
+        maxResultsPerQuery: 4,
+      },
+    );
+
+    expect(plan.platformPlans[0]).toMatchObject({
+      platform: "greenhouse",
+      locationIntent: expect.objectContaining({
+        kind: "country",
+        countryName: "Canada",
+      }),
+      locationClauses: expect.arrayContaining([
+        "",
+        "canada",
+        "remote canada",
+        "canada remote",
+        "ontario",
+        "remote ontario",
+        "toronto",
+        "toronto on",
+      ]),
+    });
+    expect(plan.queries.map((query) => query.query)).toEqual(
+      expect.arrayContaining([
+        "site:boards.greenhouse.io software engineer canada",
+        "site:job-boards.greenhouse.io software engineer toronto on",
       ]),
     );
   });

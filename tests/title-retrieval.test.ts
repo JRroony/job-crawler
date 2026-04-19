@@ -30,16 +30,15 @@ describe("title retrieval analysis", () => {
   it("ships the generalized role families used by the taxonomy", () => {
     expect(listSupportedRoleFamilies()).toEqual([
       "software_engineering",
-      "data_engineering",
+      "data_platform",
       "data_analytics",
+      "ai_ml_science",
       "product",
-      "program_management",
-      "recruiting",
-      "quality_assurance",
-      "writing_documentation",
-      "support",
-      "sales",
-      "operations",
+      "cloud_devops_security",
+      "qa_support_it",
+      "architecture_solutions",
+      "design_content_marketing",
+      "business_operations_people",
     ]);
   });
 
@@ -89,11 +88,14 @@ describe("title retrieval query expansion", () => {
     expect(queries).toEqual(
       expect.arrayContaining([
         "data analyst",
+        "product analyst",
         "business intelligence analyst",
         "reporting analyst",
-        "product analyst",
+        "marketing analyst",
+        "sales analyst",
+        "strategy analyst",
         "business analyst",
-        "operations analyst",
+        "financial analyst",
       ]),
     );
     // Should NOT contain unrelated roles
@@ -132,6 +134,7 @@ describe("title retrieval query expansion", () => {
       expect.arrayContaining([
         "product manager",
         "technical product manager",
+        "product owner",
         "growth product manager",
         "associate product manager",
         "apm",
@@ -139,16 +142,73 @@ describe("title retrieval query expansion", () => {
     );
   });
 
+  it("expands ai engineer searches into nearby AI / ML concepts without drifting into product or generic software titles", () => {
+    expect(queriesFor("AI Engineer")).toEqual(
+      expect.arrayContaining([
+        "ai engineer",
+        "artificial intelligence engineer",
+        "machine learning engineer",
+        "applied scientist",
+        "research scientist",
+        "data scientist",
+        "nlp engineer",
+        "computer vision engineer",
+      ]),
+    );
+    expect(queriesFor("AI Engineer")).not.toContain("product manager");
+    expect(queriesFor("AI Engineer")).not.toContain("software engineer");
+  });
+
+  it("expands applied scientist searches into adjacent science and AI roles", () => {
+    expect(queriesFor("Applied Scientist")).toEqual(
+      expect.arrayContaining([
+        "applied scientist",
+        "research scientist",
+        "data scientist",
+        "ai engineer",
+        "machine learning engineer",
+      ]),
+    );
+  });
+
+  it("expands research scientist searches into adjacent science and AI roles", () => {
+    expect(queriesFor("Research Scientist")).toEqual(
+      expect.arrayContaining([
+        "research scientist",
+        "applied scientist",
+        "data scientist",
+        "ai engineer",
+      ]),
+    );
+  });
+
+  it("expands solution architect searches into architecture and solutions variants without flooding software roles", () => {
+    expect(queriesFor("Solution Architect")).toEqual(
+      expect.arrayContaining([
+        "solution architect",
+        "solutions architect",
+        "solutions architecture",
+        "enterprise architect",
+        "cloud architect",
+        "technical architect",
+        "solutions engineer",
+      ]),
+    );
+    expect(queriesFor("Solution Architect")).not.toContain("software engineer");
+    expect(queriesFor("Solution Architect")).not.toContain("product manager");
+  });
+
   it("expands program manager searches into TPM, delivery, and implementation variants", () => {
     expect(queriesFor("Program Manager")).toEqual(
       expect.arrayContaining([
         "program manager",
+        "project manager",
         "technical program manager",
-        "delivery manager",
-        "implementation manager",
+        "operations manager",
         "tpm",
       ]),
     );
+    expect(queriesFor("Program Manager")).not.toContain("recruiter");
   });
 
   it("expands technical writer searches into documentation-oriented titles", () => {
@@ -393,6 +453,35 @@ describe("title retrieval scoring", () => {
     });
   });
 
+  it.each([
+    "Machine Learning Engineer",
+    "Applied Scientist",
+    "Research Scientist",
+  ])("keeps %s as a realistic AI / ML sibling for an AI engineer query", (title) => {
+    expect(
+      getTitleMatchResult(title, "AI Engineer", {
+        mode: "balanced",
+      }),
+    ).toMatchObject({
+      matches: true,
+      tier: expect.stringMatching(/^(adjacent_concept|same_family_related)$/),
+    });
+  });
+
+  it.each([
+    "Solution Architect",
+    "Cloud Architect",
+    "Solutions Engineer",
+  ])("keeps %s as a realistic architecture / solutions sibling", (title) => {
+    expect(
+      getTitleMatchResult(title, "Solutions Architect", {
+        mode: "balanced",
+      }),
+    ).toMatchObject({
+      matches: true,
+    });
+  });
+
   it("does not overmatch unrelated families", () => {
     expect(getTitleMatchResult("Technical Program Manager", "Product Manager")).toMatchObject({
       matches: false,
@@ -413,6 +502,19 @@ describe("title retrieval scoring", () => {
     expect(getTitleMatchResult("Software Engineer", "Recruiter")).toMatchObject({
       matches: false,
       tier: "none",
+    });
+  });
+
+  it("applies family mismatch penalties to keep AI / architecture roles from collapsing into software or product", () => {
+    expect(getTitleMatchResult("Product Manager", "AI Engineer")).toMatchObject({
+      matches: false,
+      tier: "none",
+      penalties: expect.arrayContaining([expect.stringContaining("conflicting role families")]),
+    });
+    expect(getTitleMatchResult("Software Engineer", "Solution Architect")).toMatchObject({
+      matches: false,
+      tier: "none",
+      penalties: expect.arrayContaining([expect.stringContaining("conflicting role families")]),
     });
   });
 
@@ -537,7 +639,7 @@ describe("semantic title expansion", () => {
         expect.arrayContaining([
           "analytics analyst",
           "insights analyst",
-          "decision scientist",
+          "data scientist",
         ]),
       );
     });
@@ -640,6 +742,32 @@ describe("semantic title expansion", () => {
 
       // Should try analyst->scientist swap
       expect(queryList).toContain("risk scientist");
+    });
+
+    it("uses family-aware fallback to recover nearby AI / ML concepts for unknown AI titles", () => {
+      const queryList = queriesFor("Generative AI Engineer");
+
+      expect(queryList).toEqual(
+        expect.arrayContaining([
+          "generative ai engineer",
+          "ai engineer",
+          "machine learning engineer",
+        ]),
+      );
+      expect(queryList).not.toContain("product manager");
+    });
+
+    it("uses family-aware fallback to recover nearby solutions concepts for unknown architect titles", () => {
+      const queryList = queriesFor("Partner Solutions Architect");
+
+      expect(queryList).toEqual(
+        expect.arrayContaining([
+          "partner solutions architect",
+          "solutions architect",
+          "solutions engineer",
+        ]),
+      );
+      expect(queryList).not.toContain("software engineer");
     });
   });
 

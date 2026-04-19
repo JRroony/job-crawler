@@ -1092,6 +1092,358 @@ describe("jobs-first indexed search", () => {
     expect(crawlSources).not.toHaveBeenCalled();
   });
 
+  it("serves requested role-family and country scenarios from indexed jobs using resolved location evidence", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const withoutTopLevelCountry = (job: PersistableTestJob): PersistableTestJob => {
+      const { country: _country, ...rest } = job;
+      return rest;
+    };
+    const scenarioJobs = [
+      createPersistableJob({
+        title: "Software Engineer",
+        sourceJobId: "scenario-expanded-se-1",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-se-1",
+        applyUrl: "https://example.com/jobs/scenario-expanded-se-1/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-se-1",
+        locationText: "Remote - United States",
+        resolvedLocation: {
+          country: "United States",
+          isRemote: true,
+          isUnitedStates: true,
+          confidence: "high",
+          evidence: [{ source: "location_text", value: "Remote - United States" }],
+        },
+      }),
+      createPersistableJob({
+        title: "Backend Developer",
+        sourceJobId: "scenario-expanded-se-2",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-se-2",
+        applyUrl: "https://example.com/jobs/scenario-expanded-se-2/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-se-2",
+        locationText: "Seattle, WA",
+        state: "Washington",
+        city: "Seattle",
+        resolvedLocation: {
+          country: "United States",
+          state: "Washington",
+          stateCode: "WA",
+          city: "Seattle",
+          isRemote: false,
+          isUnitedStates: true,
+          confidence: "high",
+          evidence: [{ source: "location_text", value: "Seattle, WA" }],
+        },
+      }),
+      createPersistableJob({
+        title: "Full Stack Engineer",
+        sourceJobId: "scenario-expanded-se-3",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-se-3",
+        applyUrl: "https://example.com/jobs/scenario-expanded-se-3/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-se-3",
+        locationText: "Austin, TX",
+        state: "Texas",
+        city: "Austin",
+        resolvedLocation: {
+          country: "United States",
+          state: "Texas",
+          stateCode: "TX",
+          city: "Austin",
+          isRemote: false,
+          isUnitedStates: true,
+          confidence: "high",
+          evidence: [{ source: "location_text", value: "Austin, TX" }],
+        },
+      }),
+      createPersistableJob({
+        title: "Product Manager",
+        sourceJobId: "scenario-expanded-pm-us-1",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-pm-us-1",
+        applyUrl: "https://example.com/jobs/scenario-expanded-pm-us-1/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-pm-us-1",
+        locationText: "Remote - United States",
+      }),
+      createPersistableJob({
+        title: "Senior Product Manager",
+        sourceJobId: "scenario-expanded-pm-us-2",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-pm-us-2",
+        applyUrl: "https://example.com/jobs/scenario-expanded-pm-us-2/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-pm-us-2",
+        locationText: "New York, NY",
+        state: "New York",
+        city: "New York",
+      }),
+      createPersistableJob({
+        title: "Technical Product Manager",
+        sourceJobId: "scenario-expanded-pm-us-3",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-pm-us-3",
+        applyUrl: "https://example.com/jobs/scenario-expanded-pm-us-3/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-pm-us-3",
+        locationText: "Austin, TX",
+        state: "Texas",
+        city: "Austin",
+      }),
+      createPersistableJob({
+        title: "AI Engineer",
+        sourceJobId: "scenario-expanded-ai-1",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-ai-1",
+        applyUrl: "https://example.com/jobs/scenario-expanded-ai-1/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-ai-1",
+        locationText: "Remote - United States",
+      }),
+      createPersistableJob({
+        title: "Machine Learning Engineer",
+        sourceJobId: "scenario-expanded-ai-2",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-ai-2",
+        applyUrl: "https://example.com/jobs/scenario-expanded-ai-2/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-ai-2",
+        locationText: "Seattle, WA",
+        state: "Washington",
+        city: "Seattle",
+      }),
+      createPersistableJob({
+        title: "Applied Scientist",
+        sourceJobId: "scenario-expanded-ai-3",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-ai-3",
+        applyUrl: "https://example.com/jobs/scenario-expanded-ai-3/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-ai-3",
+        locationText: "Cambridge, MA",
+        state: "Massachusetts",
+        city: "Cambridge",
+      }),
+      createPersistableJob({
+        title: "Research Scientist",
+        sourceJobId: "scenario-expanded-ai-4",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-ai-4",
+        applyUrl: "https://example.com/jobs/scenario-expanded-ai-4/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-ai-4",
+        locationText: "New York, NY",
+        state: "New York",
+        city: "New York",
+      }),
+      createPersistableJob({
+        title: "Data Scientist",
+        sourceJobId: "scenario-expanded-ai-5",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-ai-5",
+        applyUrl: "https://example.com/jobs/scenario-expanded-ai-5/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-ai-5",
+        locationText: "Remote - United States",
+      }),
+      withoutTopLevelCountry(createPersistableJob({
+        title: "Solutions Architect",
+        sourceJobId: "scenario-expanded-canada-1",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-canada-1",
+        applyUrl: "https://example.com/jobs/scenario-expanded-canada-1/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-canada-1",
+        locationText: "Toronto, ON",
+        state: "Ontario",
+        city: "Toronto",
+        resolvedLocation: {
+          country: "Canada",
+          state: "Ontario",
+          stateCode: "ON",
+          city: "Toronto",
+          isRemote: false,
+          isUnitedStates: false,
+          confidence: "high",
+          evidence: [{ source: "location_text", value: "Toronto, ON" }],
+        },
+      })),
+      withoutTopLevelCountry(createPersistableJob({
+        title: "Cloud Architect",
+        sourceJobId: "scenario-expanded-canada-2",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-canada-2",
+        applyUrl: "https://example.com/jobs/scenario-expanded-canada-2/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-canada-2",
+        locationText: "Vancouver, BC",
+        state: "British Columbia",
+        city: "Vancouver",
+        resolvedLocation: {
+          country: "Canada",
+          state: "British Columbia",
+          stateCode: "BC",
+          city: "Vancouver",
+          isRemote: false,
+          isUnitedStates: false,
+          confidence: "high",
+          evidence: [{ source: "location_text", value: "Vancouver, BC" }],
+        },
+      })),
+      withoutTopLevelCountry(createPersistableJob({
+        title: "Solutions Engineer",
+        sourceJobId: "scenario-expanded-canada-3",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-canada-3",
+        applyUrl: "https://example.com/jobs/scenario-expanded-canada-3/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-canada-3",
+        locationText: "Remote - Canada",
+        resolvedLocation: {
+          country: "Canada",
+          isRemote: true,
+          isUnitedStates: false,
+          confidence: "high",
+          evidence: [{ source: "location_text", value: "Remote - Canada" }],
+        },
+      })),
+      withoutTopLevelCountry(createPersistableJob({
+        title: "Product Manager",
+        sourceJobId: "scenario-expanded-germany-1",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-germany-1",
+        applyUrl: "https://example.com/jobs/scenario-expanded-germany-1/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-germany-1",
+        locationText: "Berlin, Germany",
+        state: "Berlin",
+        city: "Berlin",
+        resolvedLocation: {
+          country: "Germany",
+          state: "Berlin",
+          city: "Berlin",
+          isRemote: false,
+          isUnitedStates: false,
+          confidence: "high",
+          evidence: [{ source: "location_text", value: "Berlin, Germany" }],
+        },
+      })),
+      withoutTopLevelCountry(createPersistableJob({
+        title: "Technical Product Manager",
+        sourceJobId: "scenario-expanded-germany-2",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-germany-2",
+        applyUrl: "https://example.com/jobs/scenario-expanded-germany-2/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-germany-2",
+        locationText: "Munich, Germany",
+        state: "Bavaria",
+        city: "Munich",
+        resolvedLocation: {
+          country: "Germany",
+          state: "Bavaria",
+          stateCode: "BY",
+          city: "Munich",
+          isRemote: false,
+          isUnitedStates: false,
+          confidence: "high",
+          evidence: [{ source: "location_text", value: "Munich, Germany" }],
+        },
+      })),
+      withoutTopLevelCountry(createPersistableJob({
+        title: "Product Owner",
+        sourceJobId: "scenario-expanded-germany-3",
+        canonicalUrl: "https://example.com/jobs/scenario-expanded-germany-3",
+        applyUrl: "https://example.com/jobs/scenario-expanded-germany-3/apply",
+        sourceUrl: "https://example.com/jobs/scenario-expanded-germany-3",
+        locationText: "Remote - Germany",
+        resolvedLocation: {
+          country: "Germany",
+          isRemote: true,
+          isUnitedStates: false,
+          confidence: "high",
+          evidence: [{ source: "location_text", value: "Remote - Germany" }],
+        },
+      })),
+    ];
+
+    await seedIndexedJobs(repository, scenarioJobs);
+
+    const crawlSources: CrawlProvider["crawlSources"] = vi.fn(async () => ({
+      provider: "greenhouse" as const,
+      status: "success" as const,
+      sourceCount: 0,
+      fetchedCount: 0,
+      matchedCount: 0,
+      warningCount: 0,
+      jobs: [],
+    }));
+    const provider = createStubProvider("greenhouse", crawlSources);
+    const scenarios = [
+      {
+        title: "software engineer",
+        country: "United States",
+        expectedTitles: ["Software Engineer", "Backend Developer", "Full Stack Engineer"],
+      },
+      {
+        title: "product manager",
+        country: "United States",
+        expectedTitles: ["Product Manager", "Senior Product Manager", "Technical Product Manager"],
+      },
+      {
+        title: "applied scientist",
+        country: "United States",
+        expectedTitles: ["Applied Scientist", "Research Scientist", "Data Scientist"],
+      },
+      {
+        title: "research scientist",
+        country: "United States",
+        expectedTitles: ["Research Scientist", "Applied Scientist", "Data Scientist"],
+      },
+      {
+        title: "ai engineer",
+        country: "United States",
+        expectedTitles: ["AI Engineer", "Machine Learning Engineer", "Applied Scientist"],
+      },
+      {
+        title: "solution architect",
+        country: "Canada",
+        expectedTitles: ["Solutions Architect", "Cloud Architect", "Solutions Engineer"],
+      },
+      {
+        title: "product manager",
+        country: "Germany",
+        expectedTitles: ["Product Manager", "Technical Product Manager", "Product Owner"],
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const started = await startSearchFromFilters(
+        {
+          title: scenario.title,
+          country: scenario.country,
+          crawlMode: "fast",
+          platforms: ["greenhouse"],
+        },
+        {
+          repository,
+          providers: [provider],
+          discovery: createDiscovery(),
+          fetchImpl: vi.fn() as unknown as typeof fetch,
+          now: new Date("2026-04-15T12:30:00.000Z"),
+          requestOwnerKey: `expanded-${scenario.title}-${scenario.country}`,
+        },
+      );
+
+      expect(started.queued).toBe(false);
+      expect(started.result.jobs.map((job) => job.title)).toEqual(
+        expect.arrayContaining(scenario.expectedTitles),
+      );
+      expect(started.result.jobs.length).toBeGreaterThanOrEqual(scenario.expectedTitles.length);
+      expect(started.result.jobs.every((job) => job.rawSourceMetadata.indexedSearch)).toBe(true);
+      expect(
+        started.result.jobs.every(
+          (job) => job.resolvedLocation?.country === scenario.country || job.country === scenario.country,
+        ),
+      ).toBe(true);
+      expect(started.result.diagnostics.session).toMatchObject({
+        indexedResultsCount: started.result.jobs.length,
+        supplementalResultsCount: 0,
+        totalVisibleResultsCount: started.result.jobs.length,
+        supplementalQueued: false,
+        supplementalRunning: false,
+        triggerReason: "indexed_coverage_sufficient",
+      });
+      expect(started.result.jobs[0]?.rawSourceMetadata.indexedSearch).toMatchObject({
+        candidateQuery: expect.objectContaining({
+          strategy: "coarse_prefilter",
+          usedLocationPrefilter: true,
+        }),
+        titleMatch: expect.objectContaining({
+          explanation: expect.any(String),
+        }),
+        locationMatch: expect.objectContaining({
+          matches: true,
+          explanation: expect.any(String),
+        }),
+      });
+    }
+
+    expect(crawlSources).not.toHaveBeenCalled();
+  });
+
   it("keeps semantic title, US location, experience filters, and ranking on indexed jobs", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     await seedIndexedJobs(repository, [

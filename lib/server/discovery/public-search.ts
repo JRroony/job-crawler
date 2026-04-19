@@ -13,6 +13,11 @@ import {
   type UsDiscoveryLocationClause,
   type UsLocationIntent,
 } from "@/lib/server/locations/us";
+import {
+  buildSupportedCountryDiscoveryLocationClauses,
+  type CountryDiscoveryLocationClause,
+  type CountryLocationIntent,
+} from "@/lib/server/locations/world";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import { safeFetchText } from "@/lib/server/net/fetcher";
 import type { NormalizedJobSeed } from "@/lib/server/providers/types";
@@ -56,7 +61,7 @@ type PublicSearchQuery = {
   roleKind: TitleQueryVariant["kind"];
   rolePriority: number;
   locationClause?: string;
-  locationKind: UsDiscoveryLocationClause["kind"];
+  locationKind: (UsDiscoveryLocationClause | CountryDiscoveryLocationClause)["kind"];
   locationPriority: number;
   query: string;
   limit: number;
@@ -65,9 +70,9 @@ type PublicSearchQuery = {
 
 type PublicSearchPlatformPlan = {
   platform: SearchablePublicPlatform;
-  locationIntent: UsLocationIntent;
+  locationIntent: UsLocationIntent | CountryLocationIntent;
   locationClauses: string[];
-  locationOptions: UsDiscoveryLocationClause[];
+  locationOptions: Array<UsDiscoveryLocationClause | CountryDiscoveryLocationClause>;
   queries: PublicSearchQuery[];
 };
 
@@ -201,6 +206,7 @@ export async function discoverSourcesFromPublicSearchDetailed(
   });
   const diagnostics = createEmptyPublicSearchDiagnostics(plan);
   if (plan.queries.length === 0) {
+    diagnostics.stopReason = "no_queries";
     return {
       sources: [],
       jobs: [],
@@ -220,6 +226,14 @@ export async function discoverSourcesFromPublicSearchDetailed(
     defaultMaxDirectJobExtractions,
   );
   let consecutiveQueriesWithoutNewSources = 0;
+  let stopReason: PublicSearchDiscoveryDiagnostics["stopReason"] = "completed_query_plan";
+  const minimumQueriesBeforePlateau = Math.min(
+    queriesToExecute.length,
+    Math.max(
+      stagnantQueryThreshold,
+      Math.ceil(queriesToExecute.length * 0.75),
+    ),
+  );
   const queryConcurrency = Math.min(
     options.queryConcurrency ?? defaultPublicSearchQueryConcurrency,
     Math.max(1, queriesToExecute.length),
@@ -227,6 +241,7 @@ export async function discoverSourcesFromPublicSearchDetailed(
 
   for (let offset = 0; offset < queriesToExecute.length; offset += queryConcurrency) {
     if (discovered.size >= plan.maxSources) {
+      stopReason = "source_budget_exhausted";
       incrementDiagnosticCount(diagnostics.dropReasonCounts, "source_budget");
       break;
     }
@@ -293,6 +308,7 @@ export async function discoverSourcesFromPublicSearchDetailed(
       let addedSourceCount = 0;
       for (const source of result.sources) {
         if (discovered.size >= plan.maxSources) {
+          stopReason = "source_budget_exhausted";
           incrementDiagnosticCount(diagnostics.dropReasonCounts, "source_budget");
           break;
         }
@@ -388,7 +404,11 @@ export async function discoverSourcesFromPublicSearchDetailed(
       }
     }
 
-    if (consecutiveQueriesWithoutNewSources >= stagnantQueryThreshold) {
+    if (
+      diagnostics.executedQueries >= minimumQueriesBeforePlateau &&
+      consecutiveQueriesWithoutNewSources >= stagnantQueryThreshold
+    ) {
+      stopReason = "stagnant_query_plateau";
       incrementDiagnosticCount(
         diagnostics.dropReasonCounts,
         "stagnant_query_plateau",
@@ -406,6 +426,10 @@ export async function discoverSourcesFromPublicSearchDetailed(
       skippedByQueryBudget,
     );
   }
+  if (stopReason === "completed_query_plan" && skippedByQueryBudget > 0) {
+    stopReason = "query_budget_exhausted";
+  }
+  diagnostics.stopReason = stopReason;
   diagnostics.coverageNotes = buildCoverageNotes(diagnostics, {
     sourceCount: discovered.size,
     directJobCount: harvestedJobs.size,
@@ -516,13 +540,32 @@ function buildPlatformLocationPlan(
   filters: SearchFilters,
   maxLocationClauses: number,
 ): {
-  locationIntent: UsLocationIntent;
+  locationIntent: UsLocationIntent | CountryLocationIntent;
   locationClauses: string[];
-  locationOptions: UsDiscoveryLocationClause[];
+  locationOptions: Array<UsDiscoveryLocationClause | CountryDiscoveryLocationClause>;
 } {
   const locationPlan = buildUsDiscoveryLocationClauses(filters, {
     maxClauses: maxLocationClauses,
   });
+
+  if (locationPlan.intent.kind === "none" || locationPlan.intent.kind === "non_us") {
+    const countryPlan = buildSupportedCountryDiscoveryLocationClauses(filters, {
+      maxClauses: Math.min(maxLocationClauses, 24),
+    });
+
+    if (countryPlan.intent.kind !== "none") {
+      return {
+        locationIntent: countryPlan.intent,
+        locationClauses: countryPlan.clauses.length > 0 ? countryPlan.clauses : [""],
+        locationOptions:
+          countryPlan.detailedClauses.length > 0
+            ? countryPlan.detailedClauses
+            : [
+                { clause: "", kind: "blank", priority: 0 } satisfies CountryDiscoveryLocationClause,
+              ],
+      };
+    }
+  }
 
   if (locationPlan.intent.kind === "none" || locationPlan.intent.kind === "non_us") {
     return {
@@ -979,6 +1022,10 @@ function buildCoverageNotes(
     notes.push("Query budgeting skipped part of the generated search plan.");
   }
 
+  if ((diagnostics.dropReasonCounts.source_budget ?? 0) > 0) {
+    notes.push("Source budgeting stopped public search after the configured source cap was reached.");
+  }
+
   if ((diagnostics.dropReasonCounts.stagnant_query_plateau ?? 0) > 0) {
     notes.push("Public search plateaued before exhausting the full query plan.");
   }
@@ -1025,6 +1072,171 @@ export function selectQueriesForExecution(plan: PublicSearchQueryPlan) {
     return plan.queries;
   }
 
+  if (plan.maxQueries <= 12) {
+    return selectQueriesForExecutionLegacy(plan);
+  }
+
+  const selected: PublicSearchQuery[] = [];
+  const seen = new Set<string>();
+  const hasLocationQueries = plan.queries.some((query) => query.locationKind !== "blank");
+  const primaryBlankBudget = hasLocationQueries
+    ? Math.max(14, Math.floor(plan.maxQueries * 0.55))
+    : plan.maxQueries;
+
+  const pushQuery = (query: PublicSearchQuery | undefined) => {
+    if (!query || selected.length >= plan.maxQueries || seen.has(query.query)) {
+      return;
+    }
+
+    seen.add(query.query);
+    selected.push(query);
+  };
+
+  pushRoundRobinQueriesUntil(
+    plan.queries.filter(
+      (query) =>
+        isPrimaryNonEmbedHostQuery(query) &&
+        query.locationKind === "blank",
+    ),
+    (query) => `${query.platform}:${query.rolePriority}:primary-blank`,
+    pushQuery,
+    () => selected.length < primaryBlankBudget,
+  );
+
+  if (selected.length >= plan.maxQueries) {
+    return selected;
+  }
+
+  const secondaryPrimaryBlankBudget = hasLocationQueries
+    ? Math.max(1, plan.platformPlans.length)
+    : 0;
+  pushRoundRobinQueriesUntil(
+    plan.queries.filter(
+      (query) =>
+        isSecondaryNonEmbedHostQuery(query) &&
+        query.rolePriority === 0 &&
+        query.locationKind === "blank",
+    ),
+    (query) => `${query.platform}:secondary-primary-blank`,
+    pushQuery,
+    () => selected.length < primaryBlankBudget + secondaryPrimaryBlankBudget,
+  );
+
+  if (selected.length >= plan.maxQueries) {
+    return selected;
+  }
+
+  const primaryLocationBudget = hasLocationQueries
+    ? Math.max(4, Math.floor(plan.maxQueries * 0.25))
+    : 0;
+  pushRoundRobinQueriesUntil(
+    plan.queries.filter(
+      (query) =>
+        query.rolePriority === 0 &&
+        query.hostKind !== "embed" &&
+        (query.locationKind === "country" || query.locationKind === "remote"),
+    ),
+    (query) => `${query.platform}:${query.locationKind}:${query.locationPriority}`,
+    pushQuery,
+    () => selected.length < primaryBlankBudget + primaryLocationBudget,
+  );
+
+  if (selected.length >= plan.maxQueries) {
+    return selected;
+  }
+
+  const regionalLocationBudget = hasLocationQueries
+    ? Math.max(2, Math.floor(plan.maxQueries * 0.15))
+    : 0;
+  pushRoundRobinQueriesUntil(
+    plan.queries.filter(
+      (query) =>
+        query.rolePriority === 0 &&
+        query.hostKind !== "embed" &&
+        (query.locationKind === "remote_state" ||
+          query.locationKind === "metro" ||
+          query.locationKind === "state"),
+    ),
+    (query) => `${query.platform}:${query.locationKind}:${query.locationPriority}`,
+    pushQuery,
+    () =>
+      selected.length <
+      primaryBlankBudget + primaryLocationBudget + regionalLocationBudget,
+  );
+
+  if (selected.length >= plan.maxQueries) {
+    return selected;
+  }
+
+  const embedDeferredUntil = hasLocationQueries
+    ? Math.min(plan.maxQueries, 40)
+    : plan.maxQueries;
+  if (selected.length >= embedDeferredUntil) {
+    pushRoundRobinQueries(
+      plan.queries.filter(
+        (query) => query.locationKind === "blank" && query.hostKind === "embed",
+      ),
+      (query) => `${query.platform}:${query.rolePriority}:embed`,
+      pushQuery,
+    );
+  }
+
+  if (selected.length >= plan.maxQueries) {
+    return selected;
+  }
+
+  pushRoundRobinQueriesUntil(
+    plan.queries.filter(
+      (query) =>
+        isSecondaryNonEmbedHostQuery(query) &&
+        query.locationKind === "blank",
+    ),
+    (query) => `${query.platform}:${query.rolePriority}:secondary-blank`,
+    pushQuery,
+    () => selected.length < embedDeferredUntil,
+  );
+
+  if (selected.length >= plan.maxQueries) {
+    return selected;
+  }
+
+  if (selected.length >= embedDeferredUntil) {
+    pushRoundRobinQueries(
+      plan.queries.filter(
+        (query) => query.locationKind === "blank" && query.hostKind === "embed",
+      ),
+      (query) => `${query.platform}:${query.rolePriority}:embed`,
+      pushQuery,
+    );
+  }
+
+  if (selected.length >= plan.maxQueries) {
+    return selected;
+  }
+
+  pushRoundRobinQueries(
+    plan.queries.filter(
+      (query) =>
+        query.rolePriority > 0 &&
+        query.hostKind !== "embed" &&
+        (query.locationKind === "country" || query.locationKind === "remote"),
+    ),
+    (query) => `${query.platform}:${query.rolePriority}:${query.locationKind}`,
+    pushQuery,
+  );
+
+  roundRobinQueryGroups(
+    groupQueriesBy(
+      plan.queries,
+      (query) => `${query.platform}:${query.rolePriority}:${query.locationKind}`,
+    ),
+    pushQuery,
+  );
+
+  return selected;
+}
+
+function selectQueriesForExecutionLegacy(plan: PublicSearchQueryPlan) {
   const selected: PublicSearchQuery[] = [];
   const seen = new Set<string>();
   const blankRoleWindow = Math.min(
@@ -1128,12 +1340,36 @@ export function selectQueriesForExecution(plan: PublicSearchQueryPlan) {
   return selected;
 }
 
+function isPrimaryNonEmbedHostQuery(query: PublicSearchQuery) {
+  if (query.hostKind === "embed") {
+    return false;
+  }
+
+  return (
+    searchHostQueries[query.platform].find((host) => host.kind !== "embed")?.query ===
+    query.hostQuery
+  );
+}
+
+function isSecondaryNonEmbedHostQuery(query: PublicSearchQuery) {
+  return query.hostKind !== "embed" && !isPrimaryNonEmbedHostQuery(query);
+}
+
 function pushRoundRobinQueries(
   queries: PublicSearchQuery[],
   keyFn: (query: PublicSearchQuery) => string,
   pushQuery: (query: PublicSearchQuery | undefined) => void,
 ) {
   roundRobinQueryGroups(groupQueriesBy(queries, keyFn), pushQuery);
+}
+
+function pushRoundRobinQueriesUntil(
+  queries: PublicSearchQuery[],
+  keyFn: (query: PublicSearchQuery) => string,
+  pushQuery: (query: PublicSearchQuery | undefined) => void,
+  shouldContinue: () => boolean,
+) {
+  roundRobinQueryGroupsUntil(groupQueriesBy(queries, keyFn), pushQuery, shouldContinue);
 }
 
 function groupQueriesBy(
@@ -1156,12 +1392,24 @@ function roundRobinQueryGroups(
   groups: PublicSearchQuery[][],
   pushQuery: (query: PublicSearchQuery | undefined) => void,
 ) {
+  roundRobinQueryGroupsUntil(groups, pushQuery, () => true);
+}
+
+function roundRobinQueryGroupsUntil(
+  groups: PublicSearchQuery[][],
+  pushQuery: (query: PublicSearchQuery | undefined) => void,
+  shouldContinue: () => boolean,
+) {
   let addedInRound = true;
 
-  while (addedInRound) {
+  while (addedInRound && shouldContinue()) {
     addedInRound = false;
 
     for (const group of groups) {
+      if (!shouldContinue()) {
+        return;
+      }
+
       const next = group.shift();
       if (!next) {
         continue;

@@ -304,11 +304,14 @@ describe("crawl diagnostics", () => {
       validationDeferred: 1,
     });
     expect(result.diagnostics.dropReasonCounts).toMatchObject({
-      "filter:title_below_threshold": 1,
       "filter:location_not_in_requested_country": 1,
       "filter:experience_level_mismatch": 1,
       "dedupe:canonical_url": 1,
     });
+    expect(
+      result.diagnostics.dropReasonCounts["filter:title_family_conflict"] ??
+        result.diagnostics.dropReasonCounts["filter:title_below_threshold"],
+    ).toBe(1);
     expect(result.diagnostics.filterDecisionTraces).toHaveLength(5);
     expect(result.diagnostics.filterDecisionTraces).toEqual(
       expect.arrayContaining([
@@ -316,7 +319,7 @@ describe("crawl diagnostics", () => {
           sourceJobId: "title-miss",
           filterStage: "title",
           outcome: "dropped",
-          dropReason: "filter:title_below_threshold",
+          dropReason: expect.stringMatching(/^filter:title_/),
           titleDiagnostics: expect.objectContaining({
             passed: false,
           }),

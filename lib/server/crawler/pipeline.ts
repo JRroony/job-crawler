@@ -586,7 +586,8 @@ export async function executeCrawlPipeline(
       await input.repository.saveCrawlSourceResults(initializedSourceResults);
     }
 
-    const discoveredSourceIds = new Set<string>();
+    const seenDiscoveredSourceIds = new Set<string>();
+    const acceptedDiscoveredSourceIds = new Set<string>();
     const enqueuedProviders = new Set<CrawlSourceResult["provider"]>();
     let totalHarvestedDiscoveryJobs = 0;
 
@@ -846,42 +847,37 @@ export async function executeCrawlPipeline(
       await persistentCancellation.throwIfCanceled({ heartbeat: true });
       throwIfAborted(mergedSignal);
       const newSources = payload.sources.filter((source) => {
-        if (discoveredSourceIds.has(source.id)) {
+        if (seenDiscoveredSourceIds.has(source.id)) {
           return false;
         }
 
-        discoveredSourceIds.add(source.id);
+        seenDiscoveredSourceIds.add(source.id);
         return true;
       });
 
       // Global source cap: after merging baseline + supplemental, cap total sources
       // to CRAWL_MAX_SOURCES while preserving platform diversity.
       const maxSources = env.CRAWL_MAX_SOURCES;
-      const totalDiscoveredBeforeCap = discoveredSourceIds.size;
+      const remainingSourceBudget = Math.max(0, maxSources - acceptedDiscoveredSourceIds.size);
+      const totalDiscoveredBeforeCap = acceptedDiscoveredSourceIds.size + newSources.length;
       let cappedSources = newSources;
       let sourcesTruncated = false;
       let sourcesTruncatedCount = 0;
 
-      if (totalDiscoveredBeforeCap > maxSources) {
+      if (newSources.length > remainingSourceBudget) {
         sourcesTruncated = true;
-        sourcesTruncatedCount = totalDiscoveredBeforeCap - maxSources;
-        cappedSources = capSourcesWithPlatformDiversity(newSources, maxSources);
-        // Remove the capped-out sources from discoveredSourceIds so they don't affect provider routing
-        const cappedIds = new Set(cappedSources.map((s) => s.id));
-        for (const id of discoveredSourceIds) {
-          if (!cappedIds.has(id)) {
-            // Keep only sources that made it into the cap
-          }
-        }
-        // Rebuild discoveredSourceIds to only include capped sources
-        discoveredSourceIds.clear();
-        cappedSources.forEach((s) => discoveredSourceIds.add(s.id));
+        sourcesTruncatedCount = newSources.length - remainingSourceBudget;
+        cappedSources = capSourcesWithPlatformDiversity(newSources, remainingSourceBudget);
+        diagnostics.budgetExhausted = true;
+        diagnostics.dropReasonCounts.crawl_source_budget =
+          (diagnostics.dropReasonCounts.crawl_source_budget ?? 0) + sourcesTruncatedCount;
 
         console.info("[crawl:source-cap]", {
           searchId: search._id,
           stage: payload.label,
           discoveredBeforeCap: totalDiscoveredBeforeCap,
           maxSources,
+          remainingSourceBudget,
           cappedTo: cappedSources.length,
           truncatedCount: sourcesTruncatedCount,
           platformDistribution: cappedSources.reduce<Record<string, number>>((counts, source) => {
@@ -890,6 +886,7 @@ export async function executeCrawlPipeline(
           }, {}),
         });
       }
+      cappedSources.forEach((source) => acceptedDiscoveredSourceIds.add(source.id));
 
       const providerSources = selectedProviders.map((provider) =>
         cappedSources.filter((source) => provider.supportsSource(source)),
@@ -902,7 +899,7 @@ export async function executeCrawlPipeline(
         );
       }
 
-      diagnostics.discoveredSources = discoveredSourceIds.size;
+      diagnostics.discoveredSources = acceptedDiscoveredSourceIds.size;
       diagnostics.crawledSources += providerSources.reduce((total, sources) => total + sources.length, 0);
       totalHarvestedDiscoveryJobs += payload.jobs.length;
       diagnostics.directJobsHarvested = totalHarvestedDiscoveryJobs;
@@ -914,7 +911,7 @@ export async function executeCrawlPipeline(
                 sourcesTruncated: true,
                 sourcesTruncatedCount,
                 sourcesBeforeTruncation: totalDiscoveredBeforeCap,
-                sourcesAfterTruncation: cappedSources.length,
+                sourcesAfterTruncation: acceptedDiscoveredSourceIds.size,
               }
             : {}),
         };
@@ -1170,7 +1167,7 @@ export async function executeCrawlPipeline(
       return response;
     }
     
-    if (discoveredSourceIds.size === 0) {
+    if (acceptedDiscoveredSourceIds.size === 0) {
       console.warn("[crawl:provider-routing]", {
         searchId: search._id,
         reason: "Discovery returned zero runnable sources before provider routing began.",

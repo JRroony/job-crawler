@@ -25,22 +25,27 @@ import type {
 
 const primaryConceptThreshold = 260;
 const relatedConceptThreshold = 180;
+const analyzeTitleCache = new Map<string, TitleAnalysis>();
+const analyzeTitleCacheLimit = 512;
 
 const roleGroupByHeadWord = new Map<string, TitleRoleGroup>([
-  ["architect", "engineering"],
+  ["architect", "solutions"],
+  ["administrator", "support"],
+  ["consultant", "solutions"],
   ["developer", "engineering"],
+  ["designer", "design"],
   ["engineer", "engineering"],
   ["analyst", "analysis"],
   ["manager", "management"],
   ["owner", "management"],
+  ["researcher", "design"],
   ["recruiter", "recruiting"],
+  ["scientist", "engineering"],
   ["sourcer", "recruiting"],
   ["staff", "engineering"],
   ["writer", "writing"],
   ["specialist", "operations"],
   ["coordinator", "operations"],
-  ["consultant", "sales"],
-  ["designer", "writing"],
   ["tester", "quality"],
 ]);
 
@@ -48,68 +53,89 @@ const fallbackFamilyScoresByHeadWord: Partial<
   Record<string, Partial<Record<TitleRoleFamily, number>>>
 > = {
   architect: {
-    software_engineering: 130,
-    data_engineering: 110,
+    architecture_solutions: 175,
+    software_engineering: 95,
+    cloud_devops_security: 90,
+  },
+  administrator: {
+    cloud_devops_security: 140,
+    qa_support_it: 85,
   },
   consultant: {
-    sales: 90,
+    architecture_solutions: 110,
+    business_operations_people: 70,
   },
   coordinator: {
-    operations: 85,
+    business_operations_people: 85,
   },
   designer: {
-    writing_documentation: 60,
+    design_content_marketing: 150,
   },
   developer: {
     software_engineering: 125,
-    data_engineering: 95,
-    quality_assurance: 70,
+    data_platform: 100,
+    qa_support_it: 75,
+    ai_ml_science: 70,
   },
   engineer: {
     software_engineering: 120,
-    data_engineering: 100,
-    quality_assurance: 90,
-    support: 80,
-    sales: 75,
+    data_platform: 105,
+    ai_ml_science: 110,
+    cloud_devops_security: 100,
+    qa_support_it: 95,
+    architecture_solutions: 90,
   },
   analyst: {
     data_analytics: 95,
-    operations: 90,
-    quality_assurance: 70,
+    business_operations_people: 90,
+    qa_support_it: 70,
   },
   manager: {
-    product: 90,
-    program_management: 90,
-    operations: 80,
+    product: 110,
+    business_operations_people: 95,
+    design_content_marketing: 70,
   },
   owner: {
-    product: 95,
+    product: 105,
+  },
+  researcher: {
+    design_content_marketing: 120,
+    ai_ml_science: 115,
   },
   recruiter: {
-    recruiting: 170,
+    business_operations_people: 170,
+  },
+  scientist: {
+    ai_ml_science: 180,
+    data_analytics: 80,
   },
   sourcer: {
-    recruiting: 170,
+    business_operations_people: 170,
   },
   staff: {
     software_engineering: 115,
-    support: 55,
+    qa_support_it: 55,
   },
   specialist: {
-    operations: 75,
-    support: 65,
-    writing_documentation: 60,
-    recruiting: 55,
+    business_operations_people: 75,
+    qa_support_it: 70,
+    design_content_marketing: 65,
   },
   tester: {
-    quality_assurance: 165,
+    qa_support_it: 165,
   },
   writer: {
-    writing_documentation: 160,
+    design_content_marketing: 160,
   },
 };
 
 export function analyzeTitle(value?: string): TitleAnalysis {
+  const cacheKey = value ?? "";
+  const cached = analyzeTitleCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const input = (value ?? "").trim();
   const normalized = normalizeTitleText(input);
   const strippedNormalized = stripTitleSeniority(normalized);
@@ -173,7 +199,7 @@ export function analyzeTitle(value?: string): TitleAnalysis {
   const canonicalTitle =
     primaryConcept?.canonicalTitle ?? strippedNormalized ?? normalized;
 
-  return {
+  const analysis = {
     input,
     normalized,
     strippedNormalized,
@@ -211,7 +237,17 @@ export function analyzeTitle(value?: string): TitleAnalysis {
             : canonicalTitle
               ? "low"
               : "none",
-  };
+  } satisfies TitleAnalysis;
+
+  if (analyzeTitleCache.size >= analyzeTitleCacheLimit) {
+    const firstKey = analyzeTitleCache.keys().next().value;
+    if (firstKey) {
+      analyzeTitleCache.delete(firstKey);
+    }
+  }
+
+  analyzeTitleCache.set(cacheKey, analysis);
+  return analysis;
 }
 
 function resolvePrimaryConcept(
@@ -355,11 +391,15 @@ function scoreConceptSignals(
     !headWord ||
     !canonicalHeadWord ||
     headWord === canonicalHeadWord ||
+    (headWord === "administrator" && canonicalHeadWord === "engineer") ||
     (headWord === "developer" && canonicalHeadWord === "engineer") ||
     (headWord === "engineer" && canonicalHeadWord === "developer") ||
     (headWord === "architect" && canonicalHeadWord === "engineer") ||
+    (headWord === "researcher" && canonicalHeadWord === "scientist") ||
+    (headWord === "scientist" && canonicalHeadWord === "analyst") ||
     (headWord === "tester" && canonicalHeadWord === "engineer") ||
     (headWord === "staff" && canonicalHeadWord === "engineer") ||
+    (headWord === "specialist" && canonicalHeadWord === "manager") ||
     (headWord === "owner" && canonicalHeadWord === "manager");
   const negativeConflict = (concept.negativeKeywords ?? []).some((keyword) =>
     normalizedTitle.includes(normalizeTitleText(keyword)),
@@ -503,67 +543,86 @@ function computeFamilyHeadCompatibilityAdjustment(
   normalized: string,
 ) {
   if (!headWord) {
-    return family === "recruiting" && normalized.includes("talent acquisition")
+    return family === "business_operations_people" && normalized.includes("talent acquisition")
       ? 70
       : 0;
   }
 
   if (family === "data_analytics") {
-    return headWord === "analyst" ? 0 : -80;
+    return headWord === "analyst" || headWord === "scientist" ? 0 : -80;
   }
 
-  if (family === "data_engineering") {
+  if (family === "data_platform") {
     return headWord === "engineer" ||
       headWord === "developer" ||
-      headWord === "architect"
+      headWord === "architect" ||
+      headWord === "administrator"
       ? 0
       : -90;
+  }
+
+  if (family === "ai_ml_science") {
+    return headWord === "engineer" ||
+      headWord === "scientist" ||
+      headWord === "researcher" ||
+      normalized.includes("mlops")
+      ? 0
+      : -70;
   }
 
   if (family === "product") {
     return headWord === "manager" || headWord === "owner" ? 0 : -85;
   }
 
-  if (family === "program_management") {
-    return headWord === "manager" || normalized.includes("tpm") ? 0 : -85;
-  }
-
-  if (family === "operations") {
-    return headWord === "analyst" ||
-      headWord === "manager" ||
-      headWord === "coordinator" ||
-      headWord === "specialist"
+  if (family === "cloud_devops_security") {
+    return headWord === "engineer" ||
+      headWord === "architect" ||
+      headWord === "administrator" ||
+      normalized.includes("sre")
       ? 0
       : -75;
   }
 
-  if (family === "sales") {
-    return headWord === "engineer" || headWord === "consultant" ? 0 : -85;
-  }
-
-  if (family === "quality_assurance") {
+  if (family === "qa_support_it") {
     return headWord === "engineer" ||
       headWord === "analyst" ||
+      headWord === "administrator" ||
+      headWord === "specialist" ||
       headWord === "tester" ||
       normalized.includes("sdet")
       ? 0
       : -80;
   }
 
-  if (family === "support") {
-    return headWord === "engineer" || headWord === "specialist" ? 0 : -75;
+  if (family === "architecture_solutions") {
+    return headWord === "architect" ||
+      headWord === "engineer" ||
+      headWord === "consultant" ||
+      normalized.includes("presales") ||
+      normalized.includes("pre sales")
+      ? 0
+      : -70;
   }
 
-  if (family === "recruiting") {
-    return headWord === "recruiter" ||
-      headWord === "sourcer" ||
-      normalized.includes("talent acquisition")
+  if (family === "design_content_marketing") {
+    return headWord === "designer" ||
+      headWord === "writer" ||
+      headWord === "researcher" ||
+      headWord === "manager" ||
+      headWord === "specialist"
       ? 0
       : -80;
   }
 
-  if (family === "writing_documentation") {
-    return headWord === "writer" || headWord === "specialist" ? 0 : -80;
+  if (family === "business_operations_people") {
+    return headWord === "analyst" ||
+      headWord === "manager" ||
+      headWord === "coordinator" ||
+      headWord === "specialist" ||
+      headWord === "recruiter" ||
+      headWord === "sourcer"
+      ? 0
+      : -75;
   }
 
   if (family === "software_engineering") {
@@ -587,7 +646,11 @@ function selectInferredFamily(familyScores: TitleFamilyScore[]) {
   const hasPositiveSignals = best.positiveSignals.length > 0;
   const minimumScore =
     hasPositiveSignals || best.family === "software_engineering" ? 120 : 150;
-  const minimumLead = hasPositiveSignals ? 20 : 20;
+  const minimumLead = hasPositiveSignals
+    ? 20
+    : best.family === "software_engineering"
+      ? 10
+      : 20;
 
   if (best.score < minimumScore) {
     return undefined;

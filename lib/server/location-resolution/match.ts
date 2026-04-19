@@ -7,6 +7,16 @@ import {
   resolveUsState,
   resolveUsStateCode,
 } from "@/lib/server/locations/us";
+import {
+  findSupportedCountryConceptInText,
+  findSupportedCountryMetroInText,
+  findSupportedCountryRegionInText,
+  getSupportedCountryAliases,
+  getSupportedCountryCanonicalName,
+  resolveSupportedCountryConcept,
+  resolveSupportedCountryMetro,
+  resolveSupportedCountryRegion,
+} from "@/lib/server/locations/world";
 import type { JobListing, ResolvedLocation, SearchFilters } from "@/lib/types";
 
 type LocationWorkplaceMode = "any" | "remote" | "hybrid";
@@ -160,11 +170,12 @@ function matchQueryScope(
 
     if (
       query.canonicalCountry &&
-      normalizeLocationText(jobDiagnostics.country) === normalizeLocationText(query.canonicalCountry)
+      (normalizeLocationText(jobDiagnostics.country) === normalizeLocationText(query.canonicalCountry) ||
+        matchedAliasTerms(jobDiagnostics.normalized, query.expandedTerms).length > 0)
     ) {
       return {
         matches: true,
-        explanation: `Country filter "${query.raw}" matched the resolved country "${jobDiagnostics.country}".`,
+        explanation: `Country filter "${query.raw}" matched the resolved country "${jobDiagnostics.country}"${jobDiagnostics.state ? ` via ${jobDiagnostics.state}` : ""}${jobDiagnostics.city ? ` and ${jobDiagnostics.city}` : ""}.`,
         matchedTerms: matchedAliasTerms(jobDiagnostics.normalized, query.expandedTerms),
       };
     }
@@ -264,6 +275,9 @@ function buildJobLocationDiagnostics(
       ...(resolvedLocation.country && isUnitedStatesValue(resolvedLocation.country)
         ? unitedStatesQueryAliases
         : []),
+      ...getSupportedCountryAliases(
+        resolveSupportedCountryConcept(resolvedLocation.country),
+      ),
       resolvedLocation.state ? normalizeLocationText(resolvedLocation.state) : "",
       resolvedLocation.stateCode ? normalizeLocationText(resolvedLocation.stateCode) : "",
       resolvedLocation.city ? normalizeLocationText(resolvedLocation.city) : "",
@@ -276,12 +290,28 @@ function buildLocationQueryTermSet(scope: LocationScope, raw: string): LocationQ
   const normalized = normalizeLocationText(raw);
   const workplaceMode = inferQueryWorkplaceMode(raw);
   const analysis = analyzeUsLocation(raw);
-  const canonicalState = resolveUsState(raw) ?? analysis.stateName;
+  const supportedMetro =
+    resolveSupportedCountryMetro(raw) ?? findSupportedCountryMetroInText(raw);
+  const supportedRegion =
+    resolveSupportedCountryRegion(raw, supportedMetro?.countryConcept) ??
+    findSupportedCountryRegionInText(raw, supportedMetro?.countryConcept);
+  const supportedCountryConcept =
+    supportedMetro?.countryConcept ??
+    supportedRegion?.countryConcept ??
+    resolveSupportedCountryConcept(raw) ??
+    findSupportedCountryConceptInText(raw);
+  const canonicalState =
+    resolveUsState(raw) ?? analysis.stateName ?? supportedRegion?.name ?? supportedMetro?.regionName;
   const canonicalStateCode =
-    (canonicalState ? resolveUsStateCode(canonicalState) : undefined) ?? analysis.stateCode;
-  const canonicalCity = analysis.city;
+    (canonicalState ? resolveUsStateCode(canonicalState) : undefined) ??
+    analysis.stateCode ??
+    supportedRegion?.code ??
+    supportedMetro?.regionCode;
+  const canonicalCity = analysis.city ?? supportedMetro?.city;
   const canonicalCountry =
-    analysis.isUnitedStates || isUnitedStatesValue(raw) ? "United States" : undefined;
+    analysis.isUnitedStates || isUnitedStatesValue(raw)
+      ? "United States"
+      : getSupportedCountryCanonicalName(supportedCountryConcept);
 
   if (scope === "country" && canonicalCountry === "United States") {
     return {
@@ -294,6 +324,26 @@ function buildLocationQueryTermSet(scope: LocationScope, raw: string): LocationQ
         ...unitedStatesQueryAliases,
         ...buildBroadWorkplaceTerms(unitedStatesQueryAliases),
         ...buildWorkplaceQualifiedTerms(workplaceMode, unitedStatesQueryAliases),
+      ]),
+    };
+  }
+
+  if (scope === "country" && canonicalCountry) {
+    const countryAliases = dedupeTerms([
+      ...getSupportedCountryAliases(supportedCountryConcept),
+      normalized,
+    ]);
+
+    return {
+      scope,
+      raw,
+      normalized,
+      workplaceMode,
+      canonicalCountry,
+      expandedTerms: dedupeTerms([
+        ...countryAliases,
+        ...buildBroadWorkplaceTerms(countryAliases),
+        ...buildWorkplaceQualifiedTerms(workplaceMode, countryAliases),
       ]),
     };
   }
@@ -321,11 +371,38 @@ function buildLocationQueryTermSet(scope: LocationScope, raw: string): LocationQ
     };
   }
 
+  if (scope === "state" && supportedRegion) {
+    const countryName = getSupportedCountryCanonicalName(supportedRegion.countryConcept);
+    const regionAliases = dedupeTerms([
+      ...supportedRegion.aliases,
+      supportedRegion.name,
+      supportedRegion.code ?? "",
+      countryName ? `${supportedRegion.name} ${countryName}` : "",
+      supportedRegion.code && countryName ? `${supportedRegion.code} ${countryName}` : "",
+    ]);
+
+    return {
+      scope,
+      raw,
+      normalized,
+      workplaceMode,
+      canonicalCountry: countryName,
+      canonicalState: supportedRegion.name,
+      canonicalStateCode: supportedRegion.code,
+      expandedTerms: dedupeTerms([
+        ...regionAliases,
+        ...buildBroadWorkplaceTerms(regionAliases),
+        ...buildWorkplaceQualifiedTerms(workplaceMode, regionAliases),
+      ]),
+    };
+  }
+
   if (scope === "city" && canonicalCity) {
     const cityAliases = dedupeTerms([
       normalizeLocationText(canonicalCity),
       canonicalStateCode ? normalizeLocationText(`${canonicalCity} ${canonicalStateCode}`) : "",
       canonicalState ? normalizeLocationText(`${canonicalCity} ${canonicalState}`) : "",
+      canonicalCountry ? normalizeLocationText(`${canonicalCity} ${canonicalCountry}`) : "",
     ]);
 
     return {
@@ -380,6 +457,12 @@ function buildLocationQueryAliasesFromJob(raw: string, resolvedLocation: Resolve
 
   if (resolvedLocation.isUnitedStates) {
     terms.push(...unitedStatesQueryAliases);
+  } else {
+    terms.push(
+      ...getSupportedCountryAliases(
+        resolveSupportedCountryConcept(resolvedLocation.country),
+      ),
+    );
   }
 
   return dedupeTerms(terms);

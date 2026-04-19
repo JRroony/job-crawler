@@ -1498,8 +1498,9 @@ describe("pipeline title retrieval", () => {
         "Reporting Analyst",
         "Insights Analyst",
         "Business Analyst",
+        "Sales Analyst",
       ],
-      excluded: ["Data Engineer", "Sales Analyst"],
+      excluded: ["Data Engineer"],
     },
     {
       query: "Business Analyst",
@@ -1616,9 +1617,10 @@ describe("pipeline title retrieval", () => {
         "Business Intelligence Analyst",
         "Reporting Analyst",
         "Business Analyst",
+        "Sales Analyst",
       ],
-      excludedTitles: ["Data Engineer", "Sales Analyst"],
-      expectedCounts: { fetchedCount: 5, matchedCount: 3, savedCount: 3 },
+      excludedTitles: ["Data Engineer"],
+      expectedCounts: { fetchedCount: 5, matchedCount: 4, savedCount: 4 },
     },
     {
       title: "Business Analyst",

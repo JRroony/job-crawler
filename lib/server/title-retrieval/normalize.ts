@@ -50,6 +50,7 @@ const stopWords = new Set([
 const roleHeadWords = new Set([
   "analyst",
   "architect",
+  "administrator",
   "consultant",
   "coordinator",
   "designer",
@@ -57,6 +58,7 @@ const roleHeadWords = new Set([
   "engineer",
   "manager",
   "owner",
+  "researcher",
   "recruiter",
   "scientist",
   "staff",
@@ -76,6 +78,7 @@ export function normalizeTitleText(value?: string) {
     .replace(/\bback[\s-]*end\b/g, "backend")
     .replace(/\bfull[\s-]*stack\b/g, "full stack")
     .replace(/\bfullstack\b/g, "full stack")
+    .replace(/\bml[\s-]*ops\b/g, "mlops")
     .replace(/\bpre[\s-]*sales\b/g, "pre sales")
     .replace(/\bsite reliability engineer\b/g, "sre")
     .replace(/\bmember(?:\s+of)?\s+technical\s+staff\b/g, "member of technical staff")

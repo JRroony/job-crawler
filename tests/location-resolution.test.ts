@@ -53,6 +53,33 @@ describe("location resolution", () => {
     });
   });
 
+  it.each([
+    {
+      locationText: "Toronto, ON",
+      expected: { country: "Canada", city: "Toronto", state: "Ontario", stateCode: "ON" },
+    },
+    {
+      locationText: "Berlin, Germany",
+      expected: { country: "Germany", city: "Berlin", state: "Berlin" },
+    },
+    {
+      locationText: "London, UK",
+      expected: { country: "United Kingdom", city: "London", state: "England" },
+    },
+  ])("resolves $locationText as a non-US location using country and regional evidence", ({
+    locationText,
+    expected,
+  }) => {
+    expect(
+      resolveJobLocation({
+        locationText,
+      }),
+    ).toMatchObject({
+      isUnitedStates: false,
+      ...expected,
+    });
+  });
+
   it("passes a United States filter when the job only exposes a US city and state", () => {
     const evaluation = evaluateSearchFilters(
       {
@@ -85,6 +112,38 @@ describe("location resolution", () => {
         isUnitedStates: true,
       },
       explanation: expect.stringContaining("resolved to the United States"),
+    });
+  });
+
+  it("passes a Canada filter when the job only exposes a Canadian city and province", () => {
+    const evaluation = evaluateSearchFilters(
+      {
+        title: "Data Engineer",
+        company: "Acme",
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Toronto, ON",
+        rawSourceMetadata: {},
+      },
+      {
+        title: "Data Engineer",
+        country: "Canada",
+      },
+      {
+        includeExperience: false,
+      },
+    );
+
+    expect(evaluation.matches).toBe(true);
+    expect(evaluation.locationMatch).toMatchObject({
+      jobDiagnostics: {
+        country: "Canada",
+        state: "Ontario",
+        city: "Toronto",
+        isUnitedStates: false,
+      },
+      explanation: expect.stringContaining('resolved country "Canada"'),
     });
   });
 
@@ -146,6 +205,36 @@ describe("location resolution", () => {
     });
   });
 
+  it("preserves remote evidence when structured country is less specific than location text", () => {
+    expect(
+      resolveJobLocation({
+        country: "United States",
+        locationText: "Remote - United States",
+      }),
+    ).toMatchObject({
+      country: "United States",
+      isRemote: true,
+      isUnitedStates: true,
+      evidence: expect.arrayContaining([
+        { source: "location_text", value: "Remote - United States" },
+      ]),
+    });
+
+    expect(
+      resolveJobLocation({
+        country: "Canada",
+        locationText: "Remote - Canada",
+      }),
+    ).toMatchObject({
+      country: "Canada",
+      isRemote: true,
+      isUnitedStates: false,
+      evidence: expect.arrayContaining([
+        { source: "location_text", value: "Remote - Canada" },
+      ]),
+    });
+  });
+
   it("uses metadata clues when explicit country is missing but office evidence points to the US", () => {
     expect(
       resolveJobLocation({
@@ -171,6 +260,26 @@ describe("location resolution", () => {
     });
   });
 
+  it("uses metadata clues when explicit country is missing but office evidence points to Canada", () => {
+    expect(
+      resolveJobLocation({
+        locationText: "Location unavailable",
+        rawSourceMetadata: {
+          pageJsonLd: {
+            office: {
+              locationName: "Toronto, Ontario",
+            },
+          },
+        },
+      }),
+    ).toMatchObject({
+      country: "Canada",
+      state: "Ontario",
+      city: "Toronto",
+      isUnitedStates: false,
+    });
+  });
+
   it("keeps noisy multi-part Greenhouse city and state strings in the United States without a literal country token", () => {
     expect(
       resolveJobLocation({
@@ -181,6 +290,17 @@ describe("location resolution", () => {
       city: "Seattle",
       state: "Washington",
       isUnitedStates: true,
+    });
+  });
+
+  it("does not let a non-US region string pass as United States during resolution", () => {
+    expect(
+      resolveJobLocation({
+        locationText: "Toronto, Ontario",
+      }),
+    ).toMatchObject({
+      country: "Canada",
+      isUnitedStates: false,
     });
   });
 });

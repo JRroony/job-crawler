@@ -240,6 +240,22 @@ describe("matchesFilters country matching", () => {
       ),
     ).toBe(false);
   });
+
+  it("matches a Canada country-only filter against inferred Canadian city and province data", () => {
+    expect(
+      matchesFilters(
+        createJob({
+          country: undefined,
+          state: undefined,
+          city: undefined,
+          locationText: "Toronto, ON",
+        }),
+        createFilters({
+          country: "Canada",
+        }),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("matchesFilters location filter combinations", () => {
@@ -369,7 +385,7 @@ describe("title relevance", () => {
     expect(normalizeTitleToCanonicalForm("Senior SWE")).toBe("software engineer");
     expect(normalizeTitleToCanonicalForm("Software Developer")).toBe("software engineer");
     expect(normalizeTitleToCanonicalForm("Product Analyst")).toBe("data analyst");
-    expect(normalizeTitleToCanonicalForm("Decision Scientist")).toBe("data analyst");
+    expect(normalizeTitleToCanonicalForm("Decision Scientist")).toBe("data scientist");
     expect(normalizeTitleToCanonicalForm("Lead Product Manager")).toBe("product manager");
   });
 
@@ -405,8 +421,8 @@ describe("title relevance", () => {
       tier: "adjacent_concept",
     },
     {
-      label: "infrastructure engineering role",
-      title: "Infrastructure Engineer",
+      label: "platform engineering role",
+      title: "Platform Engineer",
       tier: "adjacent_concept",
     },
   ])("classifies $label", ({ title, tier }) => {
@@ -444,9 +460,9 @@ describe("title relevance", () => {
       tier: "synonym",
     },
     {
-      label: "decision science variant",
-      title: "Decision Scientist",
-      tier: "synonym",
+      label: "financial analytics variant",
+      title: "Financial Analyst",
+      tier: "adjacent_concept",
     },
   ])("classifies $label for a data analyst query", ({ title, tier }) => {
     expect(getTitleMatchResult(title, "Data Analyst")).toMatchObject({
@@ -459,12 +475,18 @@ describe("title relevance", () => {
   it.each([
     "Data Engineer",
     "Data Scientist",
-    "Financial Analyst",
-    "Sales Analyst",
+    "Operations Manager",
   ])("does not overmatch %s for a data analyst query", (title) => {
     expect(getTitleMatchResult(title, "Data Analyst")).toMatchObject({
       matches: false,
       tier: "none",
+    });
+  });
+
+  it("keeps sales analyst within the analytics family for a data analyst query", () => {
+    expect(getTitleMatchResult("Sales Analyst", "Data Analyst")).toMatchObject({
+      matches: true,
+      tier: "synonym",
     });
   });
 });
@@ -502,10 +524,10 @@ describe("matchesFilters title matching", () => {
     "SWE",
     "Backend Engineer",
     "Mobile Engineer",
-    "Infrastructure Engineer",
     "Frontend Engineer",
     "Full Stack Engineer",
     "Platform Engineer",
+    "Member of Technical Staff",
   ])("matches %s for a broad software engineer query", (title) => {
     expect(
       matchesFilters(

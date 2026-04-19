@@ -386,6 +386,15 @@ export const publicSearchDiscoveryDiagnosticsSchema = z.object({
   sampleHarvestedSourceUrls: z.array(z.string().url()).max(12).default([]),
   sampleRecoveredSourceUrls: z.array(z.string().url()).max(12).default([]),
   coverageNotes: z.array(z.string().min(1)).max(12).default([]),
+  stopReason: nullableOptional(
+    z.enum([
+      "no_queries",
+      "completed_query_plan",
+      "query_budget_exhausted",
+      "source_budget_exhausted",
+      "stagnant_query_plateau",
+    ]),
+  ),
 });
 
 export const discoveryStageDiagnosticsSchema = z.object({

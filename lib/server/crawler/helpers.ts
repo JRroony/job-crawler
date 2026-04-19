@@ -8,6 +8,12 @@ import {
   resolveUsState,
 } from "@/lib/server/locations/us";
 import {
+  findSupportedCountryConceptInText,
+  getSupportedCountryAliases,
+  getSupportedCountryCanonicalName,
+  resolveSupportedCountryConcept,
+} from "@/lib/server/locations/world";
+import {
   getLocationMatchResult,
   resolveJobLocation,
   resolveLocationText,
@@ -40,11 +46,6 @@ import type {
   ResolvedLocation,
   SearchFilters,
 } from "@/lib/types";
-
-type CountryAliasGroup = {
-  concept: string;
-  aliases: string[];
-};
 
 export type FilterExclusionReason = "title" | "location" | "experience";
 
@@ -318,32 +319,14 @@ const experiencePromptSignalPattern =
 const experiencePromptYearPattern =
   /\b\d+(?:\.\d+)?\s*(?:\+|plus)?\s*(?:-|to|–|—)?\s*\d*(?:\.\d+)?\s*(?:years?|yrs?|yoe)\b/i;
 
-const countryAliasGroups: CountryAliasGroup[] = [
-  {
-    concept: "united states",
-    aliases: [
-      "united states",
-      "united states of america",
-      "usa",
-      "us",
-      "u s a",
-      "u s",
-    ],
-  },
-];
-
-const countryConceptByAlias = new Map(
-  countryAliasGroups.flatMap((group) =>
-    group.aliases.map((alias) => [normalizeComparableText(alias), group.concept] as const),
-  ),
-);
-
-const countryAliasesByConcept = new Map(
-  countryAliasGroups.map((group) => [
-    group.concept,
-    group.aliases.map((alias) => normalizeComparableText(alias)),
-  ] as const),
-);
+const unitedStatesCountryAliases = [
+  "united states",
+  "united states of america",
+  "usa",
+  "us",
+  "u s a",
+  "u s",
+].map((alias) => normalizeComparableText(alias));
 
 const experienceMetadataIgnoredKeys = new Set([
   "crawlTraceId",
@@ -869,7 +852,7 @@ function matchesCountryFilter(
     return false;
   }
 
-  const aliases = countryAliasesByConcept.get(wantedConcept) ?? [wantedConcept];
+  const aliases = aliasesForCountryConcept(wantedConcept);
   return aliases.some((alias) => containsNormalizedTerm(haystack, alias));
 }
 
@@ -896,7 +879,31 @@ function resolveCountryConcept(value?: string) {
     return undefined;
   }
 
-  return countryConceptByAlias.get(normalized) ?? normalized;
+  if (unitedStatesCountryAliases.includes(normalized)) {
+    return "united states";
+  }
+
+  const supportedCountryConcept = resolveSupportedCountryConcept(normalized);
+  if (supportedCountryConcept) {
+    return normalizeComparableText(
+      getSupportedCountryCanonicalName(supportedCountryConcept),
+    );
+  }
+
+  return normalized;
+}
+
+function aliasesForCountryConcept(concept: string) {
+  if (concept === "united states") {
+    return unitedStatesCountryAliases;
+  }
+
+  const aliases = getSupportedCountryAliases(
+    resolveSupportedCountryConcept(concept) ??
+      findSupportedCountryConceptInText(concept),
+  ).map((alias) => normalizeComparableText(alias));
+
+  return aliases.length > 0 ? aliases : [concept];
 }
 
 function containsNormalizedTerm(haystack: string, term: string) {
@@ -955,10 +962,11 @@ function inferCountryConceptFromLocationText(locationText?: string) {
     return "united states";
   }
 
-  for (const [concept, aliases] of countryAliasesByConcept.entries()) {
-    if (aliases.some((alias) => containsNormalizedTerm(normalizedLocationText, alias))) {
-      return concept;
-    }
+  const supportedCountryConcept = findSupportedCountryConceptInText(normalizedLocationText);
+  if (supportedCountryConcept) {
+    return normalizeComparableText(
+      getSupportedCountryCanonicalName(supportedCountryConcept),
+    );
   }
 
   return undefined;

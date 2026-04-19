@@ -2,6 +2,13 @@ import "server-only";
 
 import { resolveUsState, resolveUsStateCode, isUnitedStatesValue } from "@/lib/server/locations/us";
 import {
+  findSupportedCountryConceptInText,
+  findSupportedCountryRegionInText,
+  getSupportedCountryCanonicalName,
+  resolveSupportedCountryConcept,
+  resolveSupportedCountryRegion,
+} from "@/lib/server/locations/world";
+import {
   analyzeTitle,
   buildTitleQueryVariants,
   extractMeaningfulPhrases,
@@ -133,13 +140,30 @@ function buildLocationCandidateClause(filters: SearchFilters) {
         ],
       });
     } else {
-      clauses.push({ country: filters.country });
+      const countryConcept =
+        resolveSupportedCountryConcept(filters.country) ??
+        findSupportedCountryConceptInText(filters.country);
+      const canonicalCountry =
+        getSupportedCountryCanonicalName(countryConcept) ?? filters.country;
+
+      clauses.push({
+        $or: [
+          { country: canonicalCountry },
+          { "resolvedLocation.country": canonicalCountry },
+        ],
+      });
     }
   }
 
   if (filters.state) {
-    const state = resolveUsState(filters.state);
-    const stateCode = resolveUsStateCode(filters.state);
+    const supportedRegion =
+      resolveSupportedCountryRegion(filters.state) ??
+      findSupportedCountryRegionInText(filters.state);
+    const state = resolveUsState(filters.state) ?? supportedRegion?.name;
+    const stateCode =
+      resolveUsStateCode(filters.state) ??
+      (state ? resolveUsStateCode(state) : undefined) ??
+      supportedRegion?.code;
     const stateClauses = dedupeStrings([state, stateCode, filters.state]).flatMap((value) => [
       { "resolvedLocation.state": value },
       { "resolvedLocation.stateCode": value },

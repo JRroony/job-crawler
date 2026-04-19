@@ -13,6 +13,11 @@ import {
   resolveUsState,
   resolveUsStateCode,
 } from "@/lib/server/locations/us";
+import {
+  analyzeSupportedCountryLocation,
+  getSupportedCountryCanonicalName,
+  resolveSupportedCountryConcept,
+} from "@/lib/server/locations/world";
 
 type ResolveJobLocationInput = {
   country?: string;
@@ -64,17 +69,21 @@ export function resolveJobLocation(input: ResolveJobLocationInput): ResolvedLoca
     .map(resolveCandidate)
     .filter((candidate): candidate is ResolvedCandidate => Boolean(candidate))
     .sort((left, right) => right.score - left.score || right.candidate.priority - left.candidate.priority);
-  const bestUnitedStatesCandidate = resolvedCandidates.find(
-    (candidate) => candidate.location.isUnitedStates,
-  );
+  const bestCandidate = resolvedCandidates[0];
 
-  if (bestUnitedStatesCandidate) {
+  if (bestCandidate) {
+    const supportingCandidates = resolvedCandidates.filter(
+      (candidate) =>
+        candidate.location.country === bestCandidate.location.country &&
+        (!bestCandidate.location.state ||
+          !candidate.location.state ||
+          candidate.location.state === bestCandidate.location.state),
+    );
+
     return compactResolvedLocation({
-      ...bestUnitedStatesCandidate.location,
-      evidence: collectSupportingEvidence(
-        resolvedCandidates,
-        (candidate) => candidate.location.isUnitedStates,
-      ),
+      ...bestCandidate.location,
+      isRemote: supportingCandidates.some((candidate) => candidate.location.isRemote),
+      evidence: collectSupportingEvidence(supportingCandidates),
     });
   }
 
@@ -84,10 +93,7 @@ export function resolveJobLocation(input: ResolveJobLocationInput): ResolvedLoca
   const isRemote = candidates.some((candidate) =>
     normalizeLocationText(candidate.value).includes("remote"),
   );
-  const fallbackEvidence = collectSupportingEvidence(
-    resolvedCandidates,
-    () => true,
-  );
+  const fallbackEvidence = collectSupportingEvidence(resolvedCandidates);
 
   return compactResolvedLocation({
     country: normalizedCountry,
@@ -171,9 +177,9 @@ function collectMetadataCandidates(rawSourceMetadata?: Record<string, unknown>) 
       if (descriptionPathPattern.test(pathLabel)) {
         extractDescriptionLocationHints(node).forEach((hint) =>
           candidates.push({
-            source: "description",
+            source: /\bremote\b/i.test(hint) ? "remote_hint" : "description",
             value: hint,
-            priority: 58,
+            priority: /\bremote\b/i.test(hint) ? 62 : 58,
           }),
         );
       } else if (locationPathPattern.test(pathLabel)) {
@@ -221,6 +227,7 @@ function buildStructuredLocationFromRecord(record: Record<string, unknown>) {
 
 function resolveCandidate(candidate: LocationCandidate): ResolvedCandidate | undefined {
   const analysis = analyzeUsLocation(candidate.value);
+  const internationalAnalysis = analyzeSupportedCountryLocation(candidate.value);
   const structuredParts = inferStructuredUsParts(candidate.value, analysis.isRemote);
   const state = structuredParts.state ?? analysis.stateName;
   const stateCode =
@@ -234,24 +241,36 @@ function resolveCandidate(candidate: LocationCandidate): ResolvedCandidate | und
     isUnitedStatesValue(candidate.value);
 
   if (!isUnitedStates) {
-    const normalizedCountry = normalizeCountryValue(candidate.value);
+    const normalizedCountry =
+      internationalAnalysis.country ?? normalizeCountryValue(candidate.value);
     if (!normalizedCountry || normalizedCountry === "United States") {
       return undefined;
     }
+
+    const confidence = resolveConfidence(candidate.source, {
+      city: internationalAnalysis.city,
+      state: internationalAnalysis.state,
+      isRemote: internationalAnalysis.isRemote,
+      explicitUsAlias: false,
+    });
 
     return {
       candidate,
       location: compactResolvedLocation({
         country: normalizedCountry,
-        state: undefined,
-        stateCode: undefined,
-        city: undefined,
-        isRemote: analysis.isRemote,
+        state: internationalAnalysis.state,
+        stateCode: internationalAnalysis.stateCode,
+        city: internationalAnalysis.city,
+        isRemote: internationalAnalysis.isRemote,
         isUnitedStates: false,
-        confidence: candidate.source === "structured_fields" ? "medium" : "low",
+        confidence,
         evidence: [{ source: candidate.source, value: candidate.value }],
       }),
-      score: candidate.priority,
+      score:
+        candidate.priority +
+        confidenceScore(confidence) +
+        (internationalAnalysis.city ? 12 : 0) +
+        (internationalAnalysis.state ? 14 : 0),
     };
   }
 
@@ -303,18 +322,11 @@ function inferStructuredUsParts(value: string, isRemote: boolean) {
   };
 }
 
-function collectSupportingEvidence(
-  resolvedCandidates: ResolvedCandidate[],
-  predicate: (candidate: ResolvedCandidate) => boolean,
-) {
+function collectSupportingEvidence(resolvedCandidates: ResolvedCandidate[]) {
   const evidence: ResolvedLocationEvidence[] = [];
   const seen = new Set<string>();
 
   resolvedCandidates.forEach((candidate) => {
-    if (!predicate(candidate)) {
-      return;
-    }
-
     candidate.location.evidence.forEach((item) => {
       const key = `${item.source}:${normalizeLocationText(item.value)}`;
       if (seen.has(key) || evidence.length >= 4) {
@@ -335,7 +347,11 @@ function extractDescriptionLocationHints(value: string) {
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0 && segment.length <= 180)
     .filter((segment) => descriptionLocationHintPattern.test(segment))
-    .filter((segment) => analyzeUsLocation(segment).isUnitedStates);
+    .filter((segment) => {
+      const usAnalysis = analyzeUsLocation(segment);
+      const internationalAnalysis = analyzeSupportedCountryLocation(segment);
+      return usAnalysis.isUnitedStates || Boolean(internationalAnalysis.country);
+    });
 }
 
 function resolveConfidence(
@@ -395,7 +411,14 @@ function normalizeCountryValue(value?: string) {
     return undefined;
   }
 
-  return isUnitedStatesValue(trimmed) ? "United States" : trimmed;
+  if (isUnitedStatesValue(trimmed)) {
+    return "United States";
+  }
+
+  const supportedCountry = getSupportedCountryCanonicalName(
+    resolveSupportedCountryConcept(trimmed),
+  );
+  return supportedCountry ?? trimmed;
 }
 
 function normalizeStateValue(value?: string) {
