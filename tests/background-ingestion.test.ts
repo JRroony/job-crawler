@@ -14,6 +14,7 @@ import {
 } from "@/lib/server/background/recurring-ingestion";
 import { collectionNames } from "@/lib/server/db/indexes";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
+import { expandSourceInventory } from "@/lib/server/discovery/service";
 import {
   toSourceInventoryRecord,
   type SourceInventoryRecord,
@@ -32,6 +33,7 @@ afterEach(() => {
 
 describe("recurring background ingestion", () => {
   it("expands inventory with newly discovered sources before selecting crawl sources", async () => {
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const repository = new JobCrawlerRepository(new MongoLikeNullDb());
     const now = new Date("2026-04-15T12:00:00.000Z");
 
@@ -111,6 +113,19 @@ describe("recurring background ingestion", () => {
       newSourcesAdded: 1,
       newSourceIds: ["greenhouse:expansionco"],
     });
+    expect(infoSpy).toHaveBeenCalledWith(
+      "[background-ingestion:inventory-expansion]",
+      expect.objectContaining({
+        selectedSearchTitles: ["test expansion"],
+        selectedSearchFilters: [
+          {
+            title: "test expansion",
+            crawlMode: "balanced",
+          },
+        ],
+        searchDiagnostics: [],
+      }),
+    );
     expect(crawlRun.diagnostics.backgroundPersistence).toMatchObject({
       jobsInserted: 1,
       jobsUpdated: 0,
@@ -129,8 +144,234 @@ describe("recurring background ingestion", () => {
     expect(await repository.getIndexedJobDeliveryCursor()).toBe(1);
   });
 
+  it("persists and logs structured Canada expansion filters from the recurring inventory path", async () => {
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const repository = new JobCrawlerRepository(new MongoLikeNullDb());
+    const now = new Date("1970-01-01T00:10:00.000Z");
+    const requestedQueries: string[] = [];
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const query = new URL(url).searchParams.get("q") ?? "";
+      requestedQueries.push(query);
+
+      if (
+        url.startsWith("https://www.bing.com/search") &&
+        query.includes("software engineer") &&
+        query.includes("canada")
+      ) {
+        return new Response(
+          `
+            <rss>
+              <channel>
+                <item>
+                  <link>https://boards.greenhouse.io/canadaco/jobs/123-software-engineer-canada</link>
+                </item>
+              </channel>
+            </rss>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/rss+xml",
+            },
+          },
+        );
+      }
+
+      if (url.startsWith("https://www.bing.com/search")) {
+        return new Response(
+          `<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel></channel></rss>`,
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/rss+xml",
+            },
+          },
+        );
+      }
+
+      return new Response("<html><body></body></html>", {
+        status: 200,
+        headers: {
+          "content-type": "text/html",
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    const seenTokens: string[] = [];
+    const provider = createStubProvider("greenhouse", async (_context, sources) => {
+      seenTokens.push(...sources.map((source) => source.token ?? source.id));
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: sources.length,
+        fetchedCount: sources.length * 3,
+        matchedCount: sources.length * 3,
+        warningCount: 0,
+        jobs: sources.flatMap((source) =>
+          ["Software Engineer", "Backend Engineer", "Full Stack Engineer"].map((title) => ({
+            ...createProviderJob({
+              title,
+              company: "Canada Co",
+              sourceJobId: `${source.token ?? source.id}-${title.toLowerCase().replace(/\s+/g, "-")}`,
+            }),
+            country: "Canada",
+            locationText: "Remote - Canada",
+            resolvedLocation: {
+              country: "Canada",
+              isRemote: true,
+              isUnitedStates: false,
+              confidence: "high" as const,
+              evidence: [
+                {
+                  source: "location_text" as const,
+                  value: "Remote - Canada",
+                },
+              ],
+            },
+          })),
+        ),
+      };
+    });
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [provider],
+      now,
+      maxSources: 1,
+      schedulingIntervalMs: 600_000,
+      runTimeoutMs: 5_000,
+      fetchImpl,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+      expandInventory: async ({ repository: expansionRepository, fetchImpl: expansionFetchImpl }) =>
+        expandSourceInventory({
+          repository: expansionRepository,
+          now,
+          fetchImpl: expansionFetchImpl,
+          intervalMs: 600_000,
+          maxSources: 1,
+          refreshedInventory: [],
+          maxExpansionSearches: 2,
+          env: {
+            greenhouseBoardTokens: [],
+            leverSiteTokens: [],
+            ashbyBoardTokens: [],
+            companyPageSources: [],
+            PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
+            PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
+            PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 8,
+            PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 24,
+            PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: 4,
+            GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 8,
+          },
+        }),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected recurring ingestion to start.");
+    }
+
+    const crawlRun = await waitForRunCompletion(repository, triggered.crawlRunId);
+    const persistedJobs = await repository.getJobsByCrawlRun(triggered.crawlRunId);
+
+    expect(
+      requestedQueries.some(
+        (query) => query.includes("software engineer") && query.includes("canada"),
+      ),
+    ).toBe(true);
+    expect(requestedQueries.some((query) => query.includes("data analyst"))).toBe(true);
+    expect(seenTokens).toEqual(["canadaco"]);
+    expect(persistedJobs).toHaveLength(3);
+    expect(persistedJobs.map((job) => job.title)).toEqual(
+      expect.arrayContaining(["Software Engineer", "Backend Engineer", "Full Stack Engineer"]),
+    );
+    expect(persistedJobs.every((job) => job.company === "Canada Co")).toBe(true);
+    expect(persistedJobs.every((job) => job.country === "Canada")).toBe(true);
+    expect(
+      persistedJobs.every(
+        (job) =>
+          job.resolvedLocation?.country === "Canada" &&
+          job.resolvedLocation.isUnitedStates === false,
+      ),
+    ).toBe(true);
+    expect(crawlRun.diagnostics.inventoryExpansion).toMatchObject({
+      selectedSearchFilters: [
+        expect.objectContaining({
+          title: "software engineer",
+          country: "Canada",
+          platforms: ["greenhouse"],
+          crawlMode: "balanced",
+        }),
+        expect.objectContaining({
+          title: "data analyst",
+          country: "United States",
+          crawlMode: "balanced",
+        }),
+      ],
+      searchDiagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          title: "software engineer",
+          country: "Canada",
+          publicSources: 1,
+        }),
+      ]),
+      newSourceIds: expect.arrayContaining(["greenhouse:canadaco"]),
+    });
+    expect(infoSpy).toHaveBeenCalledWith(
+      "[background-ingestion:inventory-expansion]",
+      expect.objectContaining({
+        selectedSearchFilters: expect.arrayContaining([
+          expect.objectContaining({
+            title: "software engineer",
+            country: "Canada",
+            platforms: ["greenhouse"],
+          }),
+        ]),
+        searchDiagnostics: expect.arrayContaining([
+          expect.objectContaining({
+            title: "software engineer",
+            country: "Canada",
+            publicSources: 1,
+          }),
+        ]),
+      }),
+    );
+
+    const indexedResult = await runSearchFromFilters(
+      {
+        title: "software engineer canada",
+        crawlMode: "fast",
+      },
+      {
+        repository,
+        providers: [],
+        discovery: createEmptyDiscovery(),
+        fetchImpl,
+        now,
+        requestOwnerKey: "background-canada-software",
+      },
+    );
+
+    expect(indexedResult.search.filters).toMatchObject({
+      title: "software engineer",
+      country: "Canada",
+    });
+    expect(indexedResult.jobs.map((job) => job.title)).toContain("Software Engineer");
+    expect(indexedResult.jobs.every((job) => job.resolvedLocation?.country === "Canada")).toBe(
+      true,
+    );
+    expect(indexedResult.diagnostics.session).toMatchObject({
+      indexedResultsCount: indexedResult.jobs.length,
+      supplementalQueued: false,
+      triggerReason: "indexed_coverage_sufficient",
+    });
+  });
+
   it("starts immediately and repeats on the configured interval", async () => {
     vi.useFakeTimers();
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const repository = new JobCrawlerRepository(new MongoLikeNullDb());
     await repository.upsertSourceInventory([
       createInventoryRecord({
@@ -166,6 +407,14 @@ describe("recurring background ingestion", () => {
         }),
       ],
     });
+    expect(infoSpy).toHaveBeenCalledWith(
+      "[background-ingestion:scheduler-start]",
+      expect.objectContaining({
+        started: true,
+        reason: "started",
+        intervalMs: 600_000,
+      }),
+    );
     await vi.advanceTimersByTimeAsync(0);
     expect(providerCalls).toBe(1);
 
@@ -255,6 +504,7 @@ describe("recurring background ingestion", () => {
   });
 
   it("reports bootstrap/index initialization failures separately from generic Mongo unavailability", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const bootstrapError = new Error(
       "Mongo bootstrap failed during index initialization for jobs_canonical_job_key.",
     );
@@ -281,6 +531,15 @@ describe("recurring background ingestion", () => {
       phase: "index_initialization",
       message: bootstrapError.message,
     });
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[background-ingestion:trigger]",
+      expect.objectContaining({
+        status: "skipped-bootstrap-failed",
+        reason: "bootstrap_failed",
+        phase: "index_initialization",
+        message: bootstrapError.message,
+      }),
+    );
   });
 
   it("selects stale inventory sources before fresh ones and reports freshness skips", async () => {
@@ -996,6 +1255,12 @@ function createExpansionResult(input: {
       candidateSources: input.newSourceIds.length,
       newSourcesAdded: input.newSourceIds.length,
       selectedSearchTitles: ["test expansion"],
+      selectedSearchFilters: [
+        {
+          title: "test expansion",
+          crawlMode: "balanced",
+        },
+      ],
       selectedSourceIds: input.newSourceIds,
       newSourceIds: input.newSourceIds,
       platformCountsBefore: { greenhouse: input.beforeCount },

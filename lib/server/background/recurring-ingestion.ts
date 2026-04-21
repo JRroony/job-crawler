@@ -92,19 +92,23 @@ export function startRecurringBackgroundIngestionScheduler(
 ) {
   const env = getEnv();
   if (!env.BACKGROUND_INGESTION_ENABLED) {
-    return {
+    const result = {
       started: false,
       reason: "disabled" as const,
     };
+    logBackgroundSchedulerStart(result);
+    return result;
   }
 
   const existing = globalThis.__jobCrawlerBackgroundSchedulerState;
   if (existing) {
-    return {
+    const result = {
       started: true,
       reason: "already-started" as const,
       intervalMs: existing.intervalMs,
     };
+    logBackgroundSchedulerStart(result);
+    return result;
   }
 
   const intervalMs = Math.max(
@@ -135,11 +139,13 @@ export function startRecurringBackgroundIngestionScheduler(
   globalThis.__jobCrawlerBackgroundSchedulerState = state;
   scheduleNext(0);
 
-  return {
+  const result = {
     started: true,
     reason: "started" as const,
     intervalMs,
   };
+  logBackgroundSchedulerStart(result);
+  return result;
 }
 
 export function stopRecurringBackgroundIngestionScheduler() {
@@ -160,12 +166,14 @@ export async function triggerRecurringBackgroundIngestion(
 ): Promise<BackgroundIngestionTriggerResult> {
   const env = getEnv();
   if (!env.BACKGROUND_INGESTION_ENABLED) {
-    return { status: "skipped-disabled" };
+    const result = { status: "skipped-disabled" as const };
+    logBackgroundIngestionTrigger(result);
+    return result;
   }
 
   const repositoryResolution = await resolveDurableBackgroundRepository(runtime);
   if (!repositoryResolution.repository) {
-    return {
+    const result = {
       status:
         repositoryResolution.reason === "bootstrap_failed"
           ? "skipped-bootstrap-failed"
@@ -173,7 +181,9 @@ export async function triggerRecurringBackgroundIngestion(
       reason: repositoryResolution.reason,
       phase: repositoryResolution.phase,
       message: repositoryResolution.message,
-    };
+    } as const;
+    logBackgroundIngestionTrigger(result);
+    return result;
   }
   const repository = repositoryResolution.repository;
 
@@ -188,7 +198,9 @@ export async function triggerRecurringBackgroundIngestion(
 
   const activeQueueEntry = await repository.getActiveCrawlQueueEntryForSearch(search._id);
   if (activeQueueEntry) {
-    return { status: "skipped-active", searchId: search._id };
+    const result = { status: "skipped-active" as const, searchId: search._id };
+    logBackgroundIngestionTrigger(result);
+    return result;
   }
 
   const searchSession = await repository.createSearchSession(search._id, now.toISOString(), {
@@ -246,14 +258,55 @@ export async function triggerRecurringBackgroundIngestion(
   );
 
   if (!queued) {
-    return { status: "skipped-active", searchId: search._id };
+    const result = { status: "skipped-active" as const, searchId: search._id };
+    logBackgroundIngestionTrigger(result);
+    return result;
   }
 
-  return {
+  const result = {
     status: "started",
     searchId: search._id,
     crawlRunId: crawlRun._id,
+  } as const;
+  logBackgroundIngestionTrigger(result);
+  return result;
+}
+
+function logBackgroundSchedulerStart(result: {
+  started: boolean;
+  reason: "disabled" | "already-started" | "started";
+  intervalMs?: number;
+}) {
+  const payload = {
+    started: result.started,
+    reason: result.reason,
+    intervalMs: result.intervalMs,
   };
+
+  if (result.started) {
+    console.info("[background-ingestion:scheduler-start]", payload);
+    return;
+  }
+
+  console.warn("[background-ingestion:scheduler-start]", payload);
+}
+
+function logBackgroundIngestionTrigger(result: BackgroundIngestionTriggerResult) {
+  const payload = {
+    status: result.status,
+    searchId: "searchId" in result ? result.searchId : undefined,
+    crawlRunId: "crawlRunId" in result ? result.crawlRunId : undefined,
+    reason: "reason" in result ? result.reason : undefined,
+    phase: "phase" in result ? result.phase : undefined,
+    message: "message" in result ? result.message : undefined,
+  };
+
+  if (result.status === "started" || result.status === "skipped-active") {
+    console.info("[background-ingestion:trigger]", payload);
+    return;
+  }
+
+  console.warn("[background-ingestion:trigger]", payload);
 }
 
 async function executeRecurringInventoryIngestion(
@@ -380,10 +433,22 @@ async function executeRecurringInventoryIngestion(
       afterRefreshCount: inventoryExpansion.diagnostics.afterRefreshCount,
       afterExpansionCount: inventoryExpansion.diagnostics.afterExpansionCount,
       selectedSearches: inventoryExpansion.diagnostics.selectedSearches,
+      selectedSearchTitles: inventoryExpansion.diagnostics.selectedSearchTitles,
+      selectedSearchFilters: inventoryExpansion.diagnostics.selectedSearchFilters,
       candidateSources: inventoryExpansion.diagnostics.candidateSources,
       newSourcesAdded: inventoryExpansion.diagnostics.newSourcesAdded,
       newSourceIds: inventoryExpansion.diagnostics.newSourceIds,
       skippedReason: inventoryExpansion.diagnostics.skippedReason,
+      searchDiagnostics: inventoryExpansion.diagnostics.searchDiagnostics.map((diagnostic) => ({
+        title: diagnostic.title,
+        country: diagnostic.country,
+        state: diagnostic.state,
+        city: diagnostic.city,
+        discoveredSources: diagnostic.discoveredSources,
+        publicSources: diagnostic.publicSources,
+        publicJobs: diagnostic.publicJobs,
+        publicSearchStopReason: diagnostic.publicSearch?.stopReason,
+      })),
     });
 
     console.info("[background-ingestion:source-selection]", {
@@ -770,6 +835,7 @@ async function resolveInventoryExpansion(input: {
         candidateSources: 0,
         newSourcesAdded: 0,
         selectedSearchTitles: [],
+        selectedSearchFilters: [],
         selectedSourceIds: [],
         newSourceIds: [],
         platformCountsBefore: summarizeInventoryPlatforms(input.refreshedInventory),
@@ -1139,6 +1205,7 @@ function createEmptyDiagnostics(): CrawlDiagnostics {
       candidateSources: 0,
       newSourcesAdded: 0,
       selectedSearchTitles: [],
+      selectedSearchFilters: [],
       selectedSourceIds: [],
       newSourceIds: [],
       platformCountsBefore: {},

@@ -452,6 +452,19 @@ export const crawlDiagnosticsSchema = z.object({
       candidateSources: z.number().int().nonnegative().default(0),
       newSourcesAdded: z.number().int().nonnegative().default(0),
       selectedSearchTitles: z.array(z.string().min(1)).max(12).default([]),
+      selectedSearchFilters: z
+        .array(
+          z.object({
+            title: z.string().min(1),
+            country: nullableOptional(z.string()),
+            state: nullableOptional(z.string()),
+            city: nullableOptional(z.string()),
+            platforms: z.array(z.string().min(1)).optional(),
+            crawlMode: nullableOptional(z.string()),
+          }),
+        )
+        .max(12)
+        .default([]),
       selectedSourceIds: z.array(z.string().min(1)).max(12).default([]),
       newSourceIds: z.array(z.string().min(1)).max(12).default([]),
       platformCountsBefore: z.record(z.string(), z.number().int().nonnegative()).default({}),

@@ -53,20 +53,85 @@ export type SourceInventoryExpansionResult = {
 
 const defaultInventoryExpansionSearchesPerCycle = 2;
 
-const backgroundInventoryExpansionPortfolio: SearchFilters[] = [
-  { title: "software engineer", country: "United States", crawlMode: "balanced" },
-  { title: "data analyst", country: "United States", crawlMode: "balanced" },
-  { title: "business analyst", country: "United States", crawlMode: "balanced" },
-  { title: "product manager", country: "United States", crawlMode: "balanced" },
-  { title: "ai engineer", country: "United States", crawlMode: "balanced" },
-  { title: "customer success manager", country: "United States", crawlMode: "balanced" },
-  { title: "sales engineer", country: "United States", crawlMode: "balanced" },
-  { title: "technical writer", country: "United States", crawlMode: "balanced" },
-  { title: "software engineer", country: "United States", state: "CA", crawlMode: "balanced" },
-  { title: "data analyst", country: "United States", state: "NY", crawlMode: "balanced" },
-  { title: "product manager", country: "United States", state: "TX", crawlMode: "balanced" },
-  { title: "business analyst", country: "United States", state: "WA", crawlMode: "balanced" },
+const backgroundInventoryExpansionTitles = {
+  softwareEngineer: "software engineer",
+  aiEngineer: "ai engineer",
+  machineLearningEngineer: "machine learning engineer",
+  dataAnalyst: "data analyst",
+  businessAnalyst: "business analyst",
+  productManager: "product manager",
+  customerSuccessManager: "customer success manager",
+  salesEngineer: "sales engineer",
+  technicalWriter: "technical writer",
+} as const;
+
+const backgroundInventoryExpansionMarkets = {
+  unitedStates: { country: "United States" },
+  unitedStatesCalifornia: { country: "United States", state: "CA" },
+  unitedStatesNewYork: { country: "United States", state: "NY" },
+  unitedStatesTexas: { country: "United States", state: "TX" },
+  unitedStatesWashington: { country: "United States", state: "WA" },
+  canada: { country: "Canada" },
+  canadaToronto: { country: "Canada", state: "ON", city: "Toronto" },
+  canadaVancouver: { country: "Canada", state: "BC", city: "Vancouver" },
+  canadaMontreal: { country: "Canada", state: "QC", city: "Montreal" },
+  canadaWaterloo: { country: "Canada", state: "ON", city: "Waterloo" },
+  canadaOttawa: { country: "Canada", state: "ON", city: "Ottawa" },
+} as const satisfies Record<
+  string,
+  Pick<SearchFilters, "country" | "state" | "city">
+>;
+
+type BackgroundInventoryExpansionTitleKey =
+  keyof typeof backgroundInventoryExpansionTitles;
+type BackgroundInventoryExpansionMarketKey =
+  keyof typeof backgroundInventoryExpansionMarkets;
+
+type BackgroundInventoryExpansionSeed = {
+  title: BackgroundInventoryExpansionTitleKey;
+  market: BackgroundInventoryExpansionMarketKey;
+  platforms?: SearchFilters["platforms"];
+};
+
+const backgroundInventoryExpansionSeeds: BackgroundInventoryExpansionSeed[] = [
+  { title: "softwareEngineer", market: "unitedStates" },
+  { title: "softwareEngineer", market: "canada", platforms: ["greenhouse"] },
+  { title: "dataAnalyst", market: "unitedStates" },
+  { title: "dataAnalyst", market: "canadaMontreal" },
+  { title: "businessAnalyst", market: "unitedStates" },
+  { title: "aiEngineer", market: "canadaToronto" },
+  { title: "productManager", market: "unitedStates" },
+  { title: "productManager", market: "canadaWaterloo" },
+  { title: "aiEngineer", market: "unitedStates" },
+  { title: "machineLearningEngineer", market: "canadaVancouver" },
+  { title: "customerSuccessManager", market: "unitedStates" },
+  { title: "softwareEngineer", market: "canadaOttawa" },
+  { title: "salesEngineer", market: "unitedStates" },
+  { title: "productManager", market: "canadaVancouver" },
+  { title: "technicalWriter", market: "unitedStates" },
+  { title: "dataAnalyst", market: "canadaToronto" },
+  { title: "softwareEngineer", market: "unitedStatesCalifornia" },
+  { title: "aiEngineer", market: "canada" },
+  { title: "dataAnalyst", market: "unitedStatesNewYork" },
+  { title: "machineLearningEngineer", market: "canadaToronto" },
+  { title: "productManager", market: "unitedStatesTexas" },
+  { title: "softwareEngineer", market: "canadaVancouver" },
+  { title: "businessAnalyst", market: "unitedStatesWashington" },
+  { title: "businessAnalyst", market: "canadaToronto" },
+  { title: "dataAnalyst", market: "canada" },
 ];
+
+const backgroundInventoryExpansionPortfolio: SearchFilters[] =
+  backgroundInventoryExpansionSeeds.map((seed) => ({
+    title: backgroundInventoryExpansionTitles[seed.title],
+    ...backgroundInventoryExpansionMarkets[seed.market],
+    ...(seed.platforms ? { platforms: seed.platforms } : {}),
+    crawlMode: "balanced",
+  }));
+
+export function listBackgroundInventoryExpansionPortfolio() {
+  return backgroundInventoryExpansionPortfolio.map(copyExpansionFilter);
+}
 
 export function createDiscoveryService(runtime: DiscoveryRuntime = {}): DiscoveryService {
   return {
@@ -521,6 +586,7 @@ export async function expandSourceInventory(input: {
     candidateSources: 0,
     newSourcesAdded: 0,
     selectedSearchTitles: selectedFilters.map(formatExpansionFilterLabel).slice(0, 12),
+    selectedSearchFilters: selectedFilters.map(copyExpansionFilter).slice(0, 12),
     selectedSourceIds: [],
     newSourceIds: [],
     platformCountsBefore: summarizeInventoryRecordPlatformCounts(beforeRecords),
@@ -675,13 +741,24 @@ export function selectBackgroundInventoryExpansionFilters(input: {
     offset += 1
   ) {
     selected.push(
-      backgroundInventoryExpansionPortfolio[
+      copyExpansionFilter(backgroundInventoryExpansionPortfolio[
         (startIndex + offset) % backgroundInventoryExpansionPortfolio.length
-      ],
+      ]),
     );
   }
 
   return selected;
+}
+
+function copyExpansionFilter(filters: SearchFilters): SearchFilters {
+  return {
+    title: filters.title,
+    ...(filters.country ? { country: filters.country } : {}),
+    ...(filters.state ? { state: filters.state } : {}),
+    ...(filters.city ? { city: filters.city } : {}),
+    ...(filters.platforms ? { platforms: [...filters.platforms] } : {}),
+    ...(filters.crawlMode ? { crawlMode: filters.crawlMode } : {}),
+  };
 }
 
 function buildConfiguredSources(input: DiscoveryInput & { env: DiscoveryEnvSnapshot }) {

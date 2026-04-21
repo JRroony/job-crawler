@@ -18,8 +18,10 @@ import {
   discoverSources,
   discoverSourcesDetailed,
   expandSourceInventory,
+  listBackgroundInventoryExpansionPortfolio,
   refreshSourceInventory,
   resolvePublicSearchExecutionOptions,
+  selectBackgroundInventoryExpansionFilters,
 } from "@/lib/server/discovery/service";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { buildUsDiscoveryLocationTokens } from "@/lib/server/locations/us";
@@ -1205,6 +1207,171 @@ describe("source discovery", () => {
     }
   });
 
+  it("expands Canada Greenhouse discovery into country, remote, province, and metro clauses", () => {
+    const plan = buildPublicSearchQueryPlan(
+      {
+        title: "Software Engineer",
+        country: "Canada",
+        platforms: ["greenhouse"],
+      },
+      {
+        maxResultsPerQuery: 4,
+      },
+    );
+
+    expect(plan.platformPlans).toHaveLength(1);
+    expect(plan.platformPlans[0]).toMatchObject({
+      platform: "greenhouse",
+      locationIntent: {
+        kind: "country",
+        countryConcept: "canada",
+        countryName: "Canada",
+      },
+    });
+    expect(plan.platformPlans[0].locationClauses).toEqual(
+      expect.arrayContaining([
+        "",
+        "canada",
+        "ca canada",
+        "remote canada",
+        "canada remote",
+        "ontario",
+        "on canada",
+        "remote ontario",
+        "british columbia",
+        "bc canada",
+        "remote british columbia",
+        "quebec",
+        "qc canada",
+        "remote quebec",
+        "toronto",
+        "toronto on",
+        "vancouver",
+        "vancouver bc",
+        "montreal",
+        "montreal qc",
+      ]),
+    );
+    expect(plan.platformPlans[0].locationClauses).not.toEqual(
+      expect.arrayContaining(["united states", "remote us", "seattle wa"]),
+    );
+  });
+
+  it("selects meaningful Canada discovery queries for required title scenarios without regressing US coverage", () => {
+    const canadaTitles = [
+      "Software Engineer",
+      "AI Engineer",
+      "Data Analyst",
+      "Business Analyst",
+      "Product Manager",
+    ];
+
+    for (const title of canadaTitles) {
+      const plan = buildPublicSearchQueryPlan(
+        {
+          title,
+          country: "Canada",
+          platforms: ["greenhouse"],
+        },
+        {
+          maxResultsPerQuery: 4,
+          maxQueries: 24,
+        },
+      );
+      const selected = selectQueriesForExecution(plan);
+
+      expect(selected).toHaveLength(24);
+      expect(selected[0]?.roleQuery).toBe(title.toLowerCase());
+      expect(new Set(selected.map((query) => query.roleQuery)).size).toBeGreaterThan(4);
+      expect(selected.some((query) => query.locationKind === "country")).toBe(true);
+      expect(selected.some((query) => query.locationKind === "remote")).toBe(true);
+      expect(selected.some((query) => query.locationClause === "canada")).toBe(true);
+      expect(selected.every((query) => query.platform === "greenhouse")).toBe(true);
+      expect(selected.every((query) => !query.query.includes("united states"))).toBe(true);
+      expect(selected.every((query) => !query.query.includes("remote us"))).toBe(true);
+    }
+
+    const usPlan = buildPublicSearchQueryPlan(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        maxResultsPerQuery: 4,
+        maxQueries: 24,
+      },
+    );
+    const usSelected = selectQueriesForExecution(usPlan);
+
+    expect(usSelected).toHaveLength(24);
+    expect(usSelected.some((query) => query.locationClause === "united states")).toBe(true);
+    expect(usSelected.some((query) => query.locationClause === "remote united states")).toBe(true);
+  });
+
+  it("keeps the background expansion portfolio and recurring selector Canada-capable", () => {
+    const portfolio = listBackgroundInventoryExpansionPortfolio();
+    const requiredCanadaScenarios = [
+      { title: "software engineer", country: "Canada" },
+      { title: "ai engineer", country: "Canada" },
+      { title: "data analyst", country: "Canada" },
+      { title: "business analyst", country: "Canada" },
+      { title: "product manager", country: "Canada" },
+    ];
+    const intervalMs = 600_000;
+
+    for (const scenario of requiredCanadaScenarios) {
+      const portfolioIndex = portfolio.findIndex(
+        (filters) =>
+          filters.title === scenario.title &&
+          filters.country === scenario.country,
+      );
+
+      expect(portfolioIndex).toBeGreaterThanOrEqual(0);
+
+      const selected = selectBackgroundInventoryExpansionFilters({
+        now: new Date(portfolioIndex * intervalMs),
+        intervalMs,
+        maxSearches: 1,
+      });
+
+      expect(selected).toEqual([
+        expect.objectContaining({
+          title: scenario.title,
+          country: scenario.country,
+          crawlMode: "balanced",
+        }),
+      ]);
+    }
+
+    expect(portfolio).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "software engineer",
+          country: "Canada",
+          platforms: ["greenhouse"],
+        }),
+      ]),
+    );
+
+    expect(portfolio).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "software engineer",
+          country: "United States",
+        }),
+        expect.objectContaining({
+          title: "data analyst",
+          country: "United States",
+        }),
+        expect.objectContaining({
+          title: "product manager",
+          country: "United States",
+        }),
+      ]),
+    );
+  });
+
   it("brings Greenhouse embed-board queries into the plan after the higher-yield ATS detail hosts", () => {
     const plan = buildPublicSearchQueryPlan(
       {
@@ -2355,6 +2522,178 @@ describe("source capping with platform diversity", () => {
       newSourcesAdded: 1,
       newSourceIds: ["greenhouse:novelcoverageco"],
     });
+  });
+
+  it("includes Canada title-family and metro coverage in the recurring inventory expansion portfolio", () => {
+    const intervalMs = 600_000;
+    const selectedAcrossCycles = Array.from({ length: 25 }, (_, cycle) =>
+      selectBackgroundInventoryExpansionFilters({
+        now: new Date(cycle * intervalMs),
+        intervalMs,
+        maxSearches: 2,
+      }),
+    ).flat();
+    const canadaFilters = selectedAcrossCycles.filter(
+      (filters) => filters.country === "Canada",
+    );
+
+    expect(selectedAcrossCycles).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "software engineer",
+          country: "United States",
+        }),
+        expect.objectContaining({
+          title: "data analyst",
+          country: "United States",
+        }),
+        expect.objectContaining({
+          title: "product manager",
+          country: "United States",
+        }),
+        expect.objectContaining({
+          title: "business analyst",
+          country: "United States",
+        }),
+      ]),
+    );
+    expect(canadaFilters).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "software engineer",
+          country: "Canada",
+        }),
+        expect.objectContaining({
+          title: "ai engineer",
+          country: "Canada",
+        }),
+        expect.objectContaining({
+          title: "machine learning engineer",
+          country: "Canada",
+        }),
+        expect.objectContaining({
+          title: "data analyst",
+          country: "Canada",
+        }),
+        expect.objectContaining({
+          title: "business analyst",
+          country: "Canada",
+        }),
+        expect.objectContaining({
+          title: "product manager",
+          country: "Canada",
+        }),
+      ]),
+    );
+    expect(
+      canadaFilters.some((filters) => !filters.city && !filters.state),
+    ).toBe(true);
+    expect(canadaFilters).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ country: "Canada", city: "Toronto", state: "ON" }),
+        expect.objectContaining({ country: "Canada", city: "Vancouver", state: "BC" }),
+        expect.objectContaining({ country: "Canada", city: "Montreal", state: "QC" }),
+        expect.objectContaining({ country: "Canada", city: "Waterloo", state: "ON" }),
+        expect.objectContaining({ country: "Canada", city: "Ottawa", state: "ON" }),
+      ]),
+    );
+  });
+
+  it("can select Canada inventory expansion searches across recurring cycles without increasing per-cycle volume", () => {
+    const intervalMs = 600_000;
+    const cycles = Array.from({ length: 12 }, (_, cycle) =>
+      selectBackgroundInventoryExpansionFilters({
+        now: new Date(cycle * intervalMs),
+        intervalMs,
+        maxSearches: 2,
+      }),
+    );
+
+    expect(cycles.every((filters) => filters.length <= 2)).toBe(true);
+    expect(cycles.some((filters) => filters.some((filter) => filter.country === "Canada"))).toBe(
+      true,
+    );
+    expect(
+      cycles.flat().filter((filter) => filter.country === "Canada").length,
+    ).toBeGreaterThanOrEqual(6);
+  });
+
+  it("reports selected Canada expansion searches in diagnostics", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      if (url.startsWith("https://www.bing.com/search")) {
+        return new Response("<rss><channel></channel></rss>", {
+          status: 200,
+          headers: {
+            "content-type": "application/rss+xml",
+          },
+        });
+      }
+
+      if (url.startsWith("https://html.duckduckgo.com/html/")) {
+        return new Response("<html><body></body></html>", {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const result = await expandSourceInventory({
+      repository,
+      now: new Date(0),
+      fetchImpl,
+      intervalMs: 600_000,
+      maxSources: 20,
+      maxExpansionSearches: 2,
+      refreshedInventory: [],
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
+        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 2,
+        PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 20,
+        PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 1,
+        PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: 1,
+        GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 1,
+      },
+    });
+
+    expect(result.diagnostics.selectedSearchTitles).toEqual(
+      expect.arrayContaining([
+        "software engineer / United States",
+        "software engineer / Canada",
+      ]),
+    );
+    expect(result.diagnostics.selectedSearchFilters).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "software engineer",
+          country: "Canada",
+          platforms: ["greenhouse"],
+          crawlMode: "balanced",
+        }),
+      ]),
+    );
+    expect(result.diagnostics.searchDiagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "software engineer",
+          country: "Canada",
+          state: undefined,
+          city: undefined,
+          publicSources: 0,
+        }),
+      ]),
+    );
   });
 
   it("grows persistent inventory with newly recovered Ashby, Lever, and Workday public-search sources", async () => {

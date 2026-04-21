@@ -41,8 +41,19 @@ const platformPhraseMatchers: Array<{
   },
 ];
 
-const unitedStatesPattern =
-  /\b(?:united states(?: of america)?|u\.?\s*s\.?\s*a?\.?)\b/gi;
+const countryPhraseMatchers: Array<{
+  country: string;
+  pattern: RegExp;
+}> = [
+  {
+    country: "United States",
+    pattern: /\b(?:united states(?: of america)?|u\.?\s*s\.?\s*a?\.?)\b/gi,
+  },
+  {
+    country: "Canada",
+    pattern: /\b(?:canada|canadian)\b/gi,
+  },
+];
 
 const wrapperWordPattern =
   /\b(?:jobs?|roles?|positions?|openings?|listings?)\b/gi;
@@ -103,9 +114,13 @@ export function normalizeSearchIntent(title: string): SearchIntentNormalization 
     workingTitle = workingTitle.replace(matcher.pattern, " ");
   }
 
-  if (workingTitle.match(unitedStatesPattern)) {
-    inferredCountry = "United States";
-    workingTitle = workingTitle.replace(unitedStatesPattern, " ");
+  for (const matcher of countryPhraseMatchers) {
+    if (!workingTitle.match(matcher.pattern)) {
+      continue;
+    }
+
+    inferredCountry ??= matcher.country;
+    workingTitle = workingTitle.replace(matcher.pattern, " ");
   }
 
   workingTitle = workingTitle.replace(wrapperWordPattern, " ");
