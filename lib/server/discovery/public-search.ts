@@ -160,14 +160,26 @@ const searchHostQueries: Record<
       kind: "embed",
     },
   ],
-  lever: [{ query: "site:jobs.lever.co", kind: "board" }],
-  ashby: [{ query: "site:jobs.ashbyhq.com", kind: "board" }],
+  lever: [
+    { query: "site:jobs.lever.co", kind: "detail" },
+    { query: "site:jobs.lever.co \"Apply for this job\"", kind: "detail" },
+    { query: "site:api.lever.co/v0/postings", kind: "detail" },
+  ],
+  ashby: [
+    { query: "site:jobs.ashbyhq.com", kind: "detail" },
+    { query: "site:jobs.ashbyhq.com \"Apply for this job\"", kind: "detail" },
+    { query: "site:jobs.ashbyhq.com \"Ashby\"", kind: "board" },
+  ],
   smartrecruiters: [
     { query: "site:jobs.smartrecruiters.com", kind: "detail" },
     { query: "site:careers.smartrecruiters.com", kind: "board" },
   ],
   workday: [
-    { query: "site:myworkdayjobs.com", kind: "detail" },
+    { query: "site:myworkdayjobs.com/job", kind: "detail" },
+    { query: "site:myworkdayjobs.com/en-US", kind: "detail" },
+    { query: "site:wd1.myworkdayjobs.com/job", kind: "detail" },
+    { query: "site:wd5.myworkdayjobs.com/job", kind: "detail" },
+    { query: "site:myworkdayjobs.com", kind: "board" },
     { query: "myworkdayjobs", kind: "board" },
   ],
 };
@@ -1108,7 +1120,11 @@ export function selectQueriesForExecution(plan: PublicSearchQueryPlan) {
   }
 
   const secondaryPrimaryBlankBudget = hasLocationQueries
-    ? Math.max(1, plan.platformPlans.length)
+    ? Math.max(
+        1,
+        plan.platformPlans.length,
+        countSecondaryPrimaryBlankHostQueries(plan),
+      )
     : 0;
   pushRoundRobinQueriesUntil(
     plan.queries.filter(
@@ -1353,6 +1369,21 @@ function isPrimaryNonEmbedHostQuery(query: PublicSearchQuery) {
 
 function isSecondaryNonEmbedHostQuery(query: PublicSearchQuery) {
   return query.hostKind !== "embed" && !isPrimaryNonEmbedHostQuery(query);
+}
+
+function countSecondaryPrimaryBlankHostQueries(plan: PublicSearchQueryPlan) {
+  const queries = new Set(
+    plan.queries
+      .filter(
+        (query) =>
+          isSecondaryNonEmbedHostQuery(query) &&
+          query.rolePriority === 0 &&
+          query.locationKind === "blank",
+      )
+      .map((query) => query.query),
+  );
+
+  return queries.size;
 }
 
 function pushRoundRobinQueries(

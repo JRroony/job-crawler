@@ -474,6 +474,35 @@ export const crawlDiagnosticsSchema = z.object({
         .default([]),
     })
     .optional(),
+  backgroundPersistence: z
+    .object({
+      jobsInserted: z.number().int().nonnegative().default(0),
+      jobsUpdated: z.number().int().nonnegative().default(0),
+      jobsLinkedToRun: z.number().int().nonnegative().default(0),
+      indexedEventsEmitted: z.number().int().nonnegative().default(0),
+      skippedReason: nullableOptional(z.string()),
+      providerStats: z
+        .array(
+          z.object({
+            provider: providerPlatformSchema,
+            savedCount: z.number().int().nonnegative().default(0),
+            insertedCount: z.number().int().nonnegative().default(0),
+            updatedCount: z.number().int().nonnegative().default(0),
+            linkedToRunCount: z.number().int().nonnegative().default(0),
+            indexedEventCount: z.number().int().nonnegative().default(0),
+          }),
+        )
+        .default([]),
+    })
+    .optional(),
+  backgroundBootstrap: z
+    .object({
+      blocked: z.boolean().default(false),
+      reason: nullableOptional(z.enum(["mongo_unavailable", "bootstrap_failed"])),
+      phase: nullableOptional(z.enum(["repository_resolution", "index_initialization"])),
+      message: nullableOptional(z.string()),
+    })
+    .optional(),
   session: z
     .object({
       indexedResultsCount: z.number().int().nonnegative().default(0),

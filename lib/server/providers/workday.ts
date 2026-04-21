@@ -321,7 +321,10 @@ async function crawlWorkdaySource(
 
   return {
     fetchedCount: apiAttempt.fetchedCount + fallback.fetchedCount + (detailFallbackJob ? 1 : 0),
-    fetchCount: 1 + (fallback.fetchedCount > 0 || fallback.warning ? 1 : 0) + (detailFallbackJob ? 1 : 0),
+    fetchCount:
+      apiAttempt.fetchCount +
+      (fallback.fetchedCount > 0 || fallback.warning ? 1 : 0) +
+      (detailFallbackJob ? 1 : 0),
     jobs: normalizedJobs,
     warnings,
     parseSuccessCount: normalizedJobs.length,
@@ -340,40 +343,69 @@ async function fetchWorkdaySourceFromApi(
   const apiUrls = resolveWorkdayApiUrls(source);
 
   for (const apiUrl of apiUrls) {
-    await throwIfCanceled?.();
-    const result = await safeFetchJson<unknown>(apiUrl, {
-      fetchImpl,
-      method: "GET",
-      headers: {
-        Accept: "application/json",
-      },
-      cache: "no-store",
-      retries: 1,
-    });
-    attempts.push({
-      url: apiUrl,
-      result,
-    });
+    for (const requestInit of buildWorkdayListRequestAttempts()) {
+      await throwIfCanceled?.();
+      const result = await safeFetchJson<unknown>(apiUrl, {
+        fetchImpl,
+        ...requestInit,
+        cache: "no-store",
+        retries: 1,
+      });
+      attempts.push({
+        url: apiUrl,
+        result,
+      });
 
-    if (!result.ok || !result.data) {
-      continue;
-    }
+      if (!result.ok || !result.data) {
+        continue;
+      }
 
-    const jobs = extractWorkdayListCandidates(result.data);
-    if (jobs.length > 0) {
-      return {
-        fetchedCount: jobs.length,
-        jobs,
-        warning: undefined,
-      };
+      const jobs = extractWorkdayListCandidates(result.data);
+      if (jobs.length > 0) {
+        return {
+          fetchedCount: jobs.length,
+          fetchCount: attempts.length,
+          jobs,
+          warning: undefined,
+        };
+      }
     }
   }
 
   return {
     fetchedCount: 0,
+    fetchCount: attempts.length,
     jobs: [] as WorkdayRecord[],
     warning: buildWorkdayFetchWarning(source, attempts),
   };
+}
+
+function buildWorkdayListRequestAttempts(): Array<{
+  method: "GET" | "POST";
+  headers: Record<string, string>;
+  body?: string;
+}> {
+  return [
+    {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+    },
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        appliedFacets: {},
+        limit: 100,
+        offset: 0,
+        searchText: "",
+      }),
+    },
+  ];
 }
 
 async function fetchWorkdaySourceFromHtml(

@@ -45,8 +45,10 @@ export function planRecurringInventorySourceSelection(input: {
   now: Date;
   maxSources: number;
   intervalMs: number;
+  prioritySourceIds?: string[];
 }): RecurringInventorySelectionPlan {
   const nowMs = input.now.getTime();
+  const prioritySourceIds = new Set(input.prioritySourceIds ?? []);
   const skippedByReason: Record<string, number> = {};
   const freshnessBuckets: Record<string, number> = {};
   const selectedByPlatform: Record<string, number> = {};
@@ -108,7 +110,11 @@ export function planRecurringInventorySourceSelection(input: {
 
   eligible.sort((left, right) => compareCandidates(left, right));
 
-  const selectedCandidates = selectRecurringInventoryCandidates(eligible, input.maxSources);
+  const selectedCandidates = selectRecurringInventoryCandidates(
+    eligible,
+    input.maxSources,
+    prioritySourceIds,
+  );
   const selectedIds = new Set(selectedCandidates.map((candidate) => candidate.record._id));
   const selectedRecords = selectedCandidates.map((candidate) => candidate.record);
   for (const candidate of eligible.filter((entry) => !selectedIds.has(entry.record._id))) {
@@ -146,23 +152,44 @@ function selectRecurringInventoryCandidates(
     freshnessBucket: InventoryFreshnessBucket;
   }>,
   maxSources: number,
+  prioritySourceIds: Set<string> = new Set(),
 ) {
   const limit = Math.max(0, Math.floor(maxSources));
   if (limit <= 0 || eligible.length <= limit) {
     return eligible.slice(0, limit);
   }
 
+  const priorityCandidates = eligible.filter((candidate) =>
+    prioritySourceIds.has(candidate.record._id),
+  );
   const neverCrawledCandidates = eligible.filter(
     (candidate) => candidate.freshnessBucket === "never_crawled",
   );
   const selected: typeof eligible = [];
   const selectedIds = new Set<string>();
+  const priorityReserve =
+    priorityCandidates.length > 0
+      ? Math.min(priorityCandidates.length, Math.max(1, Math.ceil(limit * 0.5)))
+      : 0;
   const neverCrawledReserve = Math.min(
     neverCrawledCandidates.length,
     Math.max(1, Math.ceil(limit * 0.25)),
   );
 
+  for (const candidate of priorityCandidates.slice(0, priorityReserve)) {
+    selected.push(candidate);
+    selectedIds.add(candidate.record._id);
+  }
+
   for (const candidate of neverCrawledCandidates.slice(0, neverCrawledReserve)) {
+    if (selected.length >= limit) {
+      break;
+    }
+
+    if (selectedIds.has(candidate.record._id)) {
+      continue;
+    }
+
     selected.push(candidate);
     selectedIds.add(candidate.record._id);
   }

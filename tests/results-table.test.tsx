@@ -342,7 +342,7 @@ describe("ResultsTable", () => {
 
     expect(buildResultsCsv([])).toBeNull();
     expect(downloadResultsCsv([], "software-engineer-us-results.csv")).toBe(false);
-    expect(html).toContain("Export CSV");
+    expect(html).toContain("Export to CSV");
     expect(html).toContain("disabled");
     expect(html).toContain('aria-label="Export 0 visible results as CSV"');
   });
@@ -405,7 +405,7 @@ describe("ResultsTable", () => {
     }
   });
 
-  it("deduplicates exported rows from the visible result set", () => {
+  it("exports every final visible filtered row without applying another dedupe pass", () => {
     const duplicate = createJob({
       _id: "job-duplicate",
       title: "Software Engineer",
@@ -413,7 +413,16 @@ describe("ResultsTable", () => {
       canonicalUrl: "https://example.com/jobs/1/apply",
     });
 
-    expect(buildResultsExportRows([createJob(), duplicate])).toHaveLength(1);
+    expect(buildResultsExportRows([createJob(), duplicate])).toHaveLength(2);
+  });
+
+  it("exports all filtered results supplied to the table instead of only the current page", () => {
+    const csv = buildResultsCsv(createJobs(3));
+
+    expect(csv?.split("\r\n")).toHaveLength(4);
+    expect(csv).toContain("Software Engineer 1");
+    expect(csv).toContain("Software Engineer 2");
+    expect(csv).toContain("Software Engineer 3");
   });
 
   it("builds a search-reflective CSV filename", () => {

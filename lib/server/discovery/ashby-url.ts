@@ -26,7 +26,7 @@ export function parseAshbyUrl(value: string | URL): ParsedAshbyUrl | undefined {
 
   const segments = url.pathname.split("/").filter(Boolean);
   const companyToken = normalizeAshbySegment(segments[0]);
-  const jobPath = segments.slice(1).map(normalizeAshbySegment).filter(Boolean).join("/");
+  const jobPath = normalizeAshbyJobPath(segments.slice(1));
 
   if (!companyToken) {
     return undefined;
@@ -61,6 +61,22 @@ export function normalizeAshbyHostname(value: string) {
 function normalizeAshbySegment(value?: string | null) {
   const normalized = value?.trim();
   return normalized ? normalized.replace(/\/+$/, "") : undefined;
+}
+
+function normalizeAshbyJobPath(segments: string[]) {
+  const normalizedSegments = segments
+    .map(normalizeAshbySegment)
+    .filter((segment): segment is string => Boolean(segment));
+  const trailingNonJobSegments = new Set(["application", "apply"]);
+
+  while (
+    normalizedSegments.length > 1 &&
+    trailingNonJobSegments.has(normalizedSegments[normalizedSegments.length - 1]!.toLowerCase())
+  ) {
+    normalizedSegments.pop();
+  }
+
+  return normalizedSegments.join("/");
 }
 
 function toUrl(value: string | URL) {

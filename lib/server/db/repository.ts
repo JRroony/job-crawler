@@ -144,6 +144,14 @@ type IndexedJobDelta = {
   jobs: JobListing[];
 };
 
+export type PersistJobsWithStatsResult = {
+  jobs: JobListing[];
+  insertedCount: number;
+  updatedCount: number;
+  linkedToRunCount: number;
+  indexedEventCount: number;
+};
+
 export type SearchSessionControlState = Pick<
   SearchSessionDocument,
   "_id" | "searchId" | "latestCrawlRunId" | "status" | "finishedAt" | "lastEventSequence" | "lastEventAt"
@@ -980,6 +988,16 @@ export class JobCrawlerRepository {
       searchSessionId?: string;
     } = {},
   ) {
+    return (await this.persistJobsWithStats(crawlRunId, jobs, options)).jobs;
+  }
+
+  async persistJobsWithStats(
+    crawlRunId: string,
+    jobs: PersistableJob[],
+    options: {
+      searchSessionId?: string;
+    } = {},
+  ): Promise<PersistJobsWithStatsResult> {
     const savedJobsById = new Map<string, JobListing>();
     const sanitizedJobs = coalescePersistableJobs(
       dedupeJobs(jobs.map((job) => sanitizePersistableJob(job))),
@@ -990,6 +1008,8 @@ export class JobCrawlerRepository {
     const newToRunJobIds = new Set<string>();
     const indexedJobIds: string[] = [];
     const upserts = new Map<string, JobListing>();
+    const insertedJobIds = new Set<string>();
+    const updatedJobIds = new Set<string>();
 
     for (const job of sanitizedJobs) {
       const existing = resolveExistingJobForPersistable(existingJobs, job);
@@ -1003,6 +1023,7 @@ export class JobCrawlerRepository {
         newToRunJobIds.add(document._id);
         indexedJobIds.push(document._id);
         upserts.set(document.canonicalJobKey, document);
+        insertedJobIds.add(document._id);
         indexJobForBatchLookup(existingJobs, document);
         continue;
       }
@@ -1010,6 +1031,7 @@ export class JobCrawlerRepository {
       const merged = mergeJobRecords(existing, job, crawlRunId);
       savedJobsById.set(merged._id, merged);
       upserts.set(merged.canonicalJobKey, merged);
+      updatedJobIds.add(merged._id);
       if (!existing.crawlRunIds.includes(crawlRunId)) {
         newToRunJobIds.add(merged._id);
       }
@@ -1038,7 +1060,13 @@ export class JobCrawlerRepository {
       }
     }
 
-    return dedupeStoredJobs(Array.from(savedJobsById.values()));
+    return {
+      jobs: dedupeStoredJobs(Array.from(savedJobsById.values())),
+      insertedCount: insertedJobIds.size,
+      updatedCount: updatedJobIds.size,
+      linkedToRunCount: newToRunJobIds.size,
+      indexedEventCount: dedupeStrings(indexedJobIds).length,
+    };
   }
 
   async saveLinkValidation(result: LinkValidationResult) {

@@ -521,6 +521,69 @@ describe("provider crawl status and live parsing", () => {
     });
   });
 
+  it("falls back to Workday POST list search when the JSON endpoint rejects GET", async () => {
+    const provider = createWorkdayProvider();
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url === "https://acme.wd1.myworkdayjobs.com/wday/cxs/acme/Careers/jobs") {
+        if (init?.method === "POST") {
+          expect(init.body ? JSON.parse(String(init.body)) : undefined).toMatchObject({
+            appliedFacets: {},
+            limit: 100,
+            offset: 0,
+            searchText: "",
+          });
+
+          return new Response(
+            JSON.stringify({
+              jobPostings: [
+                {
+                  title: "Software Engineer",
+                  externalPath: "job/Austin-TX/Software-Engineer_R987",
+                  locationsText: "Austin, TX",
+                },
+              ],
+            }),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/json",
+              },
+            },
+          );
+        }
+
+        return new Response("", { status: 405 });
+      }
+
+      return new Response("", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Software Engineer",
+        country: "United States",
+      },
+      sources: [workdaySource("https://acme.wd1.myworkdayjobs.com/en-US/Careers")],
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.diagnostics).toMatchObject({
+      fetchCount: 2,
+    });
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0]).toMatchObject({
+      title: "Software Engineer",
+      country: "United States",
+      state: "Texas",
+      city: "Austin",
+      sourcePlatform: "workday",
+    });
+  });
+
   it("crawls a SmartRecruiters board through detail-page extraction into normalized jobs", async () => {
     const provider = createSmartRecruitersProvider();
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {

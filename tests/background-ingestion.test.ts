@@ -111,6 +111,22 @@ describe("recurring background ingestion", () => {
       newSourcesAdded: 1,
       newSourceIds: ["greenhouse:expansionco"],
     });
+    expect(crawlRun.diagnostics.backgroundPersistence).toMatchObject({
+      jobsInserted: 1,
+      jobsUpdated: 0,
+      jobsLinkedToRun: 1,
+      indexedEventsEmitted: 1,
+      providerStats: [
+        expect.objectContaining({
+          provider: "greenhouse",
+          insertedCount: 1,
+          updatedCount: 0,
+          linkedToRunCount: 1,
+          indexedEventCount: 1,
+        }),
+      ],
+    });
+    expect(await repository.getIndexedJobDeliveryCursor()).toBe(1);
   });
 
   it("starts immediately and repeats on the configured interval", async () => {
@@ -246,9 +262,11 @@ describe("recurring background ingestion", () => {
 
     expect(classifyBackgroundRepositoryFailure(bootstrapError)).toMatchObject({
       reason: "bootstrap_failed",
+      phase: "index_initialization",
     });
     expect(classifyBackgroundRepositoryFailure(genericError)).toMatchObject({
       reason: "mongo_unavailable",
+      phase: "repository_resolution",
     });
 
     const triggered = await triggerRecurringBackgroundIngestion({
@@ -260,6 +278,7 @@ describe("recurring background ingestion", () => {
     expect(triggered).toMatchObject({
       status: "skipped-bootstrap-failed",
       reason: "bootstrap_failed",
+      phase: "index_initialization",
       message: bootstrapError.message,
     });
   });
@@ -498,6 +517,105 @@ describe("recurring background ingestion", () => {
       selectedSourceIds: ["greenhouse:newcoverageco"],
     });
     expect(crawlRun.diagnostics.inventoryExpansion?.newSourcesAdded).toBe(1);
+  });
+
+  it("repeated recurring runs grow into new inventory instead of looping only old sources", async () => {
+    const db = new MongoLikeNullDb();
+    const repository = new JobCrawlerRepository(db);
+    const firstRunAt = new Date("2026-04-15T12:00:00.000Z");
+    const secondRunAt = new Date("2026-04-15T12:02:00.000Z");
+
+    await repository.upsertSourceInventory([
+      createInventoryRecord({
+        token: "oldco",
+        companyHint: "Old Co",
+        lastCrawledAt: "2026-04-14T08:00:00.000Z",
+        nextEligibleAt: "2026-04-15T08:00:00.000Z",
+        health: "healthy",
+      }),
+    ]);
+
+    const seenRuns: string[][] = [];
+    const provider = createStubProvider("greenhouse", async (_context, sources) => {
+      const tokens = sources.map((source) => source.token ?? source.id);
+      seenRuns.push(tokens);
+
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: sources.length,
+        fetchedCount: sources.length,
+        matchedCount: sources.length,
+        warningCount: 0,
+        jobs: tokens.map((token) =>
+          createProviderJob({
+            title: "Software Engineer",
+            company: token === "newco" ? "New Co" : "Old Co",
+            sourceJobId: `${token}-role`,
+          }),
+        ),
+      };
+    });
+
+    const first = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [provider],
+      now: firstRunAt,
+      maxSources: 1,
+      schedulingIntervalMs: 60_000,
+      runTimeoutMs: 2_000,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+    });
+    expect(first.status).toBe("started");
+    if (first.status !== "started") {
+      throw new Error("Expected the first recurring run to start.");
+    }
+    await waitForRunCompletion(repository, first.crawlRunId);
+
+    const second = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [provider],
+      now: secondRunAt,
+      maxSources: 1,
+      schedulingIntervalMs: 60_000,
+      runTimeoutMs: 2_000,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+      expandInventory: async ({ repository: expansionRepository }) => {
+        const before = await expansionRepository.listSourceInventory(["greenhouse"]);
+        await expansionRepository.upsertSourceInventory([
+          createInventoryRecord({
+            token: "newco",
+            companyHint: "New Co",
+            inventoryRank: 60_000,
+            health: "unknown",
+          }),
+        ]);
+        const inventory = await expansionRepository.listSourceInventory(["greenhouse"]);
+
+        return createExpansionResult({
+          inventory,
+          beforeCount: before.length,
+          afterExpansionCount: inventory.length,
+          newSourceIds: ["greenhouse:newco"],
+        });
+      },
+    });
+    expect(second.status).toBe("started");
+    if (second.status !== "started") {
+      throw new Error("Expected the second recurring run to start.");
+    }
+    const secondRun = await waitForRunCompletion(repository, second.crawlRunId);
+
+    expect(seenRuns).toEqual([["oldco"], ["newco"]]);
+    expect(secondRun.diagnostics.inventoryScheduling?.selectedSourceIds).toEqual([
+      "greenhouse:newco",
+    ]);
+    expect(secondRun.diagnostics.backgroundPersistence).toMatchObject({
+      jobsInserted: 1,
+      jobsLinkedToRun: 1,
+      indexedEventsEmitted: 1,
+    });
+    expect(db.snapshot<Record<string, unknown>>(collectionNames.jobs)).toHaveLength(2);
   });
 
   it("updates inventory metadata across repeated recurring runs and persists jobs idempotently", async () => {

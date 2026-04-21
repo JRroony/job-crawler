@@ -4,6 +4,7 @@ import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import { getDefaultGreenhouseRegistryEntries } from "@/lib/server/discovery/greenhouse-registry";
 import { toSourceInventoryRecord } from "@/lib/server/discovery/inventory";
+import { classifyPublicSearchCandidate } from "@/lib/server/discovery/public-search-candidates";
 import {
   buildPublicSearchQueryPlan,
   discoverSourcesFromPublicSearch,
@@ -205,6 +206,60 @@ describe("source discovery", () => {
       careerSitePath: "Careers",
       sitePath: "en-US/Careers",
       url: "https://acme.wd1.myworkdayjobs.com/en-US/Careers",
+    });
+  });
+
+  it("classifies public-search Lever, Ashby, and Workday source/detail variants with recoverable parent sources", () => {
+    const leverApiDetail = classifyPublicSearchCandidate(
+      "https://api.lever.co/v0/postings/figma/role-1?mode=json",
+      "future_search",
+    );
+    const ashbyApplicationDetail = classifyPublicSearchCandidate(
+      "https://jobs.ashbyhq.com/notion/role-2/application?utm_source=LinkedIn",
+      "future_search",
+    );
+    const workdayApiSource = classifyPublicSearchCandidate(
+      "https://acme.wd1.myworkdayjobs.com/wday/cxs/acme/External/jobs",
+      "future_search",
+    );
+
+    expect(leverApiDetail).toMatchObject({
+      platform: "lever",
+      kind: "detail",
+      recoveryKind: "detail_recovery",
+      detailToken: "figma",
+      detailJobId: "role-1",
+      url: "https://jobs.lever.co/figma/role-1",
+      recoveredSource: expect.objectContaining({
+        platform: "lever",
+        token: "figma",
+        url: "https://jobs.lever.co/figma",
+      }),
+    });
+    expect(ashbyApplicationDetail).toMatchObject({
+      platform: "ashby",
+      kind: "detail",
+      recoveryKind: "detail_recovery",
+      detailToken: "notion",
+      detailJobId: "role-2",
+      url: "https://jobs.ashbyhq.com/notion/role-2",
+      recoveredSource: expect.objectContaining({
+        platform: "ashby",
+        token: "notion",
+        url: "https://jobs.ashbyhq.com/notion",
+      }),
+    });
+    expect(workdayApiSource).toMatchObject({
+      platform: "workday",
+      kind: "source",
+      recoveryKind: "source_classification",
+      detailToken: "acme:external",
+      url: "https://acme.wd1.myworkdayjobs.com/wday/cxs/acme/External/jobs",
+      recoveredSource: expect.objectContaining({
+        platform: "workday",
+        token: "acme:external",
+        apiUrl: "https://acme.wd1.myworkdayjobs.com/wday/cxs/acme/External/jobs",
+      }),
     });
   });
 
@@ -1659,6 +1714,93 @@ describe("source discovery", () => {
     );
   });
 
+  it("plans representative Lever, Ashby, and Workday public-search host queries without starving platform-specific detail paths", () => {
+    const plan = buildPublicSearchQueryPlan(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["lever", "ashby", "workday"],
+      },
+      {
+        maxResultsPerQuery: 4,
+        maxQueries: 24,
+      },
+    );
+    const selected = selectQueriesForExecution(plan);
+    const selectedQueries = selected.map((query) => query.query);
+
+    expect(plan.queries.map((query) => query.query)).toEqual(
+      expect.arrayContaining([
+        "site:jobs.lever.co software engineer",
+        "site:jobs.lever.co \"Apply for this job\" software engineer",
+        "site:api.lever.co/v0/postings software engineer",
+        "site:jobs.ashbyhq.com software engineer",
+        "site:jobs.ashbyhq.com \"Apply for this job\" software engineer",
+        "site:jobs.ashbyhq.com \"Ashby\" software engineer",
+        "site:myworkdayjobs.com/job software engineer",
+        "site:myworkdayjobs.com/en-US software engineer",
+        "site:wd1.myworkdayjobs.com/job software engineer",
+      ]),
+    );
+    expect(selected).toHaveLength(24);
+    expect(selectedQueries).toEqual(
+      expect.arrayContaining([
+        "site:jobs.lever.co \"Apply for this job\" software engineer",
+        "site:jobs.ashbyhq.com \"Apply for this job\" software engineer",
+        "site:myworkdayjobs.com/en-US software engineer",
+        "site:wd1.myworkdayjobs.com/job software engineer",
+      ]),
+    );
+    expect(new Set(selected.map((query) => query.platform))).toEqual(
+      new Set(["lever", "ashby", "workday"]),
+    );
+
+    for (const title of [
+      "Data Analyst",
+      "Business Analyst",
+      "Product Manager",
+    ]) {
+      const representativePlan = buildPublicSearchQueryPlan(
+        {
+          title,
+          country: "United States",
+          platforms: ["lever", "ashby", "workday"],
+        },
+        {
+          maxResultsPerQuery: 4,
+          maxQueries: 32,
+        },
+      );
+      const representativeSelected = selectQueriesForExecution(representativePlan);
+      const canonicalRoleQuery = title.toLowerCase();
+
+      expect(representativeSelected).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            platform: "lever",
+            hostQuery: "site:jobs.lever.co",
+            roleQuery: canonicalRoleQuery,
+          }),
+          expect.objectContaining({
+            platform: "ashby",
+            hostQuery: "site:jobs.ashbyhq.com",
+            roleQuery: canonicalRoleQuery,
+          }),
+          expect.objectContaining({
+            platform: "workday",
+            hostQuery: "site:myworkdayjobs.com/job",
+            roleQuery: canonicalRoleQuery,
+          }),
+        ]),
+      );
+      expect(
+        representativePlan.platformPlans.every((platformPlan) =>
+          platformPlan.locationClauses.includes("united states"),
+        ),
+      ).toBe(true);
+    }
+  });
+
   it("returns non-zero Greenhouse registry sources even when public search is disabled", async () => {
     const sources = await discoverSources({
       filters: {
@@ -2212,6 +2354,127 @@ describe("source capping with platform diversity", () => {
       candidateSources: 1,
       newSourcesAdded: 1,
       newSourceIds: ["greenhouse:novelcoverageco"],
+    });
+  });
+
+  it("grows persistent inventory with newly recovered Ashby, Lever, and Workday public-search sources", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-15T00:00:00.000Z");
+    const refreshedInventory = await refreshSourceInventory({
+      repository,
+      now,
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+      },
+    });
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      if (url.startsWith("https://www.bing.com/search")) {
+        const query = new URL(url).searchParams.get("q") ?? "";
+        const links: string[] = [];
+
+        if (query.includes("jobs.lever.co")) {
+          links.push("https://jobs.lever.co/novelleverco/lever-role-1");
+        }
+
+        if (query.includes("jobs.ashbyhq.com")) {
+          links.push("https://jobs.ashbyhq.com/novelashbyco/ashby-role-1");
+        }
+
+        if (query.includes("myworkdayjobs.com")) {
+          links.push(
+            "https://novel.wd1.myworkdayjobs.com/en-US/External/job/Austin-TX/Software-Engineer_R123",
+          );
+        }
+
+        return new Response(
+          `
+            <rss>
+              <channel>
+                ${links.map((link) => `<item><link>${link}</link></item>`).join("")}
+              </channel>
+            </rss>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/rss+xml",
+            },
+          },
+        );
+      }
+
+      if (url.startsWith("https://html.duckduckgo.com/html/")) {
+        return new Response("<html><body></body></html>", {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        });
+      }
+
+      return new Response("", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const result = await expandSourceInventory({
+      repository,
+      now,
+      fetchImpl,
+      intervalMs: 600_000,
+      maxSources: 6,
+      refreshedInventory,
+      maxExpansionSearches: 1,
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
+        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 6,
+        PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 6,
+        PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 16,
+        GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 1,
+      },
+    });
+
+    expect(result.inventory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          _id: "lever:novelleverco",
+          platform: "lever",
+          sourceType: "job_detail",
+          inventoryOrigin: "public_search",
+        }),
+        expect.objectContaining({
+          _id: "ashby:novelashbyco",
+          platform: "ashby",
+          sourceType: "job_detail",
+          inventoryOrigin: "public_search",
+        }),
+        expect.objectContaining({
+          _id: "workday:novel-external",
+          platform: "workday",
+          sourceType: "job_detail",
+          inventoryOrigin: "public_search",
+        }),
+      ]),
+    );
+    expect(result.diagnostics.newSourceIds).toEqual(
+      expect.arrayContaining([
+        "lever:novelleverco",
+        "ashby:novelashbyco",
+        "workday:novel-external",
+      ]),
+    );
+    expect(result.diagnostics.searchDiagnostics[0]?.publicSearch).toMatchObject({
+      recoveredSourcesFromDetailUrls: expect.any(Number),
+      detailUrlsHarvested: expect.any(Number),
     });
   });
 

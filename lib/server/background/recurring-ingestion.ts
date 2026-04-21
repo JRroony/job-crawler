@@ -21,7 +21,10 @@ import {
 import { resolveObservedSourceNextEligibleAt } from "@/lib/server/inventory/selection";
 import { createDefaultProviders } from "@/lib/server/providers";
 import type { CrawlProvider } from "@/lib/server/providers/types";
-import type { JobCrawlerRepository } from "@/lib/server/db/repository";
+import type {
+  JobCrawlerRepository,
+  PersistJobsWithStatsResult,
+} from "@/lib/server/db/repository";
 import type {
   CrawlDiagnostics,
   CrawlRunStatus,
@@ -64,6 +67,7 @@ type BackgroundIngestionTriggerResult =
         | "skipped-bootstrap-failed";
       searchId?: string;
       reason?: "mongo_unavailable" | "bootstrap_failed";
+      phase?: "repository_resolution" | "index_initialization";
       message?: string;
     };
 
@@ -72,6 +76,11 @@ type BackgroundSchedulerState = {
   intervalMs: number;
   timer: ReturnType<typeof setTimeout> | null;
 };
+
+type BackgroundPersistenceCounts = Pick<
+  PersistJobsWithStatsResult,
+  "insertedCount" | "updatedCount" | "linkedToRunCount" | "indexedEventCount"
+>;
 
 declare global {
   // eslint-disable-next-line no-var
@@ -162,6 +171,7 @@ export async function triggerRecurringBackgroundIngestion(
           ? "skipped-bootstrap-failed"
           : "skipped-no-mongo",
       reason: repositoryResolution.reason,
+      phase: repositoryResolution.phase,
       message: repositoryResolution.message,
     };
   }
@@ -301,6 +311,11 @@ async function executeRecurringInventoryIngestion(
   let totalFetchedJobs = 0;
   let totalMatchedJobs = 0;
   let totalSavedJobs = 0;
+  const totalPersistenceStats = createEmptyPersistenceStats();
+  const providerPersistenceTotals = new Map<
+    CrawlSourceResult["provider"],
+    BackgroundPersistenceCounts
+  >();
   const runTimestamp = () => new Date(startedAtMs + Math.max(0, Date.now() - startMs)).toISOString();
 
   try {
@@ -341,8 +356,20 @@ async function executeRecurringInventoryIngestion(
       now: runtime.now,
       maxSources: runtime.maxSources,
       intervalMs: runtime.schedulingIntervalMs,
+      prioritySourceIds: inventoryExpansion.diagnostics.newSourceIds,
     });
     diagnostics.inventoryScheduling = selectionPlan.diagnostics;
+    const selectionSkippedReason = resolveBackgroundSelectionSkippedReason(
+      selectionPlan.diagnostics,
+      inventoryExpansion.diagnostics.skippedReason,
+    );
+    if (selectionSkippedReason) {
+      diagnostics.backgroundPersistence = buildBackgroundPersistenceDiagnostics(
+        totalPersistenceStats,
+        Array.from(providerPersistenceTotals.entries()),
+        selectionSkippedReason,
+      );
+    }
     const selectedRecordById = new Map(
       selectionPlan.selectedRecords.map((record) => [record._id, record] as const),
     );
@@ -370,6 +397,7 @@ async function executeRecurringInventoryIngestion(
       selectedByHealth: selectionPlan.diagnostics.selectedByHealth,
       selectedSourceIds: selectionPlan.diagnostics.selectedSourceIds,
       skippedSourceSamples: selectionPlan.diagnostics.skippedSourceSamples,
+      skippedReason: selectionSkippedReason,
     });
 
     await repository.updateCrawlRunProgress(target.crawlRunId, {
@@ -419,10 +447,18 @@ async function executeRecurringInventoryIngestion(
         diagnostics.jobsBeforeDedupe += result.jobs.length;
 
         const persistableJobs = result.jobs.map((job) => seedToPersistableJob(job, runtime.now));
-        const savedJobs = await repository.persistJobs(target.crawlRunId, persistableJobs, {
+        const persistence = await repository.persistJobsWithStats(target.crawlRunId, persistableJobs, {
           searchSessionId: target.searchSession._id,
         });
-        totalSavedJobs += savedJobs.length;
+        const savedJobs = persistence.jobs;
+        totalSavedJobs += persistence.linkedToRunCount;
+        accumulatePersistenceStats(totalPersistenceStats, persistence);
+        accumulateProviderPersistenceStats(providerPersistenceTotals, provider.provider, persistence);
+        diagnostics.backgroundPersistence = buildBackgroundPersistenceDiagnostics(
+          totalPersistenceStats,
+          Array.from(providerPersistenceTotals.entries()),
+          diagnostics.backgroundPersistence?.skippedReason,
+        );
         diagnostics.jobsAfterDedupe = totalSavedJobs;
         diagnostics.dedupedOut = Math.max(0, diagnostics.jobsBeforeDedupe - diagnostics.jobsAfterDedupe);
         diagnostics.performance.persistenceBatchCount += 1;
@@ -444,6 +480,23 @@ async function executeRecurringInventoryIngestion(
         });
         sourceResults.push(sourceResult);
         await repository.updateCrawlSourceResult(sourceResult);
+
+        console.info("[background-ingestion:provider-summary]", {
+          searchId: target.search._id,
+          crawlRunId: target.crawlRunId,
+          provider: provider.provider,
+          sourceCount: providerSources.length,
+          fetchedCount: result.fetchedCount,
+          matchedCount: result.matchedCount,
+          savedCount: savedJobs.length,
+          insertedCount: persistence.insertedCount,
+          updatedCount: persistence.updatedCount,
+          linkedToRunCount: persistence.linkedToRunCount,
+          indexedEventCount: persistence.indexedEventCount,
+          status: result.status,
+          warningCount: result.warningCount ?? 0,
+          errorMessage: result.errorMessage,
+        });
         await repository.recordSourceInventoryObservations(
           providerSources.map((source) => ({
             sourceId: source.id,
@@ -543,8 +596,25 @@ async function executeRecurringInventoryIngestion(
     diagnostics.performance.stageTimingsMs.total = Date.now() - startMs;
     diagnostics.performance.progressUpdateCount = 2;
     diagnostics.performance.providerTimingsMs = providerTimings;
+    diagnostics.backgroundPersistence = buildBackgroundPersistenceDiagnostics(
+      totalPersistenceStats,
+      Array.from(providerPersistenceTotals.entries()),
+      diagnostics.backgroundPersistence?.skippedReason,
+    );
     const finishedAt = runTimestamp();
     const status = resolveFinalStatus(sourceResults, totalSavedJobs);
+
+    console.info("[background-ingestion:persistence-summary]", {
+      searchId: target.search._id,
+      crawlRunId: target.crawlRunId,
+      status,
+      jobsInserted: totalPersistenceStats.insertedCount,
+      jobsUpdated: totalPersistenceStats.updatedCount,
+      jobsLinkedToRun: totalPersistenceStats.linkedToRunCount,
+      indexedEventsEmitted: totalPersistenceStats.indexedEventCount,
+      providerStats: diagnostics.backgroundPersistence.providerStats,
+      skippedReason: diagnostics.backgroundPersistence.skippedReason,
+    });
 
     await finalizeBackgroundRun({
       repository,
@@ -562,6 +632,11 @@ async function executeRecurringInventoryIngestion(
   } catch (error) {
     diagnostics.performance.stageTimingsMs.total = Date.now() - startMs;
     diagnostics.performance.providerTimingsMs = providerTimings;
+    diagnostics.backgroundPersistence = buildBackgroundPersistenceDiagnostics(
+      totalPersistenceStats,
+      Array.from(providerPersistenceTotals.entries()),
+      diagnostics.backgroundPersistence?.skippedReason,
+    );
     const finishedAt = runTimestamp();
     const aborted = error instanceof Error && error.name === "AbortError";
 
@@ -722,9 +797,103 @@ function summarizeInventoryPlatforms(records: SourceInventoryRecord[]) {
   }, {});
 }
 
+function createEmptyPersistenceStats(): BackgroundPersistenceCounts {
+  return {
+    insertedCount: 0,
+    updatedCount: 0,
+    linkedToRunCount: 0,
+    indexedEventCount: 0,
+  };
+}
+
+function accumulatePersistenceStats(
+  total: BackgroundPersistenceCounts,
+  next: BackgroundPersistenceCounts,
+) {
+  total.insertedCount += next.insertedCount;
+  total.updatedCount += next.updatedCount;
+  total.linkedToRunCount += next.linkedToRunCount;
+  total.indexedEventCount += next.indexedEventCount;
+}
+
+function accumulateProviderPersistenceStats(
+  totals: Map<CrawlSourceResult["provider"], BackgroundPersistenceCounts>,
+  provider: CrawlSourceResult["provider"],
+  next: BackgroundPersistenceCounts,
+) {
+  const current = totals.get(provider) ?? createEmptyPersistenceStats();
+  accumulatePersistenceStats(current, next);
+  totals.set(provider, current);
+}
+
+function buildBackgroundPersistenceDiagnostics(
+  total: BackgroundPersistenceCounts,
+  providerStats: Array<[CrawlSourceResult["provider"], BackgroundPersistenceCounts]>,
+  skippedReason?: string,
+): NonNullable<CrawlDiagnostics["backgroundPersistence"]> {
+  return {
+    jobsInserted: total.insertedCount,
+    jobsUpdated: total.updatedCount,
+    jobsLinkedToRun: total.linkedToRunCount,
+    indexedEventsEmitted: total.indexedEventCount,
+    skippedReason,
+    providerStats: providerStats.map(([provider, stats]) => ({
+      provider,
+      savedCount: stats.linkedToRunCount,
+      insertedCount: stats.insertedCount,
+      updatedCount: stats.updatedCount,
+      linkedToRunCount: stats.linkedToRunCount,
+      indexedEventCount: stats.indexedEventCount,
+    })),
+  };
+}
+
+function resolveBackgroundSelectionSkippedReason(
+  diagnostics: CrawlDiagnostics["inventoryScheduling"],
+  expansionSkippedReason?: string,
+) {
+  if (!diagnostics) {
+    return expansionSkippedReason;
+  }
+
+  if (diagnostics.selectedSources > 0) {
+    return undefined;
+  }
+
+  if (diagnostics.inventorySources === 0) {
+    return expansionSkippedReason ?? "no_inventory_sources";
+  }
+
+  if (diagnostics.crawlableSources === 0) {
+    return "unsupported_provider";
+  }
+
+  if (diagnostics.eligibleSources === 0) {
+    const skipReasons = diagnostics.skippedByReason;
+    if ((skipReasons.health_backoff ?? 0) > 0) {
+      return "health_backoff";
+    }
+    if ((skipReasons.freshness_cooldown ?? 0) > 0) {
+      return "freshness_cooldown";
+    }
+    return "no_eligible_sources";
+  }
+
+  if ((diagnostics.skippedByReason.capacity_deprioritized ?? 0) > 0) {
+    return "capacity_deprioritized";
+  }
+
+  return expansionSkippedReason ?? "no_eligible_sources";
+}
+
 async function resolveDurableBackgroundRepository(runtime: BackgroundIngestionRuntime): Promise<
-  | { repository: JobCrawlerRepository; reason?: never; message?: never }
-  | { repository: null; reason: "mongo_unavailable" | "bootstrap_failed"; message: string }
+  | { repository: JobCrawlerRepository; reason?: never; phase?: never; message?: never }
+  | {
+      repository: null;
+      reason: "mongo_unavailable" | "bootstrap_failed";
+      phase: "repository_resolution" | "index_initialization";
+      message: string;
+    }
 > {
   if (runtime.repository) {
     return { repository: runtime.repository };
@@ -754,6 +923,7 @@ async function resolveDurableBackgroundRepository(runtime: BackgroundIngestionRu
       {
         message,
         reason: failure.reason,
+        phase: failure.phase,
         bootstrapFailure: failure.reason === "bootstrap_failed",
       },
     );
@@ -764,6 +934,7 @@ async function resolveDurableBackgroundRepository(runtime: BackgroundIngestionRu
 export function classifyBackgroundRepositoryFailure(error: unknown): {
   repository: null;
   reason: "mongo_unavailable" | "bootstrap_failed";
+  phase: "repository_resolution" | "index_initialization";
   message: string;
 } {
   const message =
@@ -776,10 +947,12 @@ export function classifyBackgroundRepositoryFailure(error: unknown): {
     )
       ? "bootstrap_failed"
       : "mongo_unavailable";
+  const phase = reason === "bootstrap_failed" ? "index_initialization" : "repository_resolution";
 
   return {
     repository: null,
     reason,
+    phase,
     message,
   };
 }
@@ -971,6 +1144,13 @@ function createEmptyDiagnostics(): CrawlDiagnostics {
       platformCountsBefore: {},
       platformCountsAfter: {},
       searchDiagnostics: [],
+    },
+    backgroundPersistence: {
+      jobsInserted: 0,
+      jobsUpdated: 0,
+      jobsLinkedToRun: 0,
+      indexedEventsEmitted: 0,
+      providerStats: [],
     },
     performance: {
       stageTimingsMs: {

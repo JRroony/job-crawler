@@ -5,7 +5,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { JobDetailPanel } from "@/components/job-search/job-detail-panel";
 import { buildStableJobRenderKeys } from "@/components/job-search/helpers";
 import { JobList } from "@/components/job-search/job-list";
-import { buildStableJobRenderIdentity } from "@/lib/job-identity";
 import type { JobListing, SearchFilters } from "@/lib/types";
 
 type ResultsTableProps = {
@@ -107,36 +106,11 @@ export function resolveJobExportLink(job: JobListing) {
 }
 
 export function buildResultsExportRows(jobs: JobListing[]): ResultsCsvRow[] {
-  const seenIdentities = new Set<string>();
-  const seenRows = new Set<string>();
-  const rows: ResultsCsvRow[] = [];
-
-  for (const job of jobs) {
-    const link = resolveJobExportLink(job);
-    if (!link) {
-      continue;
-    }
-
-    const identity = buildStableJobRenderIdentity(job);
-    const row: ResultsCsvRow = {
-      jobTitle: job.title,
-      companyName: job.company,
-      link,
-    };
-    const rowKey = [row.jobTitle, row.companyName, row.link]
-      .map(normalizeExportDedupeText)
-      .join("|");
-
-    if (seenIdentities.has(identity) || seenRows.has(rowKey)) {
-      continue;
-    }
-
-    seenIdentities.add(identity);
-    seenRows.add(rowKey);
-    rows.push(row);
-  }
-
-  return rows;
+  return jobs.map((job) => ({
+    jobTitle: job.title,
+    companyName: job.company,
+    link: resolveJobExportLink(job) ?? "",
+  }));
 }
 
 export function buildResultsCsv(jobs: JobListing[]) {
@@ -305,7 +279,7 @@ export function ResultsTable({
                   className="inline-flex items-center justify-center rounded-full border border-ink/10 bg-white px-3 py-1.5 text-sm font-semibold text-ink transition hover:border-[#0a66c2]/40 hover:text-[#0a66c2] disabled:cursor-not-allowed disabled:border-ink/8 disabled:bg-mist/35 disabled:text-slate/45"
                   aria-label={`Export ${exportRowCount} visible result${exportRowCount === 1 ? "" : "s"} as CSV`}
                 >
-                  Export CSV
+                  Export to CSV
                 </button>
                 <div className="rounded-full border border-ink/10 bg-mist/35 px-3 py-1.5 text-sm text-slate">
                   Selected job stays pinned on larger screens
@@ -372,10 +346,6 @@ function escapeCsvField(value: string) {
 
 function firstNonEmptyString(values: Array<string | undefined>) {
   return values.map((value) => value?.trim()).find(Boolean);
-}
-
-function normalizeExportDedupeText(value: string) {
-  return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 function buildLocationFilenameSegment(

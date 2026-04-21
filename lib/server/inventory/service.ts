@@ -84,6 +84,7 @@ export function planPersistentInventoryRecurringCrawl(runtime: {
   now: Date;
   maxSources: number;
   intervalMs: number;
+  prioritySourceIds?: string[];
 }): RecurringInventorySelectionPlan {
   return planRecurringInventorySourceSelection(runtime);
 }

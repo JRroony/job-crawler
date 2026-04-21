@@ -192,6 +192,67 @@ describe("JobCrawlerRepository", () => {
     expect(firstDelta.jobs.map((job) => job._id)).toEqual([savedJob._id]);
   });
 
+  it("reports persistence stats for inserted, updated, run-linked, and indexed jobs", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      {
+        title: "Software Engineer",
+      },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const firstRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+    );
+    const secondRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-30T00:00:00.000Z",
+    );
+    const thirdRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-31T00:00:00.000Z",
+    );
+    const baseJob = createPersistableJob({
+      linkStatus: "unknown",
+      lastValidatedAt: undefined,
+    });
+
+    const first = await repository.persistJobsWithStats(firstRun._id, [baseJob]);
+    const second = await repository.persistJobsWithStats(secondRun._id, [baseJob]);
+    const changed = await repository.persistJobsWithStats(thirdRun._id, [
+      createPersistableJob({
+        ...baseJob,
+        linkStatus: "valid",
+        lastValidatedAt: "2026-03-31T00:00:00.000Z",
+        crawledAt: "2026-03-31T00:00:00.000Z",
+        lastSeenAt: "2026-03-31T00:00:00.000Z",
+      }),
+    ]);
+
+    expect(first).toMatchObject({
+      insertedCount: 1,
+      updatedCount: 0,
+      linkedToRunCount: 1,
+      indexedEventCount: 1,
+    });
+    expect(second).toMatchObject({
+      insertedCount: 0,
+      updatedCount: 1,
+      linkedToRunCount: 1,
+      indexedEventCount: 0,
+    });
+    expect(changed).toMatchObject({
+      insertedCount: 0,
+      updatedCount: 1,
+      linkedToRunCount: 1,
+      indexedEventCount: 1,
+    });
+    expect(first.jobs[0]?._id).toBe(second.jobs[0]?._id);
+    expect(second.jobs[0]?._id).toBe(changed.jobs[0]?._id);
+    expect(await repository.getIndexedJobDeliveryCursor()).toBe(2);
+  });
+
   it("creates durable search sessions and tracks session-scoped job deltas independently from crawl runs", async () => {
     const db = new FakeDb();
     const repository = new JobCrawlerRepository(db);
