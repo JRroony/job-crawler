@@ -462,7 +462,8 @@ describe("crawl orchestration", () => {
   });
 
   it("returns jobs in the crawl response when registry-backed Greenhouse sources are available", async () => {
-    const repository = new JobCrawlerRepository(new FakeDb());
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
     const now = new Date("2026-04-08T12:00:00.000Z");
     const discovery: DiscoveryService = {
       async discover(input) {
@@ -546,9 +547,22 @@ describe("crawl orchestration", () => {
     expect(result.jobs[0]).toMatchObject({
       title: "Software Engineer",
       company: "OpenAI",
+      normalizedTitle: "software engineer",
+      titleNormalized: "software engineer",
       country: "United States",
       sourcePlatform: "greenhouse",
     });
+    const storedJobs = db.snapshot<JobListing>(collectionNames.jobs);
+    const storedEvents = db.snapshot<Record<string, unknown>>(collectionNames.searchSessionJobEvents);
+
+    expect(storedJobs).toHaveLength(1);
+    expect(storedJobs[0]).toMatchObject({
+      title: "Software Engineer",
+      normalizedTitle: "software engineer",
+      titleNormalized: "software engineer",
+      sourcePlatform: "greenhouse",
+    });
+    expect(storedEvents).toHaveLength(1);
   });
 
   it("marks an all-provider failure as failed instead of a completed empty crawl", async () => {

@@ -4,6 +4,7 @@ import { runWithConcurrency } from "@/lib/server/crawler/helpers";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import {
   finalizeProviderResult,
+  normalizeProviderJobSeed,
   unsupportedProviderResult,
 } from "@/lib/server/providers/shared";
 import {
@@ -70,7 +71,24 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
         adapterSources,
         async (source) => {
           await context.throwIfCanceled?.();
-          return definition.crawlSource(context, source);
+          const run = await definition.crawlSource(
+            {
+              ...context,
+              onBatch: context.onBatch
+                ? (batch) =>
+                    context.onBatch?.({
+                      ...batch,
+                      jobs: batch.jobs.map(normalizeProviderJobSeed),
+                    })
+                : undefined,
+            },
+            source,
+          );
+
+          return {
+            ...run,
+            jobs: run.jobs.map(normalizeProviderJobSeed),
+          };
         },
         concurrency,
       );

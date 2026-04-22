@@ -26,6 +26,7 @@ export type NormalizedJobSeed = {
   company: string;
   normalizedCompany?: string;
   normalizedTitle?: string;
+  titleNormalized?: string;
   country?: string;
   state?: string;
   city?: string;

@@ -27,6 +27,7 @@ import {
 import { sortJobsForPersistence, sortJobsWithDiagnostics } from "@/lib/server/crawler/sort";
 import { capSourcesWithPlatformDiversity } from "@/lib/server/crawler/source-capper";
 import { getEnv } from "@/lib/server/env";
+import { normalizeProviderJobSeed } from "@/lib/server/providers/shared";
 import type {
   CrawlRunControlState,
   JobCrawlerRepository,
@@ -2185,49 +2186,52 @@ async function applyInlineValidationStrategy(
 }
 
 export function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): PersistableJob {
-  const resolvedLocation = seed.resolvedLocation;
-  const locationRaw = seed.locationRaw ?? seed.locationText;
+  const normalizedSeed = normalizeProviderJobSeed(seed);
+  const resolvedLocation = normalizedSeed.resolvedLocation;
+  const locationRaw = normalizedSeed.locationRaw ?? normalizedSeed.locationText;
   const locationNormalized =
-    seed.normalizedLocation ??
+    normalizedSeed.normalizedLocation ??
     normalizeComparableText(
-      `${resolvedLocation?.city ?? seed.city ?? ""} ${resolvedLocation?.state ?? seed.state ?? ""} ${resolvedLocation?.country ?? seed.country ?? ""} ${locationRaw}`,
+      `${resolvedLocation?.city ?? normalizedSeed.city ?? ""} ${resolvedLocation?.state ?? normalizedSeed.state ?? ""} ${resolvedLocation?.country ?? normalizedSeed.country ?? ""} ${locationRaw}`,
     );
-  const experienceClassification = resolveJobExperienceClassification(seed);
-  const discoveredAt = seed.discoveredAt || now.toISOString();
-  const postingDate = seed.postingDate ?? seed.postedAt;
-  const normalizedCompany = seed.normalizedCompany ?? normalizeComparableText(seed.company);
-  const normalizedTitle = seed.normalizedTitle ?? normalizeComparableText(seed.title);
+  const experienceClassification = resolveJobExperienceClassification(normalizedSeed);
+  const discoveredAt = normalizedSeed.discoveredAt || now.toISOString();
+  const postingDate = normalizedSeed.postingDate ?? normalizedSeed.postedAt;
+  const normalizedCompany =
+    normalizedSeed.normalizedCompany ?? normalizeComparableText(normalizedSeed.company);
+  const normalizedTitle =
+    normalizedSeed.normalizedTitle ?? normalizeComparableText(normalizedSeed.title);
   const seniority =
-    seed.seniority ??
+    normalizedSeed.seniority ??
     experienceClassification.explicitLevel ??
     experienceClassification.inferredLevel;
   const dedupeFingerprint =
-    seed.dedupeFingerprint ??
+    normalizedSeed.dedupeFingerprint ??
     buildContentFingerprint({
-      company: seed.company,
-      title: seed.title,
+      company: normalizedSeed.company,
+      title: normalizedSeed.title,
       location: locationNormalized,
     });
-  const crawledAt = seed.crawledAt ?? discoveredAt;
-  const sourceLookupKeys = buildSeedSourceLookupKeys(seed);
+  const crawledAt = normalizedSeed.crawledAt ?? discoveredAt;
+  const sourceLookupKeys = buildSeedSourceLookupKeys(normalizedSeed);
   const contentHash = buildContentFingerprint({
-    company: seed.company,
-    title: seed.title,
+    company: normalizedSeed.company,
+    title: normalizedSeed.title,
     location: locationNormalized,
   });
   const canonicalJobKey = buildCanonicalJobIdentity({
-    sourcePlatform: seed.sourcePlatform,
-    sourceCompanySlug: seed.sourceCompanySlug,
-    sourceJobId: seed.sourceJobId,
-    sourceUrl: seed.sourceUrl,
-    applyUrl: seed.applyUrl,
-    canonicalUrl: seed.canonicalUrl,
+    sourcePlatform: normalizedSeed.sourcePlatform,
+    sourceCompanySlug: normalizedSeed.sourceCompanySlug,
+    sourceJobId: normalizedSeed.sourceJobId,
+    sourceUrl: normalizedSeed.sourceUrl,
+    applyUrl: normalizedSeed.applyUrl,
+    canonicalUrl: normalizedSeed.canonicalUrl,
     resolvedUrl: undefined,
     sourceLookupKeys,
-    company: seed.company,
-    title: seed.title,
+    company: normalizedSeed.company,
+    title: normalizedSeed.title,
     locationRaw,
-    locationText: seed.locationText,
+    locationText: normalizedSeed.locationText,
     normalizedCompany,
     normalizedTitle,
     normalizedLocation: locationNormalized,
@@ -2240,48 +2244,48 @@ export function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): Persis
 
   return {
     canonicalJobKey,
-    title: seed.title,
-    company: seed.company,
+    title: normalizedSeed.title,
+    company: normalizedSeed.company,
     normalizedCompany,
     normalizedTitle,
-    country: resolvedLocation?.country ?? seed.country,
-    state: resolvedLocation?.state ?? seed.state,
-    city: resolvedLocation?.city ?? seed.city,
+    country: resolvedLocation?.country ?? normalizedSeed.country,
+    state: resolvedLocation?.state ?? normalizedSeed.state,
+    city: resolvedLocation?.city ?? normalizedSeed.city,
     locationRaw,
     normalizedLocation: locationNormalized,
-    locationText: seed.locationText,
+    locationText: normalizedSeed.locationText,
     resolvedLocation,
-    remoteType: seed.remoteType ?? (resolvedLocation?.isRemote ? "remote" : "unknown"),
-    employmentType: seed.employmentType,
+    remoteType: normalizedSeed.remoteType ?? (resolvedLocation?.isRemote ? "remote" : "unknown"),
+    employmentType: normalizedSeed.employmentType,
     seniority,
     experienceLevel:
       experienceClassification.explicitLevel ??
       experienceClassification.inferredLevel,
     experienceClassification,
-    sourcePlatform: seed.sourcePlatform,
-    sourceCompanySlug: seed.sourceCompanySlug,
-    sourceJobId: seed.sourceJobId,
-    sourceUrl: seed.sourceUrl,
-    applyUrl: seed.applyUrl,
-    canonicalUrl: seed.canonicalUrl,
+    sourcePlatform: normalizedSeed.sourcePlatform,
+    sourceCompanySlug: normalizedSeed.sourceCompanySlug,
+    sourceJobId: normalizedSeed.sourceJobId,
+    sourceUrl: normalizedSeed.sourceUrl,
+    applyUrl: normalizedSeed.applyUrl,
+    canonicalUrl: normalizedSeed.canonicalUrl,
     postingDate,
     postedAt: postingDate,
     discoveredAt,
     crawledAt,
-    descriptionSnippet: seed.descriptionSnippet,
-    salaryInfo: seed.salaryInfo,
-    sponsorshipHint: seed.sponsorshipHint ?? "unknown",
+    descriptionSnippet: normalizedSeed.descriptionSnippet,
+    salaryInfo: normalizedSeed.salaryInfo,
+    sponsorshipHint: normalizedSeed.sponsorshipHint ?? "unknown",
     linkStatus: "unknown",
-    rawSourceMetadata: seed.rawSourceMetadata,
+    rawSourceMetadata: normalizedSeed.rawSourceMetadata,
     sourceProvenance: [
       {
-        sourcePlatform: seed.sourcePlatform,
-        sourceJobId: seed.sourceJobId,
-        sourceUrl: seed.sourceUrl,
-        applyUrl: seed.applyUrl,
-        canonicalUrl: seed.canonicalUrl,
+        sourcePlatform: normalizedSeed.sourcePlatform,
+        sourceJobId: normalizedSeed.sourceJobId,
+        sourceUrl: normalizedSeed.sourceUrl,
+        applyUrl: normalizedSeed.applyUrl,
+        canonicalUrl: normalizedSeed.canonicalUrl,
         discoveredAt,
-        rawSourceMetadata: seed.rawSourceMetadata,
+        rawSourceMetadata: normalizedSeed.rawSourceMetadata,
       },
     ],
     sourceLookupKeys,

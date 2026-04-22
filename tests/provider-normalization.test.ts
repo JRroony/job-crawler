@@ -4,9 +4,29 @@ import { normalizeAshbyCandidate } from "@/lib/server/providers/ashby";
 import { normalizeGreenhouseJob } from "@/lib/server/providers/greenhouse";
 import { normalizeLeverJob } from "@/lib/server/providers/lever";
 import { normalizeSmartRecruitersJob } from "@/lib/server/providers/smartrecruiters";
+import { buildSeed } from "@/lib/server/providers/shared";
 import { normalizeWorkdayJob } from "@/lib/server/providers/workday";
 
 describe("provider normalization", () => {
+  it("builds provider seeds with consistent normalized title aliases", () => {
+    const job = buildSeed({
+      title: "  Senior Software Engineer  ",
+      companyToken: "openai",
+      company: "OpenAI",
+      locationText: "Remote, United States",
+      sourcePlatform: "greenhouse",
+      sourceJobId: "alias-role",
+      sourceUrl: "https://boards.greenhouse.io/openai/jobs/alias-role",
+      applyUrl: "https://boards.greenhouse.io/openai/jobs/alias-role/apply",
+      rawSourceMetadata: {},
+      discoveredAt: "2026-03-29T00:00:00.000Z",
+    });
+
+    expect(job.title).toBe("Senior Software Engineer");
+    expect(job.normalizedTitle).toBe("senior software engineer");
+    expect(job.titleNormalized).toBe("senior software engineer");
+  });
+
   it("normalizes greenhouse jobs into the common model", () => {
     const job = normalizeGreenhouseJob({
       companyToken: "openai",
@@ -24,6 +44,7 @@ describe("provider normalization", () => {
     expect(job.company).toBe("Openai");
     expect(job.normalizedCompany).toBe("openai");
     expect(job.normalizedTitle).toBe("senior software engineer");
+    expect(job.titleNormalized).toBe("senior software engineer");
     expect(job.locationRaw).toBe("San Francisco, California, United States");
     expect(job.remoteType).toBe("onsite");
     expect(job.seniority).toBe("senior");

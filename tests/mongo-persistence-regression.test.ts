@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { collectionNames } from "@/lib/server/db/indexes";
+import { seedToPersistableJob } from "@/lib/server/crawler/pipeline";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import { toSourceInventoryRecord } from "@/lib/server/discovery/inventory";
 import { createDiscoveryService } from "@/lib/server/discovery/service";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
+import { normalizeGreenhouseJob } from "@/lib/server/providers/greenhouse";
 import { runSearchIngestionFromFilters, runSearchFromFilters } from "@/lib/server/search/service";
 import type { CrawlProvider } from "@/lib/server/providers/types";
 import type { JobListing } from "@/lib/types";
@@ -125,6 +127,50 @@ function createEmptyDiscovery(): DiscoveryService {
 }
 
 describe("Mongo-backed ingestion and indexed search regressions", () => {
+  it("persists Greenhouse seeds with valid titles even when normalized title aliases arrive empty", async () => {
+    const db = new MongoLikeNullDb();
+    const repository = new JobCrawlerRepository(db);
+    const now = new Date("2026-04-15T12:00:00.000Z");
+    const search = await repository.createSearch({ title: "Backend Engineer" }, now.toISOString());
+    const searchSession = await repository.createSearchSession(search._id, now.toISOString());
+    const crawlRun = await repository.createCrawlRun(search._id, now.toISOString(), {
+      searchSessionId: searchSession._id,
+    });
+    const greenhouseSeed = normalizeGreenhouseJob({
+      companyToken: "openai",
+      companyName: "OpenAI",
+      discoveredAt: now.toISOString(),
+      job: {
+        id: "backend-role",
+        title: "Backend Engineer",
+        absolute_url: "https://boards.greenhouse.io/openai/jobs/backend-role",
+        first_published: "2026-04-14T00:00:00.000Z",
+        company_name: "OpenAI",
+        location: { name: "Remote, United States" },
+      },
+    });
+
+    const persistable = seedToPersistableJob(
+      {
+        ...greenhouseSeed,
+        normalizedTitle: "",
+        titleNormalized: "",
+      },
+      now,
+    );
+    const [savedJob] = await repository.persistJobs(crawlRun._id, [persistable], {
+      searchSessionId: searchSession._id,
+    });
+
+    expect(savedJob).toMatchObject({
+      title: "Backend Engineer",
+      normalizedTitle: "backend engineer",
+      titleNormalized: "backend engineer",
+      sourcePlatform: "greenhouse",
+    });
+    expect(db.snapshot<JobListing>(collectionNames.jobs)).toHaveLength(1);
+  });
+
   it("reads sourceInventory records with Mongo-style null optional fields", async () => {
     const db = new MongoLikeNullDb();
     const repository = new JobCrawlerRepository(db);

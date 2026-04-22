@@ -42,6 +42,32 @@ export function defaultCompanyName(token: string, fallback?: string) {
   return fallback?.trim() || slugToLabel(token);
 }
 
+export function deriveNormalizedTitle(title: string) {
+  const trimmedTitle = title.trim();
+  const comparableTitle = normalizeComparableText(trimmedTitle);
+
+  if (comparableTitle) {
+    return comparableTitle;
+  }
+
+  return trimmedTitle.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+export function normalizeProviderJobSeed(seed: NormalizedJobSeed): NormalizedJobSeed {
+  const title = seed.title.trim();
+  const normalizedTitle =
+    normalizeTitleAlias(seed.normalizedTitle) ??
+    normalizeTitleAlias(seed.titleNormalized) ??
+    deriveNormalizedTitle(title);
+
+  return {
+    ...seed,
+    title,
+    normalizedTitle,
+    titleNormalized: normalizedTitle,
+  };
+}
+
 export function buildSeed(input: {
   title: string;
   companyToken: string;
@@ -71,10 +97,12 @@ export function buildSeed(input: {
   sponsorshipHint?: SponsorshipHint;
   crawledAt?: string;
 }) {
+  const title = input.title.trim();
+  const normalizedTitle = deriveNormalizedTitle(title);
   const locationText = input.locationText?.trim() || "Location unavailable";
   const parsedLocation = parseLocationText(locationText);
   const experienceClassification = classifyExperience({
-    title: input.title.trim(),
+    title,
     explicitExperienceLevel: input.explicitExperienceLevel,
     explicitExperienceSource: input.explicitExperienceSource,
     explicitExperienceReasons: input.explicitExperienceReasons,
@@ -120,10 +148,11 @@ export function buildSeed(input: {
     ]);
 
   return {
-    title: input.title.trim(),
+    title,
     company,
     normalizedCompany: normalizeComparableText(company),
-    normalizedTitle: normalizeComparableText(input.title.trim()),
+    normalizedTitle,
+    titleNormalized: normalizedTitle,
     country: resolvedLocation.country ?? explicitCountry ?? parsedLocation.country,
     state: resolvedLocation.state ?? explicitState ?? parsedLocation.state,
     city: resolvedLocation.city ?? input.explicitCity ?? parsedLocation.city,
@@ -160,6 +189,11 @@ export function buildSeed(input: {
     sponsorshipHint,
     rawSourceMetadata: input.rawSourceMetadata,
   };
+}
+
+function normalizeTitleAlias(value?: string) {
+  const normalized = normalizeComparableText(value);
+  return normalized || undefined;
 }
 
 function normalizeSourceCompanySlug(value: string) {
@@ -521,14 +555,15 @@ export function finalizeProviderResult<P extends ProviderResult["provider"]>(inp
   diagnostics?: ProviderDiagnostics<P>;
 }): ProviderResult<P> {
   const hasWarnings = input.warnings.length > 0;
+  const jobs = input.jobs.map(normalizeProviderJobSeed);
 
   return {
     provider: input.provider,
-    status: hasWarnings ? (input.jobs.length > 0 ? "partial" : "failed") : "success",
-    jobs: input.jobs,
+    status: hasWarnings ? (jobs.length > 0 ? "partial" : "failed") : "success",
+    jobs,
     sourceCount: input.sourceCount,
     fetchedCount: input.fetchedCount,
-    matchedCount: input.jobs.length,
+    matchedCount: jobs.length,
     warningCount: input.warnings.length,
     errorMessage: hasWarnings ? input.warnings.join(" ") : undefined,
     diagnostics: input.diagnostics,
