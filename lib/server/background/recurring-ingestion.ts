@@ -20,9 +20,10 @@ import {
 } from "@/lib/server/inventory/service";
 import { resolveObservedSourceNextEligibleAt } from "@/lib/server/inventory/selection";
 import { createDefaultProviders } from "@/lib/server/providers";
-import type { CrawlProvider } from "@/lib/server/providers/types";
+import type { CrawlProvider, NormalizedJobSeed } from "@/lib/server/providers/types";
 import type {
   JobCrawlerRepository,
+  PersistableJob,
   PersistJobsWithStatsResult,
 } from "@/lib/server/db/repository";
 import type {
@@ -32,6 +33,7 @@ import type {
   SearchDocument,
   SearchSessionDocument,
 } from "@/lib/types";
+import { persistableJobSchema } from "@/lib/types";
 
 type BackgroundIngestionRuntime = {
   repository?: JobCrawlerRepository;
@@ -526,7 +528,22 @@ async function executeRecurringInventoryIngestion(
 
         let persistence: PersistJobsWithStatsResult;
         try {
-          const persistableJobs = result.jobs.map((job) => seedToPersistableJob(job, runtime.now));
+          const hydration = hydrateBackgroundJobs(result.jobs, runtime.now);
+          for (const drop of hydration.dropped) {
+            diagnostics.dropReasonCounts[drop.reason] =
+              (diagnostics.dropReasonCounts[drop.reason] ?? 0) + 1;
+            console.warn("[background-ingestion:seed-normalization-drop]", {
+              searchId: target.search._id,
+              crawlRunId: target.crawlRunId,
+              provider: provider.provider,
+              sourcePlatform: drop.seed.sourcePlatform,
+              sourceJobId: drop.seed.sourceJobId,
+              title: drop.seed.title,
+              reason: drop.reason,
+              errorMessage: drop.message,
+            });
+          }
+          const persistableJobs = hydration.jobs;
           persistence = await repository.persistJobsWithStats(target.crawlRunId, persistableJobs, {
             searchSessionId: target.searchSession._id,
           });
@@ -931,6 +948,32 @@ function accumulateProviderPersistenceStats(
   const current = totals.get(provider) ?? createEmptyPersistenceStats();
   accumulatePersistenceStats(current, next);
   totals.set(provider, current);
+}
+
+function hydrateBackgroundJobs(seeds: NormalizedJobSeed[], now: Date) {
+  const jobs: PersistableJob[] = [];
+  const dropped: Array<{
+    seed: NormalizedJobSeed;
+    reason: string;
+    message: string;
+  }> = [];
+
+  for (const seed of seeds) {
+    try {
+      jobs.push(persistableJobSchema.parse(seedToPersistableJob(seed, now)));
+    } catch (error) {
+      dropped.push({
+        seed,
+        reason: "normalization:invalid_persistable_job",
+        message: error instanceof Error ? error.message : "Seed could not be hydrated.",
+      });
+    }
+  }
+
+  return {
+    jobs,
+    dropped,
+  };
 }
 
 function buildBackgroundPersistenceDiagnostics(

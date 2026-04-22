@@ -72,6 +72,7 @@ describe("recurring background ingestion with real MongoDB", () => {
           ["Senior Data Analyst", "da-2"],
           ["Product Manager", "pm-1"],
           ["Senior Product Manager", "pm-2"],
+          ["Technical Product Manager", "pm-3"],
           ["Business Analyst", "ba-1"],
         ].map(([title, sourceJobId]) => ({
           title,
@@ -119,6 +120,7 @@ describe("recurring background ingestion with real MongoDB", () => {
       repository,
       providers: [provider],
       now,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
       runTimeoutMs: 5000,
     });
 
@@ -161,7 +163,7 @@ describe("recurring background ingestion with real MongoDB", () => {
     );
 
     expect(crawlRun?.status).toBe("completed");
-    expect(storedJobs).toBe(8);
+    expect(storedJobs).toBe(9);
     expect(inventory[0]?.lastCrawledAt).toBeTruthy();
     expect(inventory[0]?.health).toBe("healthy");
     expect(productResult.jobs.map((job) => job.title)).toContain("Product Manager");

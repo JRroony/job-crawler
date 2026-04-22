@@ -254,6 +254,8 @@ describe("Mongo-backed ingestion and indexed search regressions", () => {
           ? [
               {
                 title: "Software Engineer",
+                normalizedTitle: "",
+                titleNormalized: "",
                 company: "OpenAI",
                 country: "United States",
                 locationText: "Remote - United States",

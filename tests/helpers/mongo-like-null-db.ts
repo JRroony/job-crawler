@@ -39,6 +39,7 @@ export class MongoLikeNullCollection<TDocument extends Record<string, unknown>>
           updateOne: {
             filter: Record<string, unknown>;
             update: Record<string, unknown>;
+            upsert?: boolean;
             options?: Record<string, unknown>;
           };
         }
@@ -69,7 +70,10 @@ export class MongoLikeNullCollection<TDocument extends Record<string, unknown>>
       const result = await this.updateOne(
         operation.updateOne.filter,
         operation.updateOne.update,
-        operation.updateOne.options,
+        {
+          ...operation.updateOne.options,
+          upsert: operation.updateOne.upsert ?? false,
+        },
       );
       matchedCount += Number((result as { matchedCount?: number }).matchedCount ?? 0);
     }

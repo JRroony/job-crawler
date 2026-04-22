@@ -1092,7 +1092,9 @@ export function selectQueriesForExecution(plan: PublicSearchQueryPlan) {
   const seen = new Set<string>();
   const hasLocationQueries = plan.queries.some((query) => query.locationKind !== "blank");
   const primaryBlankBudget = hasLocationQueries
-    ? Math.max(14, Math.floor(plan.maxQueries * 0.55))
+    ? plan.maxQueries <= 18
+      ? Math.max(6, Math.floor(plan.maxQueries * 0.45))
+      : Math.max(14, Math.floor(plan.maxQueries * 0.55))
     : plan.maxQueries;
 
   const pushQuery = (query: PublicSearchQuery | undefined) => {
@@ -1120,7 +1122,9 @@ export function selectQueriesForExecution(plan: PublicSearchQueryPlan) {
   }
 
   const secondaryPrimaryBlankBudget = hasLocationQueries
-    ? Math.max(
+    ? plan.maxQueries <= 18
+      ? 1
+      : Math.max(
         1,
         plan.platformPlans.length,
         countSecondaryPrimaryBlankHostQueries(plan),

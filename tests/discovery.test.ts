@@ -2192,6 +2192,73 @@ describe("discovery budget capping per mode", () => {
     expect(options.maxRoleQueries).toBe(8);
   });
 
+  it("adapts fast mode budgets for sparse AI and science roles without using deep-mode caps", () => {
+    const options = resolvePublicSearchExecutionOptions(
+      "fast",
+      makeEnv(),
+      undefined,
+      "llm engineer",
+    );
+    const greenhouseOptions = resolvePublicSearchExecutionOptions(
+      "fast",
+      makeEnv(),
+      ["greenhouse"],
+      "applied scientist",
+    );
+
+    expect(options.maxQueries).toBe(18);
+    expect(options.maxSources).toBe(30);
+    expect(options.maxLocationClauses).toBe(18);
+    expect(options.maxDirectJobs).toBe(12);
+    expect(options.maxRoleQueries).toBe(12);
+    expect(greenhouseOptions.maxQueries).toBe(18);
+    expect(greenhouseOptions.maxDirectJobs).toBe(10);
+  });
+
+  it("keeps sparse AI science Canada query plans broad enough for source recovery", () => {
+    const executionOptions = resolvePublicSearchExecutionOptions(
+      "fast",
+      makeEnv(),
+      undefined,
+      "llm engineer",
+    );
+    const plan = buildPublicSearchQueryPlan(
+      {
+        title: "llm engineer",
+        country: "Canada",
+        crawlMode: "fast",
+      },
+      {
+        maxResultsPerQuery: executionOptions.maxResultsPerQuery,
+        maxSources: executionOptions.maxSources,
+        maxQueries: executionOptions.maxQueries,
+        maxGreenhouseLocationClauses: executionOptions.maxLocationClauses,
+        maxRoleQueries: executionOptions.maxRoleQueries,
+      },
+    );
+    const selectedQueries = selectQueriesForExecution(plan);
+
+    expect(plan.roleQueries).toEqual(
+      expect.arrayContaining([
+        "llm engineer",
+        "large language model engineer",
+        "generative ai engineer",
+        "ai engineer",
+        "machine learning engineer",
+      ]),
+    );
+    const locationClauses = Array.from(
+      new Set(plan.platformPlans.flatMap((platformPlan) => platformPlan.locationClauses)),
+    );
+
+    expect(locationClauses).toEqual(
+      expect.arrayContaining(["canada", "remote canada", "toronto"]),
+    );
+    expect(selectedQueries.length).toBe(18);
+    expect(selectedQueries.some((query) => query.query.includes("llm engineer"))).toBe(true);
+    expect(selectedQueries.some((query) => query.query.includes("canada"))).toBe(true);
+  });
+
   it("caps balanced mode to 24 queries and 50 sources", () => {
     const options = resolvePublicSearchExecutionOptions(
       "balanced",
@@ -2526,7 +2593,7 @@ describe("source capping with platform diversity", () => {
 
   it("includes Canada title-family and metro coverage in the recurring inventory expansion portfolio", () => {
     const intervalMs = 600_000;
-    const selectedAcrossCycles = Array.from({ length: 25 }, (_, cycle) =>
+    const selectedAcrossCycles = Array.from({ length: 36 }, (_, cycle) =>
       selectBackgroundInventoryExpansionFilters({
         now: new Date(cycle * intervalMs),
         intervalMs,
@@ -2565,6 +2632,14 @@ describe("source capping with platform diversity", () => {
         }),
         expect.objectContaining({
           title: "ai engineer",
+          country: "Canada",
+        }),
+        expect.objectContaining({
+          title: "applied scientist",
+          country: "Canada",
+        }),
+        expect.objectContaining({
+          title: "llm engineer",
           country: "Canada",
         }),
         expect.objectContaining({

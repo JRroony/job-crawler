@@ -25,6 +25,8 @@ import {
 } from "@/lib/server/crawler/helpers";
 import { isUnitedStatesValue, resolveUsState } from "@/lib/server/locations/us";
 
+const fallbackProviderJobTitle = "Untitled role";
+
 export function coercePostedAt(value: unknown) {
   if (!value) {
     return undefined;
@@ -50,11 +52,11 @@ export function deriveNormalizedTitle(title: string) {
     return comparableTitle;
   }
 
-  return trimmedTitle.toLowerCase().replace(/\s+/g, " ").trim();
+  return trimmedTitle.toLowerCase().replace(/\s+/g, " ").trim() || "untitled role";
 }
 
 export function normalizeProviderJobSeed(seed: NormalizedJobSeed): NormalizedJobSeed {
-  const title = seed.title.trim();
+  const title = normalizeProviderTitle(seed.title);
   const normalizedTitle =
     normalizeTitleAlias(seed.normalizedTitle) ??
     normalizeTitleAlias(seed.titleNormalized) ??
@@ -97,7 +99,7 @@ export function buildSeed(input: {
   sponsorshipHint?: SponsorshipHint;
   crawledAt?: string;
 }) {
-  const title = input.title.trim();
+  const title = normalizeProviderTitle(input.title);
   const normalizedTitle = deriveNormalizedTitle(title);
   const locationText = input.locationText?.trim() || "Location unavailable";
   const parsedLocation = parseLocationText(locationText);
@@ -189,6 +191,11 @@ export function buildSeed(input: {
     sponsorshipHint,
     rawSourceMetadata: input.rawSourceMetadata,
   };
+}
+
+function normalizeProviderTitle(value: string) {
+  const title = value.trim();
+  return title || fallbackProviderJobTitle;
 }
 
 function normalizeTitleAlias(value?: string) {

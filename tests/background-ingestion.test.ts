@@ -1073,7 +1073,12 @@ describe("recurring background ingestion", () => {
       matchedCount: 12,
       warningCount: 0,
       jobs: [
-        createProviderJob({ title: "Software Engineer", sourceJobId: "se-1" }),
+        createProviderJob({
+          title: "Software Engineer",
+          sourceJobId: "se-1",
+          normalizedTitle: "",
+          titleNormalized: "",
+        }),
         createProviderJob({ title: "Backend Engineer", sourceJobId: "se-2" }),
         createProviderJob({ title: "Full Stack Engineer", sourceJobId: "se-3" }),
         createProviderJob({ title: "Data Analyst", sourceJobId: "da-1" }),
@@ -1161,6 +1166,8 @@ function createProviderJob(overrides: {
   sourceJobId: string;
   company?: string;
   sourcePlatform?: "greenhouse";
+  normalizedTitle?: string;
+  titleNormalized?: string;
 }) {
   const company = overrides.company ?? "OpenAI";
   const sourcePlatform = overrides.sourcePlatform ?? "greenhouse";
@@ -1168,6 +1175,8 @@ function createProviderJob(overrides: {
 
   return {
     title: overrides.title,
+    normalizedTitle: overrides.normalizedTitle,
+    titleNormalized: overrides.titleNormalized,
     company,
     country: "United States",
     locationText: "Remote - United States",

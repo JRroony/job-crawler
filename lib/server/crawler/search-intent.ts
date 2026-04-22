@@ -11,6 +11,12 @@ type SearchIntentNormalization = {
   country?: string;
 };
 
+type LocationFieldNormalization = {
+  country?: string;
+  state?: string;
+  city?: string;
+};
+
 const platformPhraseMatchers: Array<{
   platform: CrawlerPlatform;
   pattern: RegExp;
@@ -81,9 +87,17 @@ export function normalizeSearchIntentInput(rawFilters: unknown) {
   }
 
   const normalized = normalizeSearchIntent(rawTitle);
+  const normalizedLocation = normalizeStructuredLocationFields(candidate);
+  const {
+    country: _country,
+    state: _state,
+    city: _city,
+    ...candidateWithoutLocation
+  } = candidate;
 
   return {
-    ...candidate,
+    ...candidateWithoutLocation,
+    ...normalizedLocation,
     title: normalized.title,
     ...(hasPopulatedArray(candidate.platforms)
       ? {}
@@ -97,6 +111,33 @@ export function normalizeSearchIntentInput(rawFilters: unknown) {
       : {
           country: normalized.country,
         }),
+  };
+}
+
+function normalizeStructuredLocationFields(
+  candidate: Record<string, unknown>,
+): LocationFieldNormalization {
+  const country = readOptionalString(candidate.country);
+  const state = readOptionalString(candidate.state);
+  const city = readOptionalString(candidate.city);
+
+  if (!city || state || country) {
+    return {
+      ...(country ? { country } : {}),
+      ...(state ? { state } : {}),
+      ...(city ? { city } : {}),
+    };
+  }
+
+  const cityAsCountry = resolveCountryLabel(city);
+  if (!cityAsCountry) {
+    return {
+      city,
+    };
+  }
+
+  return {
+    country: cityAsCountry,
   };
 }
 
@@ -159,4 +200,38 @@ function hasPopulatedString(value: unknown): value is string {
 
 function hasPopulatedArray(value: unknown): value is unknown[] {
   return Array.isArray(value) && value.length > 0;
+}
+
+function readOptionalString(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : undefined;
+}
+
+function resolveCountryLabel(value: string) {
+  const normalized = value.trim().toLowerCase().replace(/\./g, "").replace(/\s+/g, " ");
+
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (["us", "usa", "u s", "u s a", "united states", "united states of america"].includes(normalized)) {
+    return "United States";
+  }
+
+  const countryLabels: Record<string, string> = {
+    canada: "Canada",
+    canadian: "Canada",
+    "united kingdom": "United Kingdom",
+    uk: "United Kingdom",
+    "great britain": "United Kingdom",
+    britain: "United Kingdom",
+    germany: "Germany",
+    deutschland: "Germany",
+    india: "India",
+    france: "France",
+    europe: "Europe",
+  };
+
+  return countryLabels[normalized];
 }

@@ -130,11 +130,11 @@ export function parseLocationInput(
       };
     }
 
-    if (isUnitedStatesAlias(parts[0])) {
+    if (isCountryLike(parts[0])) {
       return {
         city: "",
         state: "",
-        country: "United States",
+        country: normalizeCountryLabel(parts[0]),
       };
     }
 
@@ -411,7 +411,7 @@ function isRemoteTerm(value: string) {
 }
 
 function isCountryLike(value: string) {
-  return isUnitedStatesAlias(value) || /\b(canada|united kingdom|uk|india|germany|france|europe)\b/i.test(value);
+  return Boolean(resolveCountryLabel(value));
 }
 
 function isUnitedStatesAlias(value: string) {
@@ -419,5 +419,33 @@ function isUnitedStatesAlias(value: string) {
 }
 
 function normalizeCountryLabel(value: string) {
-  return isUnitedStatesAlias(value) ? "United States" : value.trim();
+  return resolveCountryLabel(value) ?? value.trim();
+}
+
+function resolveCountryLabel(value: string) {
+  const normalized = value.trim().toLowerCase().replace(/\./g, "").replace(/\s+/g, " ");
+
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (["us", "usa", "u s", "u s a", "united states", "united states of america"].includes(normalized)) {
+    return "United States";
+  }
+
+  const countryLabels: Record<string, string> = {
+    canada: "Canada",
+    canadian: "Canada",
+    "united kingdom": "United Kingdom",
+    uk: "United Kingdom",
+    "great britain": "United Kingdom",
+    britain: "United Kingdom",
+    germany: "Germany",
+    deutschland: "Germany",
+    india: "India",
+    france: "France",
+    europe: "Europe",
+  };
+
+  return countryLabels[normalized];
 }

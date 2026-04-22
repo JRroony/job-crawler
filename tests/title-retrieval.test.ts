@@ -147,6 +147,9 @@ describe("title retrieval query expansion", () => {
       expect.arrayContaining([
         "ai engineer",
         "artificial intelligence engineer",
+        "llm engineer",
+        "large language model engineer",
+        "generative ai engineer",
         "machine learning engineer",
         "applied scientist",
         "research scientist",
@@ -169,6 +172,22 @@ describe("title retrieval query expansion", () => {
         "machine learning engineer",
       ]),
     );
+  });
+
+  it("expands llm engineer searches as AI / ML science retrieval instead of generic software", () => {
+    expect(queriesFor("LLM Engineer")).toEqual(
+      expect.arrayContaining([
+        "llm engineer",
+        "large language model engineer",
+        "generative ai engineer",
+        "ai engineer",
+        "machine learning engineer",
+        "applied scientist",
+        "research scientist",
+      ]),
+    );
+    expect(queriesFor("LLM Engineer")).not.toContain("product manager");
+    expect(queriesFor("LLM Engineer")).not.toContain("software engineer");
   });
 
   it("expands research scientist searches into adjacent science and AI roles", () => {

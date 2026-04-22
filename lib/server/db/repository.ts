@@ -87,6 +87,7 @@ export type CollectionAdapter<TDocument extends Record<string, unknown>> = {
           updateOne: {
             filter: Record<string, unknown>;
             update: Record<string, unknown>;
+            upsert?: boolean;
             options?: Record<string, unknown>;
           };
         }
@@ -1948,7 +1949,7 @@ async function persistJobUpserts<TDocument extends { _id: string; canonicalJobKe
             canonicalJobKey,
           },
         },
-        options: { upsert: true },
+        upsert: true,
       },
     } as const;
   });
@@ -1966,6 +1967,7 @@ async function persistJobUpserts<TDocument extends { _id: string; canonicalJobKe
     await collection.updateOne(
       operation.updateOne.filter,
       operation.updateOne.update,
+      { upsert: true },
     );
   }
 }

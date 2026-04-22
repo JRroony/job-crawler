@@ -41,6 +41,7 @@ import {
   crawlResponseSchema,
   crawlSourceResultSchema,
   resolveOperationalCrawlerPlatforms,
+  persistableJobSchema,
   searchFiltersSchema,
   type ActiveCrawlerPlatform,
   type CrawlerPlatform,
@@ -474,7 +475,22 @@ export async function executeCrawlPipeline(
         totalMatchedJobs += filteredSeeds.jobs.length;
 
         const dedupeStartedMs = Date.now();
-        const hydratedJobs = hydrateJobs(filteredSeeds.jobs, input.now);
+        const hydration = hydrateJobs(filteredSeeds.jobs, input.now);
+        hydration.dropped.forEach((drop) => {
+          incrementDropReasonCount(diagnostics, drop.reason);
+          console.warn("[crawl:seed-normalization-drop]", {
+            searchId: search._id,
+            batch: payload.batchLabel,
+            provider: payload.provider ?? "discovery_harvest",
+            traceId: getPipelineTraceId(drop.seed),
+            reason: drop.reason,
+            errorMessage: drop.message,
+            title: drop.seed.title,
+            sourcePlatform: drop.seed.sourcePlatform,
+            sourceJobId: drop.seed.sourceJobId,
+          });
+        });
+        const hydratedJobs = hydration.jobs;
         diagnostics.jobsBeforeDedupe += hydratedJobs.length;
         const dedupeResult = dedupeJobsWithDiagnostics(
           hydratedJobs,
@@ -565,6 +581,7 @@ export async function executeCrawlPipeline(
           sourceCount: payload.sourceCount,
           fetchedCount: payload.fetchedCount,
           matchedCount: filteredSeeds.jobs.length,
+          normalizationDroppedCount: hydration.dropped.length,
           dedupeInputCount: hydratedJobs.length,
           dedupeOutputCount: dedupedJobs.length,
           touchedSavedCount: savedJobs.length,
@@ -2168,7 +2185,29 @@ function hydrateJobs(
   seeds: NormalizedJobSeed[],
   now: Date,
 ) {
-  return seeds.map((seed) => seedToPersistableJob(seed, now));
+  const jobs: PersistableJob[] = [];
+  const dropped: Array<{
+    seed: NormalizedJobSeed;
+    reason: string;
+    message: string;
+  }> = [];
+
+  for (const seed of seeds) {
+    try {
+      jobs.push(persistableJobSchema.parse(seedToPersistableJob(seed, now)));
+    } catch (error) {
+      dropped.push({
+        seed,
+        reason: "normalization:invalid_persistable_job",
+        message: error instanceof Error ? error.message : "Seed could not be hydrated.",
+      });
+    }
+  }
+
+  return {
+    jobs,
+    dropped,
+  };
 }
 
 async function applyInlineValidationStrategy(

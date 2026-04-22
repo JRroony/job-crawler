@@ -5,6 +5,7 @@ import {
   isRemoteJob,
   isVisaFriendlyJob,
   matchesPostedDateFilter,
+  parseLocationInput,
 } from "@/components/job-search/helpers";
 import type { JobListing, SearchFilters } from "@/lib/types";
 
@@ -79,6 +80,24 @@ function createJob(overrides: Partial<JobListing> = {}): JobListing {
 }
 
 describe("job-search helpers", () => {
+  it("promotes single country-like location input instead of treating Canada as a city", () => {
+    expect(parseLocationInput("Canada")).toEqual({
+      city: "",
+      state: "",
+      country: "Canada",
+    });
+    expect(parseLocationInput("canada")).toEqual({
+      city: "",
+      state: "",
+      country: "Canada",
+    });
+    expect(parseLocationInput("Remote, Canada")).toEqual({
+      city: "Remote",
+      state: "",
+      country: "Canada",
+    });
+  });
+
   it("uses normalized remote type before falling back to raw text", () => {
     expect(
       isRemoteJob(

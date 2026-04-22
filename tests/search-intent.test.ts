@@ -34,7 +34,9 @@ describe("search intent normalization", () => {
   it("infers Canada from realistic required retrieval prompts", () => {
     const scenarios = [
       ["software engineer canada", { title: "software engineer", country: "Canada" }],
+      ["applied scientist canada", { title: "applied scientist", country: "Canada" }],
       ["ai engineer in Canada", { title: "ai engineer", country: "Canada" }],
+      ["research scientist in canada", { title: "research scientist", country: "Canada" }],
       ["data analyst canada jobs", { title: "data analyst", country: "Canada" }],
       ["business analyst canada jobs", { title: "business analyst", country: "Canada" }],
       ["product manager roles in canada", { title: "product manager", country: "Canada" }],
@@ -108,6 +110,32 @@ describe("search intent normalization", () => {
     ).toEqual({
       title: "Software Engineer",
       country: "United States",
+    });
+  });
+
+  it("promotes legacy city-only Canada payloads into country filters on the server", () => {
+    expect(
+      normalizeSearchIntentInput({
+        title: "applied scientist",
+        city: "canada",
+        crawlMode: "fast",
+        experienceMatchMode: "balanced",
+      }),
+    ).toEqual({
+      title: "applied scientist",
+      country: "Canada",
+      crawlMode: "fast",
+      experienceMatchMode: "balanced",
+    });
+
+    expect(
+      normalizeSearchIntentInput({
+        title: "research scientist",
+        city: "Canada",
+      }),
+    ).toEqual({
+      title: "research scientist",
+      country: "Canada",
     });
   });
 });

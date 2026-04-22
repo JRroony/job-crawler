@@ -14,6 +14,7 @@ import {
   type SourceInventoryRecord,
 } from "@/lib/server/discovery/inventory";
 import { discoverSourcesFromPublicSearchDetailed } from "@/lib/server/discovery/public-search";
+import { analyzeTitle, normalizeTitleText } from "@/lib/server/title-retrieval";
 import { resolveOperationalCrawlerPlatforms, type CrawlMode } from "@/lib/types";
 import type { CrawlDiagnostics, SearchFilters } from "@/lib/types";
 import type {
@@ -56,6 +57,9 @@ const defaultInventoryExpansionSearchesPerCycle = 2;
 const backgroundInventoryExpansionTitles = {
   softwareEngineer: "software engineer",
   aiEngineer: "ai engineer",
+  appliedScientist: "applied scientist",
+  researchScientist: "research scientist",
+  llmEngineer: "llm engineer",
   machineLearningEngineer: "machine learning engineer",
   dataAnalyst: "data analyst",
   businessAnalyst: "business analyst",
@@ -100,9 +104,11 @@ const backgroundInventoryExpansionSeeds: BackgroundInventoryExpansionSeed[] = [
   { title: "dataAnalyst", market: "canadaMontreal" },
   { title: "businessAnalyst", market: "unitedStates" },
   { title: "aiEngineer", market: "canadaToronto" },
+  { title: "appliedScientist", market: "canada" },
   { title: "productManager", market: "unitedStates" },
   { title: "productManager", market: "canadaWaterloo" },
   { title: "aiEngineer", market: "unitedStates" },
+  { title: "researchScientist", market: "unitedStates" },
   { title: "machineLearningEngineer", market: "canadaVancouver" },
   { title: "customerSuccessManager", market: "unitedStates" },
   { title: "softwareEngineer", market: "canadaOttawa" },
@@ -112,6 +118,7 @@ const backgroundInventoryExpansionSeeds: BackgroundInventoryExpansionSeed[] = [
   { title: "dataAnalyst", market: "canadaToronto" },
   { title: "softwareEngineer", market: "unitedStatesCalifornia" },
   { title: "aiEngineer", market: "canada" },
+  { title: "llmEngineer", market: "canadaToronto" },
   { title: "dataAnalyst", market: "unitedStatesNewYork" },
   { title: "machineLearningEngineer", market: "canadaToronto" },
   { title: "productManager", market: "unitedStatesTexas" },
@@ -319,6 +326,7 @@ export async function discoverSupplementalSourcesDetailed(
     input.filters.crawlMode,
     input.env,
     input.filters.platforms,
+    input.filters.title,
   );
   const publicSearchSkippedReason = input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED
     ? resolvePublicSearchSkippedReason(
@@ -426,6 +434,7 @@ export function resolvePublicSearchExecutionOptions(
   crawlMode: CrawlMode | undefined,
   env: DiscoveryEnvSnapshot,
   platforms?: readonly string[],
+  title?: string,
 ) {
   const greenhouseFirstOnly =
     Array.isArray(platforms) &&
@@ -446,36 +455,54 @@ export function resolvePublicSearchExecutionOptions(
   }
 
   if (crawlMode === "balanced") {
+    const sparseAiScience = isSparseAiScienceSearch(title);
     return {
       ...base,
-      maxQueries: Math.min(base.maxQueries, 24),
+      maxQueries: Math.min(base.maxQueries, sparseAiScience ? 32 : 24),
       maxSources: Math.min(base.maxSources, 50),
-      maxLocationClauses: Math.min(base.maxLocationClauses, 8),
-      maxDirectJobs: Math.min(base.maxDirectJobs, 12),
-      maxRoleQueries: 12,
+      maxLocationClauses: Math.min(base.maxLocationClauses, sparseAiScience ? 20 : 8),
+      maxDirectJobs: Math.min(base.maxDirectJobs, sparseAiScience ? 16 : 12),
+      maxRoleQueries: sparseAiScience ? 16 : 12,
     };
   }
 
   // "fast" mode (default) — aggressive caps to finish in ~15-30 seconds
+  const sparseAiScience = isSparseAiScienceSearch(title);
   if (greenhouseFirstOnly) {
     return {
       ...base,
-      maxQueries: Math.min(base.maxQueries, 12),
+      maxQueries: Math.min(base.maxQueries, sparseAiScience ? 18 : 12),
       maxSources: Math.min(base.maxSources, 30),
-      maxLocationClauses: Math.min(base.maxLocationClauses, 4),
-      maxDirectJobs: Math.min(base.maxDirectJobs, 6),
-      maxRoleQueries: 8,
+      maxLocationClauses: Math.min(base.maxLocationClauses, sparseAiScience ? 18 : 4),
+      maxDirectJobs: Math.min(base.maxDirectJobs, sparseAiScience ? 10 : 6),
+      maxRoleQueries: sparseAiScience ? 12 : 8,
     };
   }
 
   return {
     ...base,
-    maxQueries: Math.min(base.maxQueries, 12),
+    maxQueries: Math.min(base.maxQueries, sparseAiScience ? 18 : 12),
     maxSources: Math.min(base.maxSources, 30),
-    maxLocationClauses: Math.min(base.maxLocationClauses, 4),
-    maxDirectJobs: Math.min(base.maxDirectJobs, 8),
-    maxRoleQueries: 8,
+    maxLocationClauses: Math.min(base.maxLocationClauses, sparseAiScience ? 18 : 4),
+    maxDirectJobs: Math.min(base.maxDirectJobs, sparseAiScience ? 12 : 8),
+    maxRoleQueries: sparseAiScience ? 12 : 8,
   };
+}
+
+function isSparseAiScienceSearch(title?: string) {
+  const normalized = normalizeTitleText(title);
+  if (!normalized) {
+    return false;
+  }
+
+  const analysis = analyzeTitle(normalized);
+
+  return (
+    analysis.family === "ai_ml_science" ||
+    /\b(?:applied scientist|research scientist|ai engineer|llm engineer|large language model|generative ai|genai)\b/.test(
+      normalized,
+    )
+  );
 }
 
 function resolvePublicSearchSkippedReason(

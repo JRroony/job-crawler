@@ -152,6 +152,8 @@ export const titleFamilyCatalog: readonly TitleFamilyDefinition[] = [
     broadDiscoveryQueries: [
       "machine learning engineer",
       "ai engineer",
+      "llm engineer",
+      "generative ai engineer",
       "applied scientist",
       "research scientist",
       "data scientist",
@@ -165,6 +167,8 @@ export const titleFamilyCatalog: readonly TitleFamilyDefinition[] = [
       "machine learning",
       "ai engineer",
       "artificial intelligence",
+      "llm engineer",
+      "large language model",
       "applied scientist",
       "research scientist",
       "data scientist",
@@ -840,11 +844,15 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
     aliases: [
       "artificial intelligence engineer",
       "ai research engineer",
+      "llm engineer",
+      "large language model engineer",
+      "generative ai engineer",
+      "genai engineer",
       "nlp engineer",
       "computer vision engineer",
     ],
     tokenSynonyms: [
-      ["ai", "artificial intelligence", "nlp", "computer vision"],
+      ["ai", "artificial intelligence", "llm", "large language model", "generative ai", "genai", "nlp", "computer vision"],
       ["engineer", "developer"],
     ],
     adjacentConceptIds: [
@@ -856,6 +864,9 @@ export const titleConceptCatalog: readonly TitleConceptDefinition[] = [
     broadDiscoveryQueries: [
       "ai engineer",
       "artificial intelligence engineer",
+      "llm engineer",
+      "large language model engineer",
+      "generative ai engineer",
       "nlp engineer",
       "computer vision engineer",
       "machine learning engineer",
