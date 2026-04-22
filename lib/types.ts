@@ -493,6 +493,8 @@ export const crawlDiagnosticsSchema = z.object({
       jobsUpdated: z.number().int().nonnegative().default(0),
       jobsLinkedToRun: z.number().int().nonnegative().default(0),
       indexedEventsEmitted: z.number().int().nonnegative().default(0),
+      failedBatches: z.number().int().nonnegative().default(0),
+      failureSamples: z.array(z.string().min(1)).max(8).default([]),
       skippedReason: nullableOptional(z.string()),
       providerStats: z
         .array(

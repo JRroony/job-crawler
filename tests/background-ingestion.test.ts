@@ -34,7 +34,8 @@ afterEach(() => {
 describe("recurring background ingestion", () => {
   it("expands inventory with newly discovered sources before selecting crawl sources", async () => {
     const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
-    const repository = new JobCrawlerRepository(new MongoLikeNullDb());
+    const db = new MongoLikeNullDb();
+    const repository = new JobCrawlerRepository(db);
     const now = new Date("2026-04-15T12:00:00.000Z");
 
     await repository.upsertSourceInventory([
@@ -131,6 +132,7 @@ describe("recurring background ingestion", () => {
       jobsUpdated: 0,
       jobsLinkedToRun: 1,
       indexedEventsEmitted: 1,
+      failedBatches: 0,
       providerStats: [
         expect.objectContaining({
           provider: "greenhouse",
@@ -141,6 +143,10 @@ describe("recurring background ingestion", () => {
         }),
       ],
     });
+    expect(db.snapshot(collectionNames.jobs)).toHaveLength(1);
+    expect(db.snapshot(collectionNames.indexedJobEvents)).toHaveLength(1);
+    expect(db.snapshot(collectionNames.crawlRunJobEvents)).toHaveLength(1);
+    expect(db.snapshot(collectionNames.searchSessionJobEvents)).toHaveLength(1);
     expect(await repository.getIndexedJobDeliveryCursor()).toBe(1);
   });
 

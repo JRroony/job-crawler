@@ -303,10 +303,19 @@ describe("Mongo-backed ingestion and indexed search regressions", () => {
     );
 
     const storedJobs = db.snapshot<JobListing>(collectionNames.jobs);
+    const indexedEvents = db.snapshot<Record<string, unknown>>(collectionNames.indexedJobEvents);
+    const crawlRunEvents = db.snapshot<Record<string, unknown>>(collectionNames.crawlRunJobEvents);
+    const sessionEvents = db.snapshot<Record<string, unknown>>(
+      collectionNames.searchSessionJobEvents,
+    );
 
     expect(sawInventorySource).toBe(true);
     expect(storedJobs).toHaveLength(1);
+    expect(indexedEvents).toHaveLength(1);
+    expect(crawlRunEvents).toHaveLength(1);
+    expect(sessionEvents).toHaveLength(1);
     expect(result.jobs).toHaveLength(1);
+    expect(result.diagnostics.performance.persistenceBatchCount).toBeGreaterThanOrEqual(1);
     expect(result.jobs[0]).toMatchObject({
       title: "Software Engineer",
       company: "OpenAI",

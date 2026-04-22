@@ -1060,6 +1060,18 @@ export class JobCrawlerRepository {
       }
     }
 
+    console.info("[repository:persist-jobs]", {
+      crawlRunId,
+      searchSessionId: options.searchSessionId,
+      inputCount: jobs.length,
+      sanitizedCount: sanitizedJobs.length,
+      upsertCount: upserts.size,
+      insertedCount: insertedJobIds.size,
+      updatedCount: updatedJobIds.size,
+      linkedToRunCount: newToRunJobIds.size,
+      indexedEventCount: dedupeStrings(indexedJobIds).length,
+    });
+
     return {
       jobs: dedupeStoredJobs(Array.from(savedJobsById.values())),
       insertedCount: insertedJobIds.size,

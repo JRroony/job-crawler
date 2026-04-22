@@ -446,121 +446,157 @@ export async function executeCrawlPipeline(
       accumulateProviderTotals?: boolean;
       onFirstVisibleSaved?: () => void;
     }) => {
-      await persistentCancellation.throwIfCanceled({ heartbeat: true });
-      throwIfAborted(mergedSignal);
-      const filteringStartedMs = Date.now();
-      persistenceBatchCount += 1;
-      const filteredSeeds = filterSeedsForSearch(payload.seeds, normalizedFilters, {
-        deepExperienceInference: input.deepExperienceInference ?? false,
-      });
-      stageTimingsMs.filtering += Date.now() - filteringStartedMs;
+      try {
+        await persistentCancellation.throwIfCanceled({ heartbeat: true });
+        throwIfAborted(mergedSignal);
+        const filteringStartedMs = Date.now();
+        persistenceBatchCount += 1;
+        console.info("[crawl:persistence-batch-start]", {
+          searchId: search._id,
+          batch: payload.batchLabel,
+          provider: payload.provider ?? "discovery_harvest",
+          sourceCount: payload.sourceCount,
+          fetchedCount: payload.fetchedCount,
+          seedCount: payload.seeds.length,
+        });
+        const filteredSeeds = filterSeedsForSearch(payload.seeds, normalizedFilters, {
+          deepExperienceInference: input.deepExperienceInference ?? false,
+        });
+        stageTimingsMs.filtering += Date.now() - filteringStartedMs;
 
-      diagnostics.excludedByTitle += filteredSeeds.excludedByTitle;
-      diagnostics.excludedByLocation += filteredSeeds.excludedByLocation;
-      diagnostics.excludedByExperience += filteredSeeds.excludedByExperience;
-      diagnostics.filterDecisionTraces.push(...filteredSeeds.filterDecisionTraces);
-      Object.entries(filteredSeeds.dropReasonCounts).forEach(([reason, count]) => {
-        diagnostics.dropReasonCounts[reason] = (diagnostics.dropReasonCounts[reason] ?? 0) + count;
-      });
-      totalMatchedJobs += filteredSeeds.jobs.length;
+        diagnostics.excludedByTitle += filteredSeeds.excludedByTitle;
+        diagnostics.excludedByLocation += filteredSeeds.excludedByLocation;
+        diagnostics.excludedByExperience += filteredSeeds.excludedByExperience;
+        diagnostics.filterDecisionTraces.push(...filteredSeeds.filterDecisionTraces);
+        Object.entries(filteredSeeds.dropReasonCounts).forEach(([reason, count]) => {
+          diagnostics.dropReasonCounts[reason] = (diagnostics.dropReasonCounts[reason] ?? 0) + count;
+        });
+        totalMatchedJobs += filteredSeeds.jobs.length;
 
-      const dedupeStartedMs = Date.now();
-      const hydratedJobs = hydrateJobs(filteredSeeds.jobs, input.now);
-      diagnostics.jobsBeforeDedupe += hydratedJobs.length;
-      const dedupeResult = dedupeJobsWithDiagnostics(
-        hydratedJobs,
-        (job) => getPipelineTraceId(job),
-      );
-      diagnostics.dedupeDecisionTraces.push(
-        ...buildDedupeTraceRecords(dedupeResult.dropped, hydratedJobs),
-      );
-      dedupeResult.dropped.forEach((trace) => incrementDropReasonCount(diagnostics, trace.dropReason));
-      const dedupedJobs = sortJobsForPersistence(dedupeResult.jobs, normalizedFilters.title);
-      stageTimingsMs.dedupe += Date.now() - dedupeStartedMs;
+        const dedupeStartedMs = Date.now();
+        const hydratedJobs = hydrateJobs(filteredSeeds.jobs, input.now);
+        diagnostics.jobsBeforeDedupe += hydratedJobs.length;
+        const dedupeResult = dedupeJobsWithDiagnostics(
+          hydratedJobs,
+          (job) => getPipelineTraceId(job),
+        );
+        diagnostics.dedupeDecisionTraces.push(
+          ...buildDedupeTraceRecords(dedupeResult.dropped, hydratedJobs),
+        );
+        dedupeResult.dropped.forEach((trace) =>
+          incrementDropReasonCount(diagnostics, trace.dropReason),
+        );
+        const dedupedJobs = sortJobsForPersistence(dedupeResult.jobs, normalizedFilters.title);
+        stageTimingsMs.dedupe += Date.now() - dedupeStartedMs;
 
-      const persistenceStartedMs = Date.now();
-      await persistentCancellation.throwIfCanceled({ heartbeat: true });
-      const savedJobs = await input.repository.persistJobs(crawlRun._id, dedupedJobs, {
-        searchSessionId: searchSession._id,
-      });
-      stageTimingsMs.persistence += Date.now() - persistenceStartedMs;
+        const persistenceStartedMs = Date.now();
+        await persistentCancellation.throwIfCanceled({ heartbeat: true });
+        const persistence = await input.repository.persistJobsWithStats(
+          crawlRun._id,
+          dedupedJobs,
+          {
+            searchSessionId: searchSession._id,
+          },
+        );
+        const savedJobs = persistence.jobs;
+        stageTimingsMs.persistence += Date.now() - persistenceStartedMs;
 
-      let newVisibleJobCount = 0;
-      for (const job of savedJobs) {
-        if (!savedJobIds.has(job._id)) {
-          savedJobIds.add(job._id);
-          newVisibleJobCount += 1;
-        }
-      }
-
-      if (newVisibleJobCount > 0) {
-        payload.onFirstVisibleSaved?.();
-      }
-
-      if (!firstVisibleResultAtMs && savedJobIds.size > 0) {
-        firstVisibleResultAtMs = Date.now();
-      }
-
-      if (payload.provider) {
-        const existing = sourceResultsByProvider.get(payload.provider);
-        if (existing) {
-          let providerSavedCount = existing.savedCount;
-          let providerSavedSet = providerSavedJobIds.get(payload.provider);
-          if (!providerSavedSet) {
-            providerSavedSet = new Set<string>();
-            providerSavedJobIds.set(payload.provider, providerSavedSet);
+        let newVisibleJobCount = 0;
+        for (const job of savedJobs) {
+          if (!savedJobIds.has(job._id)) {
+            savedJobIds.add(job._id);
+            newVisibleJobCount += 1;
           }
+        }
 
-          savedJobs.forEach((job) => {
-            if (!job.sourceProvenance.some((record) => record.sourcePlatform === payload.provider)) {
-              return;
+        if (newVisibleJobCount > 0) {
+          payload.onFirstVisibleSaved?.();
+        }
+
+        if (!firstVisibleResultAtMs && savedJobIds.size > 0) {
+          firstVisibleResultAtMs = Date.now();
+        }
+
+        if (payload.provider) {
+          const existing = sourceResultsByProvider.get(payload.provider);
+          if (existing) {
+            let providerSavedCount = existing.savedCount;
+            let providerSavedSet = providerSavedJobIds.get(payload.provider);
+            if (!providerSavedSet) {
+              providerSavedSet = new Set<string>();
+              providerSavedJobIds.set(payload.provider, providerSavedSet);
             }
 
-            providerSavedSet?.add(job._id);
-          });
-          providerSavedCount = providerSavedSet.size;
+            savedJobs.forEach((job) => {
+              if (!job.sourceProvenance.some((record) => record.sourcePlatform === payload.provider)) {
+                return;
+              }
 
-          const updated = crawlSourceResultSchema.parse({
-            ...existing,
-            status: payload.status ?? existing.status,
-            sourceCount: payload.accumulateProviderTotals ? existing.sourceCount : payload.sourceCount,
-            fetchedCount: payload.accumulateProviderTotals
-              ? existing.fetchedCount + payload.fetchedCount
-              : payload.fetchedCount,
-            matchedCount: payload.accumulateProviderTotals
-              ? existing.matchedCount + filteredSeeds.jobs.length
-              : filteredSeeds.jobs.length,
-            savedCount: providerSavedCount,
-            warningCount: payload.accumulateProviderTotals
-              ? existing.warningCount + (payload.warningCount ?? 0)
-              : payload.warningCount ?? existing.warningCount,
-            errorMessage: payload.errorMessage ?? existing.errorMessage,
-            finishedAt: payload.finishedAt,
-          });
-          sourceResultsByProvider.set(payload.provider, updated);
-          await input.repository.updateCrawlSourceResult(updated);
+              providerSavedSet?.add(job._id);
+            });
+            providerSavedCount = providerSavedSet.size;
+
+            const updated = crawlSourceResultSchema.parse({
+              ...existing,
+              status: payload.status ?? existing.status,
+              sourceCount: payload.accumulateProviderTotals ? existing.sourceCount : payload.sourceCount,
+              fetchedCount: payload.accumulateProviderTotals
+                ? existing.fetchedCount + payload.fetchedCount
+                : payload.fetchedCount,
+              matchedCount: payload.accumulateProviderTotals
+                ? existing.matchedCount + filteredSeeds.jobs.length
+                : filteredSeeds.jobs.length,
+              savedCount: providerSavedCount,
+              warningCount: payload.accumulateProviderTotals
+                ? existing.warningCount + (payload.warningCount ?? 0)
+                : payload.warningCount ?? existing.warningCount,
+              errorMessage: payload.errorMessage ?? existing.errorMessage,
+              finishedAt: payload.finishedAt,
+            });
+            sourceResultsByProvider.set(payload.provider, updated);
+            await input.repository.updateCrawlSourceResult(updated);
+          }
         }
+
+        console.info("[crawl:persistence-batch]", {
+          searchId: search._id,
+          batch: payload.batchLabel,
+          provider: payload.provider ?? "discovery_harvest",
+          sourceCount: payload.sourceCount,
+          fetchedCount: payload.fetchedCount,
+          matchedCount: filteredSeeds.jobs.length,
+          dedupeInputCount: hydratedJobs.length,
+          dedupeOutputCount: dedupedJobs.length,
+          touchedSavedCount: savedJobs.length,
+          insertedCount: persistence.insertedCount,
+          updatedCount: persistence.updatedCount,
+          linkedToRunCount: persistence.linkedToRunCount,
+          indexedEventCount: persistence.indexedEventCount,
+          newVisibleJobCount,
+          totalVisibleJobCount: savedJobIds.size,
+          warningCount: payload.warningCount ?? 0,
+          errorMessage: payload.errorMessage,
+        });
+
+        scheduleProgressUpdate("crawling", payload.finishedAt, {
+          immediate: newVisibleJobCount > 0 || payload.status !== "running",
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Persistence batch failed unexpectedly.";
+        diagnostics.dropReasonCounts["persistence:batch_failed"] =
+          (diagnostics.dropReasonCounts["persistence:batch_failed"] ?? 0) + 1;
+        console.error("[crawl:persistence-batch-failed]", {
+          searchId: search._id,
+          batch: payload.batchLabel,
+          provider: payload.provider ?? "discovery_harvest",
+          sourceCount: payload.sourceCount,
+          fetchedCount: payload.fetchedCount,
+          seedCount: payload.seeds.length,
+          errorMessage: message,
+        });
+        throw error;
       }
-
-      console.info("[crawl:persistence-batch]", {
-        searchId: search._id,
-        batch: payload.batchLabel,
-        provider: payload.provider ?? "discovery_harvest",
-        sourceCount: payload.sourceCount,
-        fetchedCount: payload.fetchedCount,
-        matchedCount: filteredSeeds.jobs.length,
-        dedupeInputCount: hydratedJobs.length,
-        dedupeOutputCount: dedupedJobs.length,
-        touchedSavedCount: savedJobs.length,
-        newVisibleJobCount,
-        totalVisibleJobCount: savedJobIds.size,
-        warningCount: payload.warningCount ?? 0,
-        errorMessage: payload.errorMessage,
-      });
-
-      scheduleProgressUpdate("crawling", payload.finishedAt, {
-        immediate: newVisibleJobCount > 0 || payload.status !== "running",
-      });
     };
 
     const initializedSourceResults = selectedProviders.map((provider) =>

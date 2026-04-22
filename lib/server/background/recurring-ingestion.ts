@@ -369,6 +369,7 @@ async function executeRecurringInventoryIngestion(
     CrawlSourceResult["provider"],
     BackgroundPersistenceCounts
   >();
+  const backgroundPersistenceFailures: string[] = [];
   const runTimestamp = () => new Date(startedAtMs + Math.max(0, Date.now() - startMs)).toISOString();
 
   try {
@@ -421,6 +422,7 @@ async function executeRecurringInventoryIngestion(
         totalPersistenceStats,
         Array.from(providerPersistenceTotals.entries()),
         selectionSkippedReason,
+        backgroundPersistenceFailures,
       );
     }
     const selectedRecordById = new Map(
@@ -511,10 +513,45 @@ async function executeRecurringInventoryIngestion(
         totalMatchedJobs += result.matchedCount;
         diagnostics.jobsBeforeDedupe += result.jobs.length;
 
-        const persistableJobs = result.jobs.map((job) => seedToPersistableJob(job, runtime.now));
-        const persistence = await repository.persistJobsWithStats(target.crawlRunId, persistableJobs, {
-          searchSessionId: target.searchSession._id,
+        diagnostics.performance.persistenceBatchCount += 1;
+        console.info("[background-ingestion:persistence-batch-start]", {
+          searchId: target.search._id,
+          crawlRunId: target.crawlRunId,
+          provider: provider.provider,
+          sourceCount: providerSources.length,
+          fetchedCount: result.fetchedCount,
+          matchedCount: result.matchedCount,
+          seedCount: result.jobs.length,
         });
+
+        let persistence: PersistJobsWithStatsResult;
+        try {
+          const persistableJobs = result.jobs.map((job) => seedToPersistableJob(job, runtime.now));
+          persistence = await repository.persistJobsWithStats(target.crawlRunId, persistableJobs, {
+            searchSessionId: target.searchSession._id,
+          });
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Background job persistence failed unexpectedly.";
+          backgroundPersistenceFailures.push(`${provider.provider}: ${message}`);
+          diagnostics.backgroundPersistence = buildBackgroundPersistenceDiagnostics(
+            totalPersistenceStats,
+            Array.from(providerPersistenceTotals.entries()),
+            diagnostics.backgroundPersistence?.skippedReason,
+            backgroundPersistenceFailures,
+          );
+          console.error("[background-ingestion:persistence-batch-failed]", {
+            searchId: target.search._id,
+            crawlRunId: target.crawlRunId,
+            provider: provider.provider,
+            sourceCount: providerSources.length,
+            fetchedCount: result.fetchedCount,
+            matchedCount: result.matchedCount,
+            seedCount: result.jobs.length,
+            errorMessage: message,
+          });
+          throw error;
+        }
         const savedJobs = persistence.jobs;
         totalSavedJobs += persistence.linkedToRunCount;
         accumulatePersistenceStats(totalPersistenceStats, persistence);
@@ -523,10 +560,10 @@ async function executeRecurringInventoryIngestion(
           totalPersistenceStats,
           Array.from(providerPersistenceTotals.entries()),
           diagnostics.backgroundPersistence?.skippedReason,
+          backgroundPersistenceFailures,
         );
         diagnostics.jobsAfterDedupe = totalSavedJobs;
         diagnostics.dedupedOut = Math.max(0, diagnostics.jobsBeforeDedupe - diagnostics.jobsAfterDedupe);
-        diagnostics.performance.persistenceBatchCount += 1;
 
         const finishedAt = runTimestamp();
         const sourceResult = createSourceResult({
@@ -665,6 +702,7 @@ async function executeRecurringInventoryIngestion(
       totalPersistenceStats,
       Array.from(providerPersistenceTotals.entries()),
       diagnostics.backgroundPersistence?.skippedReason,
+      backgroundPersistenceFailures,
     );
     const finishedAt = runTimestamp();
     const status = resolveFinalStatus(sourceResults, totalSavedJobs);
@@ -677,6 +715,8 @@ async function executeRecurringInventoryIngestion(
       jobsUpdated: totalPersistenceStats.updatedCount,
       jobsLinkedToRun: totalPersistenceStats.linkedToRunCount,
       indexedEventsEmitted: totalPersistenceStats.indexedEventCount,
+      failedBatches: diagnostics.backgroundPersistence.failedBatches,
+      failureSamples: diagnostics.backgroundPersistence.failureSamples,
       providerStats: diagnostics.backgroundPersistence.providerStats,
       skippedReason: diagnostics.backgroundPersistence.skippedReason,
     });
@@ -701,6 +741,7 @@ async function executeRecurringInventoryIngestion(
       totalPersistenceStats,
       Array.from(providerPersistenceTotals.entries()),
       diagnostics.backgroundPersistence?.skippedReason,
+      backgroundPersistenceFailures,
     );
     const finishedAt = runTimestamp();
     const aborted = error instanceof Error && error.name === "AbortError";
@@ -896,12 +937,15 @@ function buildBackgroundPersistenceDiagnostics(
   total: BackgroundPersistenceCounts,
   providerStats: Array<[CrawlSourceResult["provider"], BackgroundPersistenceCounts]>,
   skippedReason?: string,
+  failureSamples: string[] = [],
 ): NonNullable<CrawlDiagnostics["backgroundPersistence"]> {
   return {
     jobsInserted: total.insertedCount,
     jobsUpdated: total.updatedCount,
     jobsLinkedToRun: total.linkedToRunCount,
     indexedEventsEmitted: total.indexedEventCount,
+    failedBatches: failureSamples.length,
+    failureSamples: failureSamples.slice(0, 8),
     skippedReason,
     providerStats: providerStats.map(([provider, stats]) => ({
       provider,
@@ -1217,6 +1261,8 @@ function createEmptyDiagnostics(): CrawlDiagnostics {
       jobsUpdated: 0,
       jobsLinkedToRun: 0,
       indexedEventsEmitted: 0,
+      failedBatches: 0,
+      failureSamples: [],
       providerStats: [],
     },
     performance: {
