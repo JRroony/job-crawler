@@ -3,7 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import { getDefaultGreenhouseRegistryEntries } from "@/lib/server/discovery/greenhouse-registry";
-import { toSourceInventoryRecord } from "@/lib/server/discovery/inventory";
+import {
+  buildSourceInventorySeeds,
+  toSourceInventoryRecord,
+} from "@/lib/server/discovery/inventory";
+import { getDefaultSourceRegistryEntries } from "@/lib/server/discovery/source-registry";
 import { classifyPublicSearchCandidate } from "@/lib/server/discovery/public-search-candidates";
 import {
   buildPublicSearchQueryPlan,
@@ -26,6 +30,8 @@ import {
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { buildUsDiscoveryLocationTokens } from "@/lib/server/locations/us";
 import { capSourcesWithPlatformDiversity } from "@/lib/server/crawler/source-capper";
+import { planRecurringInventorySourceSelection } from "@/lib/server/inventory/selection";
+import { createDefaultProviders } from "@/lib/server/providers";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import { FakeDb } from "@/tests/helpers/fake-db";
 
@@ -33,6 +39,7 @@ const discoveryEnvDefaults = {
   greenhouseBoardTokens: ["openai"],
   leverSiteTokens: ["figma"],
   ashbyBoardTokens: ["notion"],
+  sourceRegistryEntries: [],
   companyPageSources: [],
   PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
   PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 8,
@@ -285,6 +292,92 @@ describe("source discovery", () => {
         }),
       ]),
     );
+  });
+
+  it("ships stronger Lever, Ashby, and Workday source registries with Canada-aware metadata", () => {
+    const leverEntries = getDefaultSourceRegistryEntries(["lever"]);
+    const ashbyEntries = getDefaultSourceRegistryEntries(["ashby"]);
+    const workdayEntries = getDefaultSourceRegistryEntries(["workday"]);
+
+    expect(leverEntries.length).toBeGreaterThan(10);
+    expect(ashbyEntries.length).toBeGreaterThan(10);
+    expect(workdayEntries.length).toBeGreaterThan(10);
+    expect(leverEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          platform: "lever",
+          token: "wealthsimple",
+          company: "Wealthsimple",
+          coverageTags: expect.arrayContaining(["canada"]),
+        }),
+      ]),
+    );
+    expect(ashbyEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          platform: "ashby",
+          token: "cohere",
+          company: "Cohere",
+          coverageTags: expect.arrayContaining(["canada"]),
+        }),
+      ]),
+    );
+    expect(workdayEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          platform: "workday",
+          company: "RBC",
+          tenant: "rbc",
+          careerSitePath: "RBCGLOBAL1",
+          coverageTags: expect.arrayContaining(["canada"]),
+        }),
+      ]),
+    );
+  });
+
+  it("builds multi-platform source inventory seeds from registry supply instead of tiny env token defaults", () => {
+    const seeds = buildSourceInventorySeeds({
+      greenhouseBoardTokens: [],
+      leverSiteTokens: [],
+      ashbyBoardTokens: [],
+      sourceRegistryEntries: [],
+      companyPageSources: [],
+    });
+    const counts = countInventoryByPlatform(seeds);
+
+    expect(counts.greenhouse).toBeGreaterThanOrEqual(20);
+    expect(counts.lever).toBeGreaterThan(10);
+    expect(counts.ashby).toBeGreaterThan(10);
+    expect(counts.workday).toBeGreaterThan(10);
+    expect(seeds.find((record) => record._id === "lever:wealthsimple")).toMatchObject({
+      platform: "lever",
+      inventoryOrigin: "platform_registry",
+      sourceMetadata: expect.objectContaining({
+        canadaRelevant: true,
+        company: "Wealthsimple",
+      }),
+    });
+    expect(seeds.find((record) => record._id === "ashby:cohere")).toMatchObject({
+      platform: "ashby",
+      inventoryOrigin: "platform_registry",
+      sourceMetadata: expect.objectContaining({
+        canadaRelevant: true,
+        company: "Cohere",
+      }),
+    });
+    expect(seeds.find((record) => record._id === "workday:rbc-rbcglobal1")).toMatchObject({
+      platform: "workday",
+      sourceType: "career_site",
+      token: "rbc:rbcglobal1",
+      sitePath: "RBCGLOBAL1",
+      careerSitePath: "RBCGLOBAL1",
+      apiUrl: "https://rbc.wd3.myworkdayjobs.com/wday/cxs/rbc/RBCGLOBAL1/jobs",
+      inventoryOrigin: "platform_registry",
+      sourceMetadata: expect.objectContaining({
+        canadaRelevant: true,
+        company: "RBC",
+      }),
+    });
   });
 
   it("keeps company-page expansion out of the baseline stage so supplemental recall can do it later", async () => {
@@ -1244,12 +1337,17 @@ describe("source discovery", () => {
         "quebec",
         "qc canada",
         "remote quebec",
+        "alberta",
+        "ab canada",
+        "remote alberta",
         "toronto",
         "toronto on",
         "vancouver",
         "vancouver bc",
         "montreal",
         "montreal qc",
+        "calgary",
+        "calgary ab",
       ]),
     );
     expect(plan.platformPlans[0].locationClauses).not.toEqual(
@@ -1264,6 +1362,7 @@ describe("source discovery", () => {
       "Data Analyst",
       "Business Analyst",
       "Product Manager",
+      "Technical Product Manager",
     ];
 
     for (const title of canadaTitles) {
@@ -2157,6 +2256,13 @@ describe("source discovery", () => {
   });
 });
 
+function countInventoryByPlatform(records: Array<{ platform: string }>) {
+  return records.reduce<Record<string, number>>((counts, record) => {
+    counts[record.platform] = (counts[record.platform] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
 describe("discovery budget capping per mode", () => {
   const makeEnv = (overrides: Partial<typeof discoveryEnvDefaults> = {}) => ({
     ...discoveryEnvDefaults,
@@ -2270,6 +2376,188 @@ describe("discovery budget capping per mode", () => {
     expect(options.maxLocationClauses).toBe(8);
     expect(options.maxDirectJobs).toBe(12);
     expect(options.maxRoleQueries).toBe(12);
+  });
+
+  it("uses partially deep budgets for high-demand Canada role profiles", () => {
+    const scenarios = [
+      { title: "software engineer", country: "Canada" },
+      { title: "data analyst", country: "Canada" },
+      { title: "product manager", country: "Canada" },
+      { title: "machine learning engineer", country: "Canada" },
+      { title: "ai engineer", country: "Canada" },
+      { title: "applied scientist", country: "Canada" },
+      { title: "research scientist", country: "Canada" },
+      { title: "business analyst", country: "Canada" },
+      { title: "data analyst", country: "Canada", state: "ON", city: "Toronto" },
+      { title: "machine learning engineer", country: "Canada", state: "BC", city: "Vancouver" },
+    ];
+
+    for (const filters of scenarios) {
+      const options = resolvePublicSearchExecutionOptions(
+        "balanced",
+        makeEnv(),
+        undefined,
+        filters.title,
+        filters,
+      );
+
+      expect(options).toMatchObject({
+        maxQueries: 48,
+        maxSources: 80,
+        maxLocationClauses: 20,
+        maxDirectJobs: 18,
+        maxRoleQueries: 18,
+        executionStrategy: expect.objectContaining({
+          effectiveMode: "canada_high_demand_deepened",
+          country: "Canada",
+          canadaHighDemandRole: true,
+          reason: expect.stringContaining("Canada high-demand role profile matched"),
+        }),
+      });
+    }
+  });
+
+  it("documents before-and-after diagnostics for representative Canada high-demand scenarios", () => {
+    const previousBalancedCaps = {
+      maxQueries: 24,
+      maxSources: 50,
+      maxLocationClauses: 8,
+      maxDirectJobs: 12,
+      maxRoleQueries: 12,
+    };
+    const scenarios = [
+      { label: "software engineer + Canada", title: "software engineer", country: "Canada" },
+      { label: "data analyst + Toronto", title: "data analyst", country: "Canada", state: "ON", city: "Toronto" },
+      { label: "product manager + Canada", title: "product manager", country: "Canada" },
+      {
+        label: "machine learning engineer + Vancouver",
+        title: "machine learning engineer",
+        country: "Canada",
+        state: "BC",
+        city: "Vancouver",
+      },
+      { label: "ai engineer + Toronto", title: "ai engineer", country: "Canada", state: "ON", city: "Toronto" },
+    ];
+    const diagnostics = scenarios.map((filters) => {
+      const after = resolvePublicSearchExecutionOptions(
+        "balanced",
+        makeEnv(),
+        undefined,
+        filters.title,
+        filters,
+      );
+
+      return {
+        scenario: filters.label,
+        before: previousBalancedCaps,
+        after: {
+          maxQueries: after.maxQueries,
+          maxSources: after.maxSources,
+          maxLocationClauses: after.maxLocationClauses,
+          maxDirectJobs: after.maxDirectJobs,
+          maxRoleQueries: after.maxRoleQueries,
+          executionStrategy: after.executionStrategy,
+        },
+      };
+    });
+
+    console.info("[validation:canada-discovery-options]", diagnostics);
+
+    expect(diagnostics).toHaveLength(scenarios.length);
+    for (const diagnostic of diagnostics) {
+      expect(diagnostic.after.maxQueries).toBeGreaterThan(diagnostic.before.maxQueries);
+      expect(diagnostic.after.maxSources).toBeGreaterThan(diagnostic.before.maxSources);
+      expect(diagnostic.after.maxLocationClauses).toBeGreaterThan(
+        diagnostic.before.maxLocationClauses,
+      );
+      expect(diagnostic.after.maxDirectJobs).toBeGreaterThan(diagnostic.before.maxDirectJobs);
+      expect(diagnostic.after.maxRoleQueries).toBeGreaterThan(diagnostic.before.maxRoleQueries);
+      expect(diagnostic.after.executionStrategy).toMatchObject({
+        effectiveMode: "canada_high_demand_deepened",
+        canadaHighDemandRole: true,
+      });
+    }
+  });
+
+  it("does not escalate non-target Canada profiles or US profiles", () => {
+    const canadaRecruiter = resolvePublicSearchExecutionOptions(
+      "balanced",
+      makeEnv(),
+      undefined,
+      "recruiter",
+      { country: "Canada" },
+    );
+    const usSoftware = resolvePublicSearchExecutionOptions(
+      "balanced",
+      makeEnv(),
+      undefined,
+      "software engineer",
+      { country: "United States" },
+    );
+
+    expect(canadaRecruiter).toMatchObject({
+      maxQueries: 24,
+      maxSources: 50,
+      maxLocationClauses: 8,
+      maxDirectJobs: 12,
+      maxRoleQueries: 12,
+      executionStrategy: expect.objectContaining({
+        effectiveMode: "balanced",
+        canadaHighDemandRole: false,
+      }),
+    });
+    expect(usSoftware).toMatchObject({
+      maxQueries: 24,
+      maxSources: 50,
+      maxLocationClauses: 8,
+      maxDirectJobs: 12,
+      maxRoleQueries: 12,
+      executionStrategy: expect.objectContaining({
+        effectiveMode: "balanced",
+        country: "United States",
+        canadaHighDemandRole: false,
+      }),
+    });
+  });
+
+  it("propagates Canada deeper-discovery diagnostics into public-search results", async () => {
+    const executionOptions = resolvePublicSearchExecutionOptions(
+      "balanced",
+      makeEnv(),
+      undefined,
+      "software engineer",
+      { country: "Canada" },
+    );
+    const result = await discoverSourcesFromPublicSearchDetailed(
+      {
+        title: "software engineer",
+        country: "Canada",
+        crawlMode: "balanced",
+      },
+      {
+        fetchImpl: vi.fn(async () => new Response("", { status: 404 })) as unknown as typeof fetch,
+        maxResultsPerQuery: 4,
+        maxSources: executionOptions.maxSources,
+        maxQueries: executionOptions.maxQueries,
+        maxGreenhouseLocationClauses: executionOptions.maxLocationClauses,
+        maxDirectJobs: executionOptions.maxDirectJobs,
+        maxRoleQueries: executionOptions.maxRoleQueries,
+        executionStrategy: executionOptions.executionStrategy,
+      },
+    );
+
+    expect(result.diagnostics).toMatchObject({
+      maxQueries: 48,
+      maxSources: 80,
+      locationClauseCount: expect.any(Number),
+      executionStrategy: expect.objectContaining({
+        effectiveMode: "canada_high_demand_deepened",
+        title: "software engineer",
+        country: "Canada",
+        canadaHighDemandRole: true,
+      }),
+    });
+    expect(result.diagnostics.locationClauseCount).toBeGreaterThan(8);
   });
 
   it("keeps deep mode at full defaults (96 queries, 120 sources)", () => {
@@ -2411,15 +2699,157 @@ describe("source capping with platform diversity", () => {
     });
 
     expect(inventory.length).toBeGreaterThanOrEqual(20);
+    const platformCounts = countInventoryByPlatform(inventory);
     expect(inventory[0]).toMatchObject({
       platform: "greenhouse",
       inventoryOrigin: "greenhouse_registry",
     });
+    expect(platformCounts).toMatchObject({
+      greenhouse: expect.any(Number),
+      lever: expect.any(Number),
+      ashby: expect.any(Number),
+      workday: expect.any(Number),
+    });
+    expect(platformCounts.greenhouse).toBeGreaterThanOrEqual(20);
+    expect(platformCounts.lever).toBeGreaterThan(10);
+    expect(platformCounts.ashby).toBeGreaterThan(10);
+    expect(platformCounts.workday).toBeGreaterThan(10);
     expect(inventory.some((record) => record.platform === "lever" && record.token === "figma")).toBe(
       true,
     );
     expect(inventory.some((record) => record.platform === "ashby" && record.token === "notion")).toBe(
       true,
+    );
+    expect(inventory.find((record) => record._id === "workday:rbc-rbcglobal1")).toMatchObject({
+      platform: "workday",
+      companyHint: "RBC",
+      url: "https://rbc.wd3.myworkdayjobs.com/RBCGLOBAL1",
+      apiUrl: "https://rbc.wd3.myworkdayjobs.com/wday/cxs/rbc/RBCGLOBAL1/jobs",
+      sourceMetadata: expect.objectContaining({
+        canadaRelevant: true,
+      }),
+    });
+  });
+
+  it("persists structured registry input for Lever, Ashby, and Workday with health metadata", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+
+    const inventory = await refreshSourceInventory({
+      repository,
+      now: new Date("2026-04-14T00:00:00.000Z"),
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        sourceRegistryEntries: [
+          {
+            platform: "lever",
+            token: "customlever",
+            company: "Custom Lever",
+            coverageTags: ["canada"],
+            companyMetadata: { headquartersCountry: "Canada" },
+            health: "degraded",
+            crawlPriority: 123,
+          },
+          {
+            platform: "ashby",
+            token: "customashby",
+            company: "Custom Ashby",
+            coverageTags: ["canada_possible"],
+            companyMetadata: { segment: "ai" },
+          },
+          {
+            platform: "workday",
+            tenant: "customtenant",
+            careerSitePath: "External",
+            canonicalListUrl: "https://customtenant.wd1.myworkdayjobs.com/External",
+            company: "Custom Workday",
+            coverageTags: ["canada"],
+            companyMetadata: { segment: "enterprise" },
+            health: "healthy",
+          },
+        ],
+      },
+    });
+
+    expect(inventory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          _id: "lever:customlever",
+          platform: "lever",
+          health: "degraded",
+          crawlPriority: 123,
+          sourceMetadata: expect.objectContaining({
+            company: "Custom Lever",
+            canadaRelevant: true,
+            companyMetadata: { headquartersCountry: "Canada" },
+          }),
+        }),
+        expect.objectContaining({
+          _id: "ashby:customashby",
+          platform: "ashby",
+          sourceMetadata: expect.objectContaining({
+            company: "Custom Ashby",
+            canadaRelevant: true,
+          }),
+        }),
+        expect.objectContaining({
+          _id: "workday:customtenant-external",
+          platform: "workday",
+          token: "customtenant:external",
+          careerSitePath: "External",
+          apiUrl: "https://customtenant.wd1.myworkdayjobs.com/wday/cxs/customtenant/External/jobs",
+          health: "healthy",
+          sourceMetadata: expect.objectContaining({
+            company: "Custom Workday",
+            canadaRelevant: true,
+          }),
+        }),
+      ]),
+    );
+  });
+
+  it("selects recurring ingestion sources across registered platforms with explainable counts", () => {
+    const inventory = buildSourceInventorySeeds({
+      greenhouseBoardTokens: [],
+      leverSiteTokens: [],
+      ashbyBoardTokens: [],
+      sourceRegistryEntries: [],
+      companyPageSources: [],
+    });
+    const plan = planRecurringInventorySourceSelection({
+      inventory,
+      providers: createDefaultProviders(),
+      now: new Date("2026-04-14T00:00:00.000Z"),
+      maxSources: 8,
+      intervalMs: 600_000,
+    });
+
+    expect(plan.selectedRecords.length).toBe(8);
+    expect(plan.diagnostics.inventoryByPlatform).toMatchObject({
+      greenhouse: expect.any(Number),
+      lever: expect.any(Number),
+      ashby: expect.any(Number),
+      workday: expect.any(Number),
+    });
+    expect(plan.diagnostics.eligibleByPlatform).toMatchObject({
+      greenhouse: expect.any(Number),
+      lever: expect.any(Number),
+      ashby: expect.any(Number),
+      workday: expect.any(Number),
+    });
+    expect(plan.diagnostics.selectedByPlatform).toMatchObject({
+      greenhouse: expect.any(Number),
+      lever: expect.any(Number),
+      ashby: expect.any(Number),
+      workday: expect.any(Number),
+    });
+    expect(Object.keys(plan.diagnostics.skippedByPlatformReason)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("greenhouse:capacity_deprioritized"),
+        expect.stringContaining("lever:capacity_deprioritized"),
+      ]),
     );
   });
 
@@ -2654,6 +3084,10 @@ describe("source capping with platform diversity", () => {
           title: "product manager",
           country: "Canada",
         }),
+        expect.objectContaining({
+          title: "technical product manager",
+          country: "Canada",
+        }),
       ]),
     );
     expect(
@@ -2666,6 +3100,11 @@ describe("source capping with platform diversity", () => {
         expect.objectContaining({ country: "Canada", city: "Montreal", state: "QC" }),
         expect.objectContaining({ country: "Canada", city: "Waterloo", state: "ON" }),
         expect.objectContaining({ country: "Canada", city: "Ottawa", state: "ON" }),
+        expect.objectContaining({ country: "Canada", city: "Calgary", state: "AB" }),
+        expect.objectContaining({ country: "Canada", state: "ON" }),
+        expect.objectContaining({ country: "Canada", state: "BC" }),
+        expect.objectContaining({ country: "Canada", state: "QC" }),
+        expect.objectContaining({ country: "Canada", state: "AB" }),
       ]),
     );
   });
@@ -2764,6 +3203,92 @@ describe("source capping with platform diversity", () => {
         }),
       ]),
     );
+  });
+
+  it("lets targeted Canada recurring expansion discover more sources than the generic per-search floor", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    let queryIndex = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      if (url.startsWith("https://www.bing.com/search")) {
+        const links = Array.from({ length: 4 }, () => {
+          const token = `canadadeep${queryIndex}`;
+          queryIndex += 1;
+          return `https://job-boards.greenhouse.io/${token}/jobs/${9000000 + queryIndex}?gh_jid=${9000000 + queryIndex}`;
+        });
+
+        return new Response(
+          `
+            <rss>
+              <channel>
+                ${links.map((link) => `<item><link>${link}</link></item>`).join("")}
+              </channel>
+            </rss>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/rss+xml",
+            },
+          },
+        );
+      }
+
+      if (url.startsWith("https://html.duckduckgo.com/html/")) {
+        return new Response("<html><body></body></html>", {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        });
+      }
+
+      return new Response("", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const result = await expandSourceInventory({
+      repository,
+      now: new Date("2026-04-15T00:00:00.000Z"),
+      fetchImpl,
+      intervalMs: 600_000,
+      maxSources: 1,
+      maxExpansionSearches: 1,
+      refreshedInventory: [],
+      expansionFilters: [
+        {
+          title: "software engineer",
+          country: "Canada",
+          crawlMode: "balanced",
+        },
+      ],
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
+        PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 10,
+        PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 120,
+        PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 96,
+        PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: 4,
+        GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 32,
+      },
+    });
+
+    expect(result.diagnostics.candidateSources).toBe(16);
+    expect(result.diagnostics.newSourcesAdded).toBe(16);
+    expect(result.diagnostics.searchDiagnostics[0]?.publicSearch).toMatchObject({
+      maxQueries: 48,
+      maxSources: 16,
+      locationClauseCount: expect.any(Number),
+      executionStrategy: expect.objectContaining({
+        effectiveMode: "canada_high_demand_deepened",
+        canadaHighDemandRole: true,
+      }),
+    });
+    expect(result.diagnostics.searchDiagnostics[0]?.publicSearch?.locationClauseCount).toBeGreaterThan(8);
   });
 
   it("grows persistent inventory with newly recovered Ashby, Lever, and Workday public-search sources", async () => {

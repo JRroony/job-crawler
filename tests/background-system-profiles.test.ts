@@ -15,12 +15,12 @@ describe("background system search profiles", () => {
     const families = listBackgroundSystemRoleFamilies();
     const geographies = listBackgroundSystemGeographies();
 
-    expect(profiles.length).toBeGreaterThanOrEqual(800);
-    expect(profiles.length).toBeLessThan(1_000);
+    expect(profiles.length).toBeGreaterThanOrEqual(1_000);
+    expect(profiles.length).toBeLessThan(1_400);
     expect(profiles.length).toBeLessThan(
       families.reduce((count, family) => count + family.variants.length, 0) *
         geographies.length *
-        0.4,
+        0.5,
     );
 
     expect(new Set(profiles.map((profile) => profile.id)).size).toBe(profiles.length);
@@ -29,6 +29,19 @@ describe("background system search profiles", () => {
         profiles.map((profile) =>
           [
             profile.filters.title,
+            profile.filters.country ?? "",
+            profile.filters.state ?? "",
+            profile.filters.city ?? "",
+            profile.filters.platforms?.join(",") ?? "",
+          ].join("|"),
+        ),
+      ).size,
+    ).toBe(profiles.length);
+    expect(
+      new Set(
+        profiles.map((profile) =>
+          [
+            normalizeNearDuplicateTitle(profile.queryTitleVariant),
             profile.filters.country ?? "",
             profile.filters.state ?? "",
             profile.filters.city ?? "",
@@ -60,6 +73,7 @@ describe("background system search profiles", () => {
       "applied_scientist",
       "research_scientist",
       "product_manager",
+      "technical_product_manager",
       "program_manager",
       "technical_program_manager",
       "qa_engineer",
@@ -102,13 +116,82 @@ describe("background system search profiles", () => {
       );
     }
 
-    for (const city of ["Seattle", "Bellevue", "Redmond", "San Francisco", "San Jose", "New York City", "Austin", "Boston", "Toronto", "Vancouver", "Montreal"]) {
+    for (const province of ["ON", "BC", "QC", "AB"]) {
+      expect(profiles).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            geography: expect.objectContaining({ country: "Canada", state: province, scope: "province" }),
+            filters: expect.objectContaining({ country: "Canada", state: province }),
+          }),
+        ]),
+      );
+    }
+
+    for (const city of ["Seattle", "Bellevue", "Redmond", "San Francisco", "San Jose", "New York City", "Austin", "Boston", "Toronto", "Waterloo", "Ottawa", "Vancouver", "Montreal", "Calgary"]) {
       expect(profiles).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ filters: expect.objectContaining({ city }) }),
         ]),
       );
     }
+  });
+
+  it("generates broad Canada coverage without requiring a full Cartesian expansion", () => {
+    const profiles = listBackgroundSystemSearchProfiles();
+    const canadaProfiles = profiles.filter((profile) => profile.filters.country === "Canada");
+    const canadaCountryProfiles = canadaProfiles.filter(
+      (profile) => !profile.filters.state && !profile.filters.city,
+    );
+    const canadaProvinceProfiles = canadaProfiles.filter(
+      (profile) => profile.geography.scope === "province",
+    );
+    const canadaCityProfiles = canadaProfiles.filter(
+      (profile) => profile.geography.scope === "city",
+    );
+
+    expect(canadaProfiles.length).toBeGreaterThanOrEqual(500);
+    expect(canadaCountryProfiles.length).toBeGreaterThanOrEqual(70);
+    expect(canadaProvinceProfiles.length).toBeGreaterThanOrEqual(250);
+    expect(canadaCityProfiles.length).toBeGreaterThanOrEqual(150);
+
+    const canadaFamilies = new Set(
+      canadaProfiles.map((profile) => profile.canonicalJobFamily),
+    );
+    for (const family of [
+      "software_engineer",
+      "data_analyst",
+      "product_manager",
+      "technical_product_manager",
+      "machine_learning_engineer",
+      "ai_engineer",
+      "business_analyst",
+    ]) {
+      expect(canadaFamilies.has(family)).toBe(true);
+    }
+    expect(canadaProfiles).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          canonicalJobFamily: "software_engineer",
+          filters: expect.objectContaining({ title: "software engineer", country: "Canada" }),
+        }),
+        expect.objectContaining({
+          canonicalJobFamily: "data_analyst",
+          filters: expect.objectContaining({ title: "data analyst", country: "Canada" }),
+        }),
+        expect.objectContaining({
+          canonicalJobFamily: "product_manager",
+          filters: expect.objectContaining({ title: "product manager", country: "Canada", state: "ON", city: "Toronto" }),
+        }),
+        expect.objectContaining({
+          canonicalJobFamily: "machine_learning_engineer",
+          filters: expect.objectContaining({ title: "machine learning engineer", country: "Canada", state: "BC", city: "Vancouver" }),
+        }),
+        expect.objectContaining({
+          canonicalJobFamily: "ai_engineer",
+          filters: expect.objectContaining({ title: "ai engineer", country: "Canada", state: "ON", city: "Toronto" }),
+        }),
+      ]),
+    );
   });
 
   it("rotates fairly across cycles while respecting the per-cycle profile budget", () => {
@@ -235,3 +318,16 @@ describe("background system search profiles", () => {
     expect(selected[0]?.id).not.toBe(profile.id);
   });
 });
+
+function normalizeNearDuplicateTitle(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[-_/]+/g, " ")
+    .replace(/\bfront\s*end\b/g, "frontend")
+    .replace(/\bback\s*end\b/g, "backend")
+    .replace(/\bfull\s*stack\b/g, "fullstack")
+    .replace(/\bdev\s*ops\b/g, "devops")
+    .replace(/\bpre\s*sales\b/g, "presales")
+    .replace(/\s+/g, " ");
+}

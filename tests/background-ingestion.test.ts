@@ -965,6 +965,112 @@ describe("recurring background ingestion", () => {
     expect(Date.parse(String(inventory[0]?.nextEligibleAt))).toBeGreaterThan(secondRunAt.getTime());
   });
 
+  it("persists Canada-oriented jobs from multi-platform recurring inventory selection", async () => {
+    const db = new MongoLikeNullDb();
+    const repository = new JobCrawlerRepository(db);
+    const intervalMs = 600_000;
+    const scheduleBaseMs = Date.parse("2026-04-15T00:00:00.000Z");
+    const canadaProfileIndex = Array.from({ length: 1000 }, (_, cycle) => cycle).find((cycle) => {
+      const profile = selectBackgroundSystemSearchProfiles({
+        now: new Date(scheduleBaseMs + cycle * intervalMs),
+        intervalMs,
+        maxProfiles: 1,
+      })[0];
+      return profile?.filters.country === "Canada";
+    });
+    if (typeof canadaProfileIndex !== "number") {
+      throw new Error("Expected at least one Canada background ingestion profile.");
+    }
+    const now = new Date(scheduleBaseMs + canadaProfileIndex * intervalMs);
+
+    await repository.upsertSourceInventory([
+      createPlatformInventoryRecord({
+        platform: "greenhouse",
+        url: "https://boards.greenhouse.io/canadagreenhouse",
+        token: "canadagreenhouse",
+        companyHint: "Canada Greenhouse",
+      }),
+      createPlatformInventoryRecord({
+        platform: "lever",
+        url: "https://jobs.lever.co/canadalever",
+        token: "canadalever",
+        companyHint: "Canada Lever",
+      }),
+      createPlatformInventoryRecord({
+        platform: "ashby",
+        url: "https://jobs.ashbyhq.com/canadaashby",
+        token: "canadaashby",
+        companyHint: "Canada Ashby",
+      }),
+      createPlatformInventoryRecord({
+        platform: "workday",
+        url: "https://canadaworkday.wd1.myworkdayjobs.com/External",
+        token: "canadaworkday:external",
+        companyHint: "Canada Workday",
+      }),
+    ]);
+
+    const providers = (["greenhouse", "lever", "ashby", "workday"] as const).map((platform) =>
+      createStubProvider(platform, async (_context, sources) => ({
+        provider: platform,
+        status: "success",
+        sourceCount: sources.length,
+        fetchedCount: sources.length,
+        matchedCount: sources.length,
+        warningCount: 0,
+        jobs: sources.map((source) =>
+          createProviderJob({
+            title: "Software Engineer",
+            company: source.companyHint ?? platform,
+            sourcePlatform: platform,
+            sourceJobId: `${platform}-canada-role`,
+            country: "Canada",
+            locationText: "Toronto, ON, Canada",
+          }),
+        ),
+      })),
+    );
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers,
+      now,
+      maxSources: 4,
+      schedulingIntervalMs: intervalMs,
+      runTimeoutMs: 2_000,
+      refreshInventory: () =>
+        repository.listSourceInventory(["greenhouse", "lever", "ashby", "workday"]),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected recurring ingestion to start.");
+    }
+
+    const crawlRun = await waitForRunCompletion(repository, triggered.crawlRunId);
+    const storedJobs = db.snapshot<Record<string, unknown>>(collectionNames.jobs);
+    const storedPlatforms = new Set(storedJobs.map((job) => job.sourcePlatform));
+
+    expect(crawlRun.diagnostics.systemProfile?.filters.country).toBe("Canada");
+    expect(crawlRun.diagnostics.inventoryScheduling).toMatchObject({
+      selectedSources: 4,
+      inventoryByPlatform: {
+        greenhouse: 1,
+        lever: 1,
+        ashby: 1,
+        workday: 1,
+      },
+      selectedByPlatform: {
+        greenhouse: 1,
+        lever: 1,
+        ashby: 1,
+        workday: 1,
+      },
+    });
+    expect(storedPlatforms).toEqual(new Set(["greenhouse", "lever", "ashby", "workday"]));
+    expect(storedJobs.every((job) => job.country === "Canada")).toBe(true);
+  });
+
   it("recovers stale recurring runs and starts a fresh crawl without losing durable control", async () => {
     const repository = new JobCrawlerRepository(new MongoLikeNullDb());
     const now = new Date("2026-04-15T12:00:00.000Z");
@@ -1182,30 +1288,34 @@ function createProviderJob(overrides: {
   title: string;
   sourceJobId: string;
   company?: string;
-  sourcePlatform?: "greenhouse";
+  sourcePlatform?: "greenhouse" | "lever" | "ashby" | "workday";
+  country?: string;
+  locationText?: string;
   normalizedTitle?: string;
   titleNormalized?: string;
 }) {
   const company = overrides.company ?? "OpenAI";
   const sourcePlatform = overrides.sourcePlatform ?? "greenhouse";
-  const sourceUrl = `https://boards.greenhouse.io/openai/jobs/${overrides.sourceJobId}`;
+  const country = overrides.country ?? "United States";
+  const locationText = overrides.locationText ?? "Remote - United States";
+  const sourceUrl = `https://example.com/${sourcePlatform}/jobs/${overrides.sourceJobId}`;
 
   return {
     title: overrides.title,
     normalizedTitle: overrides.normalizedTitle,
     titleNormalized: overrides.titleNormalized,
     company,
-    country: "United States",
-    locationText: "Remote - United States",
+    country,
+    locationText,
     resolvedLocation: {
-      country: "United States",
-      isRemote: true,
-      isUnitedStates: true,
+      country,
+      isRemote: locationText.toLowerCase().includes("remote"),
+      isUnitedStates: country === "United States",
       confidence: "high" as const,
       evidence: [
         {
           source: "remote_hint" as const,
-          value: "Remote - United States",
+          value: locationText,
         },
       ],
     },
@@ -1221,6 +1331,36 @@ function createProviderJob(overrides: {
       greenhouseBoardToken: "openai",
     },
   };
+}
+
+function createPlatformInventoryRecord(overrides: {
+  platform: "greenhouse" | "lever" | "ashby" | "workday";
+  url: string;
+  token: string;
+  companyHint: string;
+}) {
+  return toSourceInventoryRecord(
+    classifySourceCandidate({
+      url: overrides.url,
+      token: overrides.token,
+      companyHint: overrides.companyHint,
+      confidence: "high",
+      discoveryMethod: "platform_registry",
+    }),
+    {
+      now: "2026-04-10T00:00:00.000Z",
+      inventoryOrigin:
+        overrides.platform === "greenhouse" ? "greenhouse_registry" : "platform_registry",
+      inventoryRank:
+        overrides.platform === "greenhouse"
+          ? 0
+          : overrides.platform === "lever"
+            ? 10_000
+            : overrides.platform === "ashby"
+              ? 20_000
+              : 30_000,
+    },
+  );
 }
 
 function createInventoryRecord(overrides: {

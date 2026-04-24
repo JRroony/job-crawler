@@ -1205,6 +1205,10 @@ export class JobCrawlerRepository {
           failureCount: parsedExisting.failureCount,
           consecutiveFailures: parsedExisting.consecutiveFailures,
           lastFailureReason: parsedExisting.lastFailureReason ?? record.lastFailureReason,
+          sourceMetadata: {
+            ...parsedExisting.sourceMetadata,
+            ...record.sourceMetadata,
+          },
           lastSeenAt: record.lastSeenAt,
           lastRefreshedAt: record.lastRefreshedAt,
           lastCrawledAt: parsedExisting.lastCrawledAt,
@@ -2628,6 +2632,9 @@ function normalizeStoredSourceInventoryFields(document: Record<string, unknown>)
     sitePath: normalizeOptionalDocumentString(normalizedDocument.sitePath),
     careerSitePath: normalizeOptionalDocumentString(normalizedDocument.careerSitePath),
     jobUrl: normalizeOptionalDocumentString(normalizedDocument.jobUrl),
+    sourceMetadata: isRecord(normalizedDocument.sourceMetadata)
+      ? normalizedDocument.sourceMetadata
+      : {},
     status: normalizedDocument.status,
     health: normalizedDocument.health,
     crawlPriority: normalizedDocument.crawlPriority,

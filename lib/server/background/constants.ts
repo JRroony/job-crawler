@@ -9,7 +9,7 @@ const dayMs = 24 * hourMs;
 export type SystemSearchProfileGeography = {
   id: string;
   label: string;
-  scope: "country" | "state" | "city";
+  scope: "country" | "state" | "province" | "city";
   country: string;
   state?: string;
   city?: string;
@@ -171,51 +171,55 @@ const roleFamilyTemplates: readonly RoleFamilyTemplate[] = [
   ]),
   roleFamily("product_manager", "Product Manager", 42, [
     variant("product manager", 0),
-    variant("technical product manager", 1),
     variant("product owner", 1),
     variant("platform product manager", 2),
   ]),
-  roleFamily("program_manager", "Program Manager", 44, [
+  roleFamily("technical_product_manager", "Technical Product Manager", 44, [
+    variant("technical product manager", 0),
+    variant("product manager technical", 1),
+    variant("platform product manager", 1),
+  ]),
+  roleFamily("program_manager", "Program Manager", 46, [
     variant("program manager", 0),
     variant("operations program manager", 1),
     variant("business program manager", 1),
   ]),
-  roleFamily("technical_program_manager", "Technical Program Manager", 46, [
+  roleFamily("technical_program_manager", "Technical Program Manager", 48, [
     variant("technical program manager", 0),
     variant("engineering program manager", 1),
     variant("technical project manager", 1),
   ]),
-  roleFamily("qa_engineer", "QA Engineer", 48, [
+  roleFamily("qa_engineer", "QA Engineer", 50, [
     variant("qa engineer", 0),
     variant("quality assurance engineer", 1),
     variant("sdet", 1),
     variant("test automation engineer", 2),
   ]),
-  roleFamily("security_engineer", "Security Engineer", 50, [
+  roleFamily("security_engineer", "Security Engineer", 52, [
     variant("security engineer", 0),
     variant("application security engineer", 1),
     variant("cloud security engineer", 1),
     variant("product security engineer", 2),
   ]),
-  roleFamily("solutions_engineer", "Solutions Engineer", 52, [
+  roleFamily("solutions_engineer", "Solutions Engineer", 54, [
     variant("solutions engineer", 0),
     variant("solution architect", 1),
     variant("customer engineer", 1),
     variant("implementation engineer", 2),
   ]),
-  roleFamily("customer_success_manager", "Customer Success Manager", 54, [
+  roleFamily("customer_success_manager", "Customer Success Manager", 56, [
     variant("customer success manager", 0),
     variant("client success manager", 1),
     variant("technical account manager", 1),
     variant("customer success engineer", 2),
   ]),
-  roleFamily("sales_engineer", "Sales Engineer", 56, [
+  roleFamily("sales_engineer", "Sales Engineer", 58, [
     variant("sales engineer", 0),
     variant("solutions consultant", 1),
     variant("pre sales engineer", 1),
     variant("technical sales engineer", 2),
   ]),
-  roleFamily("technical_writer", "Technical Writer", 58, [
+  roleFamily("technical_writer", "Technical Writer", 60, [
     variant("technical writer", 0),
     variant("documentation writer", 1),
     variant("documentation engineer", 1),
@@ -238,6 +242,10 @@ const geographyTemplates: readonly SystemSearchProfileGeography[] = [
   stateGeography("us_nc", "North Carolina", "NC", 38),
   stateGeography("us_co", "Colorado", "CO", 40),
   stateGeography("us_fl", "Florida", "FL", 42),
+  provinceGeography("ca_on", "Ontario", "ON", 44, [0, 1]),
+  provinceGeography("ca_bc", "British Columbia", "BC", 46, [0, 1]),
+  provinceGeography("ca_qc", "Quebec", "QC", 48, [0, 1]),
+  provinceGeography("ca_ab", "Alberta", "AB", 49, [0, 1]),
   cityGeography("us_seattle_wa", "Seattle, WA", "United States", "WA", "Seattle", 50),
   cityGeography("us_bellevue_wa", "Bellevue, WA", "United States", "WA", "Bellevue", 52),
   cityGeography("us_redmond_wa", "Redmond, WA", "United States", "WA", "Redmond", 54),
@@ -623,6 +631,24 @@ function stateGeography(
   };
 }
 
+function provinceGeography(
+  id: string,
+  label: string,
+  provinceCode: string,
+  priorityOffset: number,
+  variantTiers: readonly number[],
+): SystemSearchProfileGeography {
+  return {
+    id,
+    label,
+    scope: "province",
+    country: "Canada",
+    state: provinceCode,
+    priorityOffset,
+    variantTiers,
+  };
+}
+
 function cityGeography(
   id: string,
   label: string,
@@ -729,7 +755,16 @@ function compareStringArrays(left?: readonly string[], right?: readonly string[]
 }
 
 function normalizeProfileKey(value?: string) {
-  return (value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  return (value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[-_/]+/g, " ")
+    .replace(/\bfront\s*end\b/g, "frontend")
+    .replace(/\bback\s*end\b/g, "backend")
+    .replace(/\bfull\s*stack\b/g, "fullstack")
+    .replace(/\bdev\s*ops\b/g, "devops")
+    .replace(/\bpre\s*sales\b/g, "presales")
+    .replace(/\s+/g, " ");
 }
 
 function slugify(value: string) {
@@ -741,6 +776,8 @@ function geographyScopeRank(scope: SystemSearchProfileGeography["scope"]) {
     case "country":
       return 0;
     case "state":
+      return 1;
+    case "province":
       return 1;
     case "city":
       return 2;

@@ -40,6 +40,7 @@ type PublicSearchOptions = {
   queryConcurrency?: number;
   maxGreenhouseLocationClauses?: number;
   maxDirectJobs?: number;
+  executionStrategy?: PublicSearchDiscoveryDiagnostics["executionStrategy"];
   timeoutMs?: number;
 };
 
@@ -216,7 +217,7 @@ export async function discoverSourcesFromPublicSearchDetailed(
     maxGreenhouseLocationClauses: options.maxGreenhouseLocationClauses,
     maxRoleQueries: options.maxRoleQueries,
   });
-  const diagnostics = createEmptyPublicSearchDiagnostics(plan);
+  const diagnostics = createEmptyPublicSearchDiagnostics(plan, options.executionStrategy);
   if (plan.queries.length === 0) {
     diagnostics.stopReason = "no_queries";
     return {
@@ -562,7 +563,7 @@ function buildPlatformLocationPlan(
 
   if (locationPlan.intent.kind === "none" || locationPlan.intent.kind === "non_us") {
     const countryPlan = buildSupportedCountryDiscoveryLocationClauses(filters, {
-      maxClauses: Math.min(maxLocationClauses, 24),
+      maxClauses: Math.min(maxLocationClauses, 32),
     });
 
     if (countryPlan.intent.kind !== "none") {
@@ -924,8 +925,10 @@ function normalizeCandidateUrl(value: string) {
 
 function createEmptyPublicSearchDiagnostics(
   plan: PublicSearchQueryPlan,
+  executionStrategy?: PublicSearchDiscoveryDiagnostics["executionStrategy"],
 ): PublicSearchDiscoveryDiagnostics {
   return {
+    executionStrategy,
     generatedQueries: plan.queries.length,
     executedQueries: 0,
     skippedQueries: plan.queries.length,

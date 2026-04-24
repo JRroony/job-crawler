@@ -3,6 +3,7 @@ import "server-only";
 import { z } from "zod";
 
 import { resolveGreenhouseRegistryTokens } from "@/lib/server/discovery/greenhouse-registry";
+import { parseSourceRegistryConfig } from "@/lib/server/discovery/source-registry";
 import { companyPageSourceConfigSchema } from "@/lib/types";
 
 const envSchema = z.object({
@@ -14,6 +15,7 @@ const envSchema = z.object({
   GREENHOUSE_BOARD_REGISTRY_APPEND: z.string().default(""),
   LEVER_SITE_TOKENS: z.string().default("figma,plaid,robinhood"),
   ASHBY_BOARD_TOKENS: z.string().default("notion,ramp,replit"),
+  SOURCE_REGISTRY_CONFIG: z.string().optional(),
   COMPANY_PAGE_SOURCE_CONFIG: z.string().optional(),
   PUBLIC_SEARCH_DISCOVERY_ENABLED: z
     .enum(["true", "false"])
@@ -71,6 +73,7 @@ export function getEnv() {
         process.env.GREENHOUSE_BOARD_REGISTRY_APPEND ?? "",
       LEVER_SITE_TOKENS: process.env.LEVER_SITE_TOKENS ?? "figma,plaid,robinhood",
       ASHBY_BOARD_TOKENS: process.env.ASHBY_BOARD_TOKENS ?? "notion,ramp,replit",
+      SOURCE_REGISTRY_CONFIG: process.env.SOURCE_REGISTRY_CONFIG,
       COMPANY_PAGE_SOURCE_CONFIG: process.env.COMPANY_PAGE_SOURCE_CONFIG,
       PUBLIC_SEARCH_DISCOVERY_ENABLED:
         process.env.PUBLIC_SEARCH_DISCOVERY_ENABLED ?? "true",
@@ -117,6 +120,7 @@ export function getEnv() {
     ),
     leverSiteTokens: tokenize(cachedEnv.LEVER_SITE_TOKENS),
     ashbyBoardTokens: tokenize(cachedEnv.ASHBY_BOARD_TOKENS),
+    sourceRegistryEntries: parseSourceRegistryConfig(cachedEnv.SOURCE_REGISTRY_CONFIG),
     companyPageSources: parseCompanyPageConfig(cachedEnv.COMPANY_PAGE_SOURCE_CONFIG),
   };
 }

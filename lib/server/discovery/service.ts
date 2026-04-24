@@ -10,6 +10,7 @@ import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import { expandCompanyPageSources } from "@/lib/server/discovery/company-page-expansion";
 import { lookupGreenhouseCompanyHint } from "@/lib/server/discovery/greenhouse-registry";
+import type { SourceRegistryEntryInput } from "@/lib/server/discovery/source-registry";
 import {
   buildSourceInventorySeeds,
   inventoryOriginFromDiscoveryMethod,
@@ -42,7 +43,9 @@ type DiscoveryEnvSnapshot = Pick<
   | "PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES"
   | "PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY"
   | "GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES"
->;
+> & {
+  sourceRegistryEntries?: SourceRegistryEntryInput[];
+};
 
 type DiscoveryRuntime = {
   repository?: JobCrawlerRepository;
@@ -251,6 +254,7 @@ export async function discoverSupplementalSourcesDetailed(
     input.env,
     input.filters.platforms,
     input.filters.title,
+    input.filters,
   );
   const publicSearchSkippedReason = input.env.PUBLIC_SEARCH_DISCOVERY_ENABLED
     ? resolvePublicSearchSkippedReason(
@@ -276,6 +280,7 @@ export async function discoverSupplementalSourcesDetailed(
         maxGreenhouseLocationClauses: publicSearchOptions.maxLocationClauses,
         maxDirectJobs: publicSearchOptions.maxDirectJobs,
         maxRoleQueries: publicSearchOptions.maxRoleQueries,
+        executionStrategy: publicSearchOptions.executionStrategy,
       })
     : {
         sources: [] as DiscoveredSource[],
@@ -359,6 +364,7 @@ export function resolvePublicSearchExecutionOptions(
   env: DiscoveryEnvSnapshot,
   platforms?: readonly string[],
   title?: string,
+  filters?: Pick<SearchFilters, "country" | "state" | "city">,
 ) {
   const greenhouseFirstOnly =
     Array.isArray(platforms) &&
@@ -374,12 +380,54 @@ export function resolvePublicSearchExecutionOptions(
     maxRoleQueries: 18,
   };
 
+  const titleAnalysis = analyzeTitle(normalizeTitleText(title));
+  const sparseAiScience = isSparseAiScienceSearch(title, titleAnalysis);
+  const canadaHighDemand = resolveCanadaHighDemandDiscoveryProfile({
+    title,
+    filters,
+    titleFamily: titleAnalysis.family,
+    titleConcept: titleAnalysis.primaryConceptId,
+  });
+  const requestedMode = crawlMode ?? "fast";
+  const baseStrategy = {
+    requestedMode,
+    title,
+    country: filters?.country,
+    state: filters?.state,
+    city: filters?.city,
+    titleFamily: titleAnalysis.family,
+    titleConcept: titleAnalysis.primaryConceptId,
+    canadaHighDemandRole: canadaHighDemand.matches,
+  };
+
   if (crawlMode === "deep") {
-    return base;
+    return {
+      ...base,
+      executionStrategy: {
+        ...baseStrategy,
+        effectiveMode: "deep",
+        reason: "Requested crawl mode is deep, so public search uses the full configured discovery budget.",
+      },
+    };
+  }
+
+  if (crawlMode === "balanced" && canadaHighDemand.matches) {
+    return {
+      ...base,
+      maxQueries: Math.min(base.maxQueries, 48),
+      maxSources: Math.min(base.maxSources, 80),
+      maxLocationClauses: Math.min(base.maxLocationClauses, 20),
+      maxDirectJobs: Math.min(base.maxDirectJobs, 18),
+      maxRoleQueries: 18,
+      executionStrategy: {
+        ...baseStrategy,
+        effectiveMode: "canada_high_demand_deepened",
+        reason: canadaHighDemand.reason,
+      },
+    };
   }
 
   if (crawlMode === "balanced") {
-    const sparseAiScience = isSparseAiScienceSearch(title);
     return {
       ...base,
       maxQueries: Math.min(base.maxQueries, sparseAiScience ? 32 : 24),
@@ -387,11 +435,17 @@ export function resolvePublicSearchExecutionOptions(
       maxLocationClauses: Math.min(base.maxLocationClauses, sparseAiScience ? 20 : 8),
       maxDirectJobs: Math.min(base.maxDirectJobs, sparseAiScience ? 16 : 12),
       maxRoleQueries: sparseAiScience ? 16 : 12,
+      executionStrategy: {
+        ...baseStrategy,
+        effectiveMode: "balanced",
+        reason: sparseAiScience
+          ? "Balanced mode uses a modest sparse AI/science uplift while staying below deep-mode caps."
+          : "Balanced mode uses conservative public-search caps for general profiles.",
+      },
     };
   }
 
   // "fast" mode (default) — aggressive caps to finish in ~15-30 seconds
-  const sparseAiScience = isSparseAiScienceSearch(title);
   if (greenhouseFirstOnly) {
     return {
       ...base,
@@ -400,6 +454,13 @@ export function resolvePublicSearchExecutionOptions(
       maxLocationClauses: Math.min(base.maxLocationClauses, sparseAiScience ? 18 : 4),
       maxDirectJobs: Math.min(base.maxDirectJobs, sparseAiScience ? 10 : 6),
       maxRoleQueries: sparseAiScience ? 12 : 8,
+      executionStrategy: {
+        ...baseStrategy,
+        effectiveMode: "fast",
+        reason: sparseAiScience
+          ? "Fast Greenhouse-only discovery uses a small sparse AI/science uplift."
+          : "Fast Greenhouse-only discovery uses the smallest direct-job and location budgets.",
+      },
     };
   }
 
@@ -410,16 +471,24 @@ export function resolvePublicSearchExecutionOptions(
     maxLocationClauses: Math.min(base.maxLocationClauses, sparseAiScience ? 18 : 4),
     maxDirectJobs: Math.min(base.maxDirectJobs, sparseAiScience ? 12 : 8),
     maxRoleQueries: sparseAiScience ? 12 : 8,
+    executionStrategy: {
+      ...baseStrategy,
+      effectiveMode: "fast",
+      reason: sparseAiScience
+        ? "Fast discovery uses a small sparse AI/science uplift."
+        : "Fast discovery uses conservative public-search caps.",
+    },
   };
 }
 
-function isSparseAiScienceSearch(title?: string) {
+function isSparseAiScienceSearch(
+  title?: string,
+  analysis = analyzeTitle(normalizeTitleText(title)),
+) {
   const normalized = normalizeTitleText(title);
   if (!normalized) {
     return false;
   }
-
-  const analysis = analyzeTitle(normalized);
 
   return (
     analysis.family === "ai_ml_science" ||
@@ -427,6 +496,78 @@ function isSparseAiScienceSearch(title?: string) {
       normalized,
     )
   );
+}
+
+function resolveCanadaHighDemandDiscoveryProfile(input: {
+  title?: string;
+  filters?: Pick<SearchFilters, "country" | "state" | "city">;
+  titleFamily?: string;
+  titleConcept?: string;
+}) {
+  const country = normalizeDiscoveryText(input.filters?.country);
+  const city = normalizeDiscoveryText(input.filters?.city);
+  const title = normalizeTitleText(input.title);
+  const isCanada =
+    country === "canada" ||
+    city === "toronto" ||
+    city === "vancouver" ||
+    city === "montreal" ||
+    city === "calgary" ||
+    /\bcanada\b/.test(title);
+
+  if (!isCanada) {
+    return {
+      matches: false,
+      reason: "Profile is not Canada-scoped, so Canada high-demand discovery caps do not apply.",
+    };
+  }
+
+  const conceptMatches =
+    input.titleConcept === "software_engineer" ||
+    input.titleConcept === "data_analyst" ||
+    input.titleConcept === "business_analyst" ||
+    input.titleConcept === "product_manager" ||
+    input.titleConcept === "technical_product_manager" ||
+    input.titleConcept === "machine_learning_engineer" ||
+    input.titleConcept === "ai_engineer" ||
+    input.titleConcept === "applied_scientist" ||
+    input.titleConcept === "research_scientist";
+  const phraseMatches =
+    /\b(?:software engineer|software developer|software development engineer|data analyst|business analyst|product manager|machine learning engineer|ml engineer|ai engineer|artificial intelligence engineer|applied scientist|research scientist)\b/.test(
+      title,
+    );
+  const familyMatches =
+    input.titleFamily === "ai_ml_science" &&
+    /\b(?:machine learning|ml|ai|artificial intelligence|applied scientist|research scientist)\b/.test(
+      title,
+    );
+
+  if (!conceptMatches && !phraseMatches && !familyMatches) {
+    return {
+      matches: false,
+      reason: "Canada profile is outside the configured high-demand role families, so balanced or fast caps remain in force.",
+    };
+  }
+
+  return {
+    matches: true,
+    reason:
+      "Canada high-demand role profile matched; using partially deep public-search budgets to improve lower-density Canada source recall without full deep-mode caps.",
+  };
+}
+
+function isCanadaHighDemandDiscoveryFilters(filters: SearchFilters) {
+  const analysis = analyzeTitle(normalizeTitleText(filters.title));
+  return resolveCanadaHighDemandDiscoveryProfile({
+    title: filters.title,
+    filters,
+    titleFamily: analysis.family,
+    titleConcept: analysis.primaryConceptId,
+  }).matches;
+}
+
+function normalizeDiscoveryText(value?: string) {
+  return (value ?? "").trim().toLowerCase();
 }
 
 function resolvePublicSearchSkippedReason(
@@ -497,6 +638,9 @@ export async function refreshSourceInventory(input: {
   ]);
 
   console.info("[discovery:inventory-refresh]", {
+    existingPlatformCounts: summarizeInventoryRecordPlatformCounts(existingRecords),
+    seededPlatformCounts: summarizeInventoryRecordPlatformCounts(seededRecords),
+    expandedPlatformCounts: summarizeInventoryRecordPlatformCounts(expandedRecords),
     persistedCount: persisted.length,
     platformCounts: persisted.reduce<Record<string, number>>((counts, record) => {
       counts[record.platform] = (counts[record.platform] ?? 0) + 1;
@@ -506,6 +650,7 @@ export async function refreshSourceInventory(input: {
     leverCount: persisted.filter((record) => record.platform === "lever").length,
     ashbyCount: persisted.filter((record) => record.platform === "ashby").length,
     smartRecruitersCount: persisted.filter((record) => record.platform === "smartrecruiters").length,
+    workdayCount: persisted.filter((record) => record.platform === "workday").length,
   });
 
   return persisted;
@@ -569,11 +714,16 @@ export async function expandSourceInventory(input: {
     };
   }
 
+  const hasCanadaHighDemandExpansion = selectedFilters.some(isCanadaHighDemandDiscoveryFilters);
   const sourceBudget = Math.max(
     1,
     Math.min(
       env.PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES,
-      Math.max(input.maxSources, selectedFilters.length * 4),
+      Math.max(
+        input.maxSources,
+        selectedFilters.length * 4,
+        hasCanadaHighDemandExpansion ? selectedFilters.length * 16 : 0,
+      ),
     ),
   );
   const perSearchSourceBudget = Math.max(
@@ -589,6 +739,7 @@ export async function expandSourceInventory(input: {
       break;
     }
 
+    const useCanadaHighDemandExpansion = isCanadaHighDemandDiscoveryFilters(filters);
     const discovery = await discoverSourcesDetailed({
       filters,
       now: input.now,
@@ -598,19 +749,21 @@ export async function expandSourceInventory(input: {
         ...env,
         PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: Math.min(
           env.PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS,
-          8,
+          useCanadaHighDemandExpansion ? 10 : 8,
         ),
         PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: Math.min(
-          perSearchSourceBudget,
+          useCanadaHighDemandExpansion
+            ? Math.max(perSearchSourceBudget, Math.min(80, remainingBudget))
+            : perSearchSourceBudget,
           remainingBudget,
         ),
         PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: Math.min(
           env.PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES,
-          16,
+          useCanadaHighDemandExpansion ? 48 : 16,
         ),
         GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: Math.min(
           env.GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES,
-          6,
+          useCanadaHighDemandExpansion ? 20 : 6,
         ),
       },
     });
@@ -627,7 +780,11 @@ export async function expandSourceInventory(input: {
     });
 
     for (const source of discovery.sources) {
-      if (beforeIds.has(source.id) || source.platform === "unknown") {
+      if (
+        source.discoveryMethod !== "future_search" ||
+        beforeIds.has(source.id) ||
+        source.platform === "unknown"
+      ) {
         continue;
       }
 

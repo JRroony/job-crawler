@@ -357,6 +357,20 @@ export const crawlSourceStatuses = [
 export const crawlSourceStatusSchema = z.enum(crawlSourceStatuses);
 
 export const publicSearchDiscoveryDiagnosticsSchema = z.object({
+  executionStrategy: nullableOptional(
+    z.object({
+      requestedMode: nullableOptional(z.string()),
+      effectiveMode: z.string().min(1),
+      reason: z.string().min(1),
+      title: nullableOptional(z.string()),
+      country: nullableOptional(z.string()),
+      state: nullableOptional(z.string()),
+      city: nullableOptional(z.string()),
+      titleFamily: nullableOptional(z.string()),
+      titleConcept: nullableOptional(z.string()),
+      canadaHighDemandRole: z.boolean().default(false),
+    }),
+  ),
   generatedQueries: z.number().int().nonnegative().default(0),
   executedQueries: z.number().int().nonnegative().default(0),
   skippedQueries: z.number().int().nonnegative().default(0),
@@ -435,7 +449,10 @@ export const crawlDiagnosticsSchema = z.object({
       crawlableSources: z.number().int().nonnegative().default(0),
       eligibleSources: z.number().int().nonnegative().default(0),
       selectedSources: z.number().int().nonnegative().default(0),
+      inventoryByPlatform: z.record(z.string(), z.number().int().nonnegative()).default({}),
+      eligibleByPlatform: z.record(z.string(), z.number().int().nonnegative()).default({}),
       skippedByReason: z.record(z.string(), z.number().int().nonnegative()).default({}),
+      skippedByPlatformReason: z.record(z.string(), z.number().int().nonnegative()).default({}),
       freshnessBuckets: z.record(z.string(), z.number().int().nonnegative()).default({}),
       selectedByPlatform: z.record(z.string(), z.number().int().nonnegative()).default({}),
       selectedByProvider: z.record(z.string(), z.number().int().nonnegative()).default({}),
@@ -455,7 +472,7 @@ export const crawlDiagnosticsSchema = z.object({
         .object({
           id: z.string().min(1),
           label: z.string().min(1),
-          scope: z.enum(["country", "state", "city"]),
+          scope: z.enum(["country", "state", "province", "city"]),
           country: z.string().min(1),
           state: nullableOptional(z.string()),
           city: nullableOptional(z.string()),

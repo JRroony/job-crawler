@@ -6,12 +6,20 @@ import { slugToLabel } from "@/lib/server/crawler/helpers";
 import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import { getDefaultGreenhouseRegistryEntries } from "@/lib/server/discovery/greenhouse-registry";
+import {
+  applyRegistryInventoryMetadata,
+  getDefaultSourceRegistryEntries,
+  sourceRegistryEntryToDiscoveredSource,
+  type SourceRegistryEntryInput,
+  sourceRegistryEntrySchema,
+} from "@/lib/server/discovery/source-registry";
 import { discoveryMethods, type DiscoveredSource } from "@/lib/server/discovery/types";
 import type { AppEnv } from "@/lib/server/env";
 import { crawlerPlatformSchema } from "@/lib/types";
 
 export const sourceInventoryOrigins = [
   "greenhouse_registry",
+  "platform_registry",
   "configured_env",
   "manual_config",
   "curated_catalog",
@@ -63,6 +71,7 @@ export const sourceInventoryRecordSchema = z.object({
   sitePath: z.string().min(1).optional(),
   careerSitePath: z.string().min(1).optional(),
   jobUrl: z.string().url().optional(),
+  sourceMetadata: z.record(z.string(), z.unknown()).default({}),
   status: sourceInventoryStatusSchema.default("active"),
   health: sourceInventoryHealthSchema.default("unknown"),
   crawlPriority: z.number().int().nonnegative().default(0),
@@ -84,7 +93,9 @@ export type SourceInventoryRecord = z.infer<typeof sourceInventoryRecordSchema>;
 type DiscoveryEnvSnapshot = Pick<
   AppEnv,
   "greenhouseBoardTokens" | "leverSiteTokens" | "ashbyBoardTokens" | "companyPageSources"
->;
+> & {
+  sourceRegistryEntries?: SourceRegistryEntryInput[];
+};
 
 export function buildSourceInventorySeeds(
   env: DiscoveryEnvSnapshot,
@@ -129,6 +140,26 @@ export function buildSourceInventorySeeds(
     );
   });
 
+  const registryEntries = [
+    ...getDefaultSourceRegistryEntries(),
+    ...(env.sourceRegistryEntries ?? []).map((entry) =>
+      sourceRegistryEntrySchema.parse(entry),
+    ),
+  ];
+  registryEntries.forEach((entry, index) => {
+    const platformOffset =
+      entry.platform === "lever" ? 10_000 : entry.platform === "ashby" ? 20_000 : 30_000;
+    const record = toSourceInventoryRecord(
+      sourceRegistryEntryToDiscoveredSource(entry),
+      {
+        now: new Date(0).toISOString(),
+        inventoryOrigin: "platform_registry",
+        inventoryRank: platformOffset + index,
+      },
+    );
+    seeds.push(applyRegistryInventoryMetadata(record, entry));
+  });
+
   env.leverSiteTokens.forEach((token, index) => {
     seeds.push(
       toSourceInventoryRecord(
@@ -142,7 +173,7 @@ export function buildSourceInventorySeeds(
         {
           now: new Date(0).toISOString(),
           inventoryOrigin: "configured_env",
-          inventoryRank: 10_000 + index,
+          inventoryRank: 40_000 + index,
         },
       ),
     );
@@ -161,7 +192,7 @@ export function buildSourceInventorySeeds(
         {
           now: new Date(0).toISOString(),
           inventoryOrigin: "configured_env",
-          inventoryRank: 20_000 + index,
+          inventoryRank: 45_000 + index,
         },
       ),
     );
@@ -180,7 +211,7 @@ export function buildSourceInventorySeeds(
         {
           now: new Date(0).toISOString(),
           inventoryOrigin: "manual_config",
-          inventoryRank: 30_000 + index,
+          inventoryRank: 50_000 + index,
         },
       ),
     );
@@ -191,7 +222,7 @@ export function buildSourceInventorySeeds(
       toSourceInventoryRecord(source, {
         now: new Date(0).toISOString(),
         inventoryOrigin: "curated_catalog",
-        inventoryRank: 40_000 + index,
+        inventoryRank: 60_000 + index,
       }),
     );
   });
@@ -226,6 +257,7 @@ export function toSourceInventoryRecord(
     sitePath: "sitePath" in source ? source.sitePath : undefined,
     careerSitePath: "careerSitePath" in source ? source.careerSitePath : undefined,
     jobUrl: "jobUrl" in source ? source.jobUrl : undefined,
+    sourceMetadata: {},
     status: "active",
     health: "unknown",
     crawlPriority: input.inventoryRank ?? 0,
@@ -279,7 +311,7 @@ export function inventoryOriginFromDiscoveryMethod(
 ): SourceInventoryRecord["inventoryOrigin"] {
   switch (method) {
     case "platform_registry":
-      return "greenhouse_registry";
+      return "platform_registry";
     case "configured_env":
       return "configured_env";
     case "manual_config":

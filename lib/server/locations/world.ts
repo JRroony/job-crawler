@@ -100,6 +100,13 @@ const supportedCountryDefinitions: SupportedCountryDefinition[] = [
         aliases: ["quebec", "qc", "quebec canada", "qc canada"],
         priority: 3,
       },
+      {
+        countryConcept: "canada",
+        name: "Alberta",
+        code: "AB",
+        aliases: ["alberta", "ab", "alberta canada", "ab canada"],
+        priority: 4,
+      },
     ],
     metros: [
       {
@@ -135,6 +142,14 @@ const supportedCountryDefinitions: SupportedCountryDefinition[] = [
           "montreal canada",
         ],
         priority: 3,
+      },
+      {
+        countryConcept: "canada",
+        city: "Calgary",
+        regionName: "Alberta",
+        regionCode: "AB",
+        aliases: ["calgary", "calgary ab", "calgary alberta", "calgary canada"],
+        priority: 4,
       },
     ],
   },
@@ -460,10 +475,10 @@ function buildCountryClauses(
     : undefined;
   const topRegions = (definition?.regions ?? [])
     .sort((left, right) => left.priority - right.priority)
-    .slice(0, 3);
+    .slice(0, 4);
   const topMetros = (definition?.metros ?? [])
     .sort((left, right) => left.priority - right.priority)
-    .slice(0, 3);
+    .slice(0, 4);
 
   return dedupeClauses([
     ...aliases.map((alias, index) => ({
@@ -487,19 +502,19 @@ function buildCountryClauses(
       {
         clause: normalizeLocationText(region.name),
         kind: "state" as const,
-        priority: 30 + index * 3,
+        priority: regionPriority(index, 0),
       },
       region.code
         ? {
             clause: normalizeLocationText(`${region.code} ${intent.countryName}`),
             kind: "state" as const,
-            priority: 31 + index * 3,
+            priority: regionPriority(index, 1),
           }
         : undefined,
       {
         clause: normalizeLocationText(`remote ${region.name}`),
         kind: "remote_state" as const,
-        priority: 32 + index * 3,
+        priority: regionPriority(index, 2),
       },
     ]),
     ...topMetros.flatMap((metro, index) => [
@@ -524,6 +539,10 @@ function buildCountryClauses(
         : undefined,
     ]),
   ]);
+}
+
+function regionPriority(index: number, offset: number) {
+  return index < 3 ? 30 + index * 3 + offset : 80 + index * 3 + offset;
 }
 
 function buildRegionClauses(

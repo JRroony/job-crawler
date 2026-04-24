@@ -26,7 +26,10 @@ export type InventorySchedulingDiagnostics = {
   crawlableSources: number;
   eligibleSources: number;
   selectedSources: number;
+  inventoryByPlatform: Record<string, number>;
+  eligibleByPlatform: Record<string, number>;
   skippedByReason: Record<string, number>;
+  skippedByPlatformReason: Record<string, number>;
   freshnessBuckets: Record<string, number>;
   selectedByPlatform: Record<string, number>;
   selectedByProvider: Record<string, number>;
@@ -51,7 +54,10 @@ export function planRecurringInventorySourceSelection(input: {
   const nowMs = input.now.getTime();
   const prioritySourceIds = new Set(input.prioritySourceIds ?? []);
   const skippedByReason: Record<string, number> = {};
+  const skippedByPlatformReason: Record<string, number> = {};
   const freshnessBuckets: Record<string, number> = {};
+  const inventoryByPlatform: Record<string, number> = {};
+  const eligibleByPlatform: Record<string, number> = {};
   const selectedByPlatform: Record<string, number> = {};
   const selectedByProvider: Record<string, number> = {};
   const selectedByHealth: Record<string, number> = {};
@@ -65,10 +71,12 @@ export function planRecurringInventorySourceSelection(input: {
   let crawlableSources = 0;
 
   for (const record of input.inventory) {
+    incrementCount(inventoryByPlatform, record.platform);
     const source = toDiscoveredSourceFromInventory(record);
     const supported = input.providers.some((provider) => provider.supportsSource(source));
     if (!supported) {
       incrementCount(skippedByReason, "unsupported_provider");
+      incrementPlatformReason(skippedByPlatformReason, record.platform, "unsupported_provider");
       pushSample(skippedSourceSamples, `${record._id}:unsupported_provider`);
       continue;
     }
@@ -77,12 +85,14 @@ export function planRecurringInventorySourceSelection(input: {
 
     if (record.status === "disabled") {
       incrementCount(skippedByReason, "status_disabled");
+      incrementPlatformReason(skippedByPlatformReason, record.platform, "status_disabled");
       pushSample(skippedSourceSamples, `${record._id}:status_disabled`);
       continue;
     }
 
     if (record.status === "paused") {
       incrementCount(skippedByReason, "status_paused");
+      incrementPlatformReason(skippedByPlatformReason, record.platform, "status_paused");
       pushSample(skippedSourceSamples, `${record._id}:status_paused`);
       continue;
     }
@@ -98,10 +108,12 @@ export function planRecurringInventorySourceSelection(input: {
       const reason =
         freshnessBucket === "retry_backoff" ? "health_backoff" : "freshness_cooldown";
       incrementCount(skippedByReason, reason);
+      incrementPlatformReason(skippedByPlatformReason, record.platform, reason);
       pushSample(skippedSourceSamples, `${record._id}:${reason}`);
       continue;
     }
 
+    incrementCount(eligibleByPlatform, record.platform);
     eligible.push({
       record,
       overdueMs: Math.max(0, nowMs - nextEligibleMs),
@@ -121,6 +133,11 @@ export function planRecurringInventorySourceSelection(input: {
   const selectedRecords = selectedCandidates.map((candidate) => candidate.record);
   for (const candidate of eligible.filter((entry) => !selectedIds.has(entry.record._id))) {
     incrementCount(skippedByReason, "capacity_deprioritized");
+    incrementPlatformReason(
+      skippedByPlatformReason,
+      candidate.record.platform,
+      "capacity_deprioritized",
+    );
     pushSample(skippedSourceSamples, `${candidate.record._id}:capacity_deprioritized`);
   }
 
@@ -142,7 +159,10 @@ export function planRecurringInventorySourceSelection(input: {
       crawlableSources,
       eligibleSources: eligible.length,
       selectedSources: selectedRecords.length,
+      inventoryByPlatform,
+      eligibleByPlatform,
       skippedByReason,
+      skippedByPlatformReason,
       freshnessBuckets,
       selectedByPlatform,
       selectedByProvider,
@@ -190,6 +210,19 @@ function selectRecurringInventoryCandidates(
     selectedIds.add(candidate.record._id);
   }
 
+  for (const candidate of selectFirstCandidatePerPlatform(eligible)) {
+    if (selected.length >= limit) {
+      break;
+    }
+
+    if (selectedIds.has(candidate.record._id)) {
+      continue;
+    }
+
+    selected.push(candidate);
+    selectedIds.add(candidate.record._id);
+  }
+
   for (const candidate of neverCrawledCandidates.slice(0, neverCrawledReserve)) {
     if (selected.length >= limit) {
       break;
@@ -214,6 +247,24 @@ function selectRecurringInventoryCandidates(
 
     selected.push(candidate);
     selectedIds.add(candidate.record._id);
+  }
+
+  return selected;
+}
+
+function selectFirstCandidatePerPlatform<TCandidate extends { record: SourceInventoryRecord }>(
+  candidates: TCandidate[],
+) {
+  const seen = new Set<string>();
+  const selected: TCandidate[] = [];
+
+  for (const candidate of candidates) {
+    if (seen.has(candidate.record.platform)) {
+      continue;
+    }
+
+    seen.add(candidate.record.platform);
+    selected.push(candidate);
   }
 
   return selected;
@@ -403,6 +454,14 @@ function safeParseTime(value?: string) {
 
 function incrementCount(counts: Record<string, number>, key: string) {
   counts[key] = (counts[key] ?? 0) + 1;
+}
+
+function incrementPlatformReason(
+  counts: Record<string, number>,
+  platform: string,
+  reason: string,
+) {
+  incrementCount(counts, `${platform}:${reason}`);
 }
 
 function pushSample(samples: string[], value: string) {
