@@ -10,6 +10,7 @@ import {
   queueSearchIngestion,
   runSearchIngestionFromSession,
 } from "@/lib/server/ingestion/service";
+import { triggerRecurringBackgroundIngestion } from "@/lib/server/background/recurring-ingestion";
 import {
   createSearchRerunSession,
   createSearchSession,
@@ -167,10 +168,18 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     indexedSearch,
     session.searchReuse,
     session.now,
+    {
+      allowRequestTimePrimaryCrawl:
+        Boolean(runtime.discovery) && Boolean(runtime.providers?.length),
+    },
   );
+  const backgroundIngestion = supplementalDecision.requestBackgroundIngestion
+    ? await requestBackgroundIngestionForIndexGap(runtime, session.now)
+    : { status: "not_requested" as const };
   const primedDiagnostics = buildPrimedSessionDiagnostics(
     supplementalDecision,
     indexedJobs.length,
+    backgroundIngestion,
   );
   session.crawlRun = {
     ...session.crawlRun,
@@ -192,6 +201,7 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     indexedJobs: indexedJobs.length,
     supplementalQueued: supplementalDecision.shouldQueue,
     supplementalReason: supplementalDecision.triggerReason,
+    backgroundIngestion,
     crawlMode: session.search.filters.crawlMode ?? "balanced",
     reusedExistingSearch: session.searchReuse.reusedExistingSearch,
     previousVisibleJobCount: session.searchReuse.previousVisibleJobCount,
@@ -250,6 +260,7 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
 
 type SupplementalDecision = {
   shouldQueue: boolean;
+  requestBackgroundIngestion: boolean;
   triggerReason: NonNullable<NonNullable<CrawlDiagnostics["session"]>["triggerReason"]>;
   triggerExplanation: string;
   minimumIndexedCoverage: number;
@@ -263,6 +274,10 @@ type SupplementalDecision = {
   latestIndexedJobAgeMs?: number;
 };
 
+type BackgroundIngestionRequestDiagnostics = NonNullable<
+  NonNullable<CrawlDiagnostics["session"]>["backgroundIngestion"]
+>;
+
 function resolveSupplementalCrawlDecision(
   filters: ReturnType<typeof parseSearchFilters>,
   indexedSearch: Awaited<ReturnType<typeof getIndexedJobsForSearch>>,
@@ -273,6 +288,9 @@ function resolveSupplementalCrawlDecision(
     previousFinishedAt?: string;
   },
   now: Date,
+  options: {
+    allowRequestTimePrimaryCrawl?: boolean;
+  } = {},
 ): SupplementalDecision {
   const env = getEnv();
   const mode = filters.crawlMode ?? "balanced";
@@ -288,9 +306,28 @@ function resolveSupplementalCrawlDecision(
     now,
   );
 
+  if (indexedJobCount === 0 && !options.allowRequestTimePrimaryCrawl) {
+    return {
+      shouldQueue: false,
+      requestBackgroundIngestion: true,
+      triggerReason: "indexed_empty_background_requested",
+      triggerExplanation: `Indexed coverage returned zero visible jobs for ${mode} mode, so the request path stays index-first and an independent background ingestion cycle was requested.`,
+      minimumIndexedCoverage,
+      targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
+      indexedCandidateCount: indexedSearch.candidateCount,
+      indexedJobCount,
+      reusedExistingSearch: previousCoverage.reusedExistingSearch,
+      previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
+      previousRunStatus: previousCoverage.previousRunStatus,
+      previousFinishedAt: previousCoverage.previousFinishedAt,
+      latestIndexedJobAgeMs,
+    };
+  }
+
   if (indexedJobCount >= minimumIndexedCoverage) {
     return {
       shouldQueue: false,
+      requestBackgroundIngestion: false,
       triggerReason: "indexed_coverage_sufficient",
       triggerExplanation: `Indexed results already meet the ${minimumIndexedCoverage}-job ${mode} coverage threshold, so request-time crawl stays off.`,
       minimumIndexedCoverage,
@@ -313,6 +350,7 @@ function resolveSupplementalCrawlDecision(
   ) {
     return {
       shouldQueue: false,
+      requestBackgroundIngestion: false,
       triggerReason: "reused_completed_coverage",
       triggerExplanation: "A completed identical search was reused and the indexed session already preserves its previously visible coverage.",
       minimumIndexedCoverage,
@@ -336,6 +374,7 @@ function resolveSupplementalCrawlDecision(
   if (freshnessRecoveryEligible) {
     return {
       shouldQueue: true,
+      requestBackgroundIngestion: false,
       triggerReason: "freshness_recovery",
       triggerExplanation: `Indexed coverage is below the ${minimumIndexedCoverage}-job ${mode} threshold and the newest indexed match is stale, so a bounded supplemental refresh was queued.`,
       minimumIndexedCoverage,
@@ -357,6 +396,7 @@ function resolveSupplementalCrawlDecision(
   ) {
     return {
       shouldQueue: true,
+      requestBackgroundIngestion: false,
       triggerReason: "retry_incomplete_previous_run",
       triggerExplanation: "The previous identical session did not complete cleanly and indexed coverage is still below threshold, so supplemental recovery was retried.",
       minimumIndexedCoverage,
@@ -373,6 +413,7 @@ function resolveSupplementalCrawlDecision(
 
   return {
     shouldQueue: true,
+    requestBackgroundIngestion: false,
     triggerReason: "insufficient_indexed_coverage",
     triggerExplanation: `Indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${mode} threshold, so a bounded supplemental crawl was queued.`,
     minimumIndexedCoverage,
@@ -390,6 +431,7 @@ function resolveSupplementalCrawlDecision(
 function buildPrimedSessionDiagnostics(
   decision: SupplementalDecision,
   indexedJobCount: number,
+  backgroundIngestion: BackgroundIngestionRequestDiagnostics,
 ): CrawlDiagnostics {
   return {
     discoveredSources: 0,
@@ -421,6 +463,7 @@ function buildPrimedSessionDiagnostics(
       previousRunStatus: decision.previousRunStatus,
       previousFinishedAt: decision.previousFinishedAt,
       latestIndexedJobAgeMs: decision.latestIndexedJobAgeMs,
+      backgroundIngestion,
     },
     dropReasonCounts: {},
     filterDecisionTraces: [],
@@ -440,6 +483,88 @@ function buildPrimedSessionDiagnostics(
       progressUpdateCount: 0,
       persistenceBatchCount: 0,
     },
+  };
+}
+
+async function requestBackgroundIngestionForIndexGap(
+  runtime: JobCrawlerRuntime,
+  now: Date,
+): Promise<BackgroundIngestionRequestDiagnostics> {
+  try {
+    const result = await triggerRecurringBackgroundIngestion({
+      repository: runtime.repository,
+      providers: runtime.providers,
+      fetchImpl: runtime.fetchImpl,
+      now,
+    });
+    const mapped = mapBackgroundIngestionTriggerResult(result);
+
+    console.info("[search:background-ingestion-request]", {
+      status: mapped.status,
+      searchId: mapped.searchId,
+      crawlRunId: mapped.crawlRunId,
+      systemProfileId: mapped.systemProfileId,
+      reason: mapped.reason,
+      message: mapped.message,
+    });
+
+    return mapped;
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Background ingestion could not be requested for the indexed coverage gap.";
+    console.warn("[search:background-ingestion-request]", {
+      status: "failed",
+      message,
+    });
+
+    return {
+      status: "failed",
+      message,
+    };
+  }
+}
+
+function mapBackgroundIngestionTriggerResult(
+  result: Awaited<ReturnType<typeof triggerRecurringBackgroundIngestion>>,
+): BackgroundIngestionRequestDiagnostics {
+  if (result.status === "started") {
+    return {
+      status: "started",
+      searchId: result.searchId,
+      crawlRunId: result.crawlRunId,
+      systemProfileId: result.systemProfileId,
+    };
+  }
+
+  if (result.status === "skipped-active") {
+    return {
+      status: "already_active",
+      searchId: result.searchId,
+      systemProfileId: result.systemProfileId,
+    };
+  }
+
+  if (result.status === "skipped-disabled") {
+    return {
+      status: "disabled",
+      message: result.message,
+    };
+  }
+
+  if (result.status === "skipped-bootstrap-failed") {
+    return {
+      status: "bootstrap_failed",
+      reason: result.reason,
+      message: result.message,
+    };
+  }
+
+  return {
+    status: "mongo_unavailable",
+    reason: result.reason,
+    message: result.message,
   };
 }
 

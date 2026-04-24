@@ -29,6 +29,7 @@ export type InventorySchedulingDiagnostics = {
   skippedByReason: Record<string, number>;
   freshnessBuckets: Record<string, number>;
   selectedByPlatform: Record<string, number>;
+  selectedByProvider: Record<string, number>;
   selectedByHealth: Record<string, number>;
   selectedSourceIds: string[];
   skippedSourceSamples: string[];
@@ -52,6 +53,7 @@ export function planRecurringInventorySourceSelection(input: {
   const skippedByReason: Record<string, number> = {};
   const freshnessBuckets: Record<string, number> = {};
   const selectedByPlatform: Record<string, number> = {};
+  const selectedByProvider: Record<string, number> = {};
   const selectedByHealth: Record<string, number> = {};
   const skippedSourceSamples: string[] = [];
   const eligible: Array<{
@@ -125,6 +127,12 @@ export function planRecurringInventorySourceSelection(input: {
   for (const record of selectedRecords) {
     incrementCount(selectedByPlatform, record.platform);
     incrementCount(selectedByHealth, record.health);
+    const source = toDiscoveredSourceFromInventory(record);
+    for (const provider of input.providers) {
+      if (provider.supportsSource(source)) {
+        incrementCount(selectedByProvider, provider.provider);
+      }
+    }
   }
 
   return {
@@ -137,6 +145,7 @@ export function planRecurringInventorySourceSelection(input: {
       skippedByReason,
       freshnessBuckets,
       selectedByPlatform,
+      selectedByProvider,
       selectedByHealth,
       selectedSourceIds: selectedRecords.slice(0, 12).map((record) => record._id),
       skippedSourceSamples,

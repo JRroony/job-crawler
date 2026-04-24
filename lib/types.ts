@@ -438,9 +438,54 @@ export const crawlDiagnosticsSchema = z.object({
       skippedByReason: z.record(z.string(), z.number().int().nonnegative()).default({}),
       freshnessBuckets: z.record(z.string(), z.number().int().nonnegative()).default({}),
       selectedByPlatform: z.record(z.string(), z.number().int().nonnegative()).default({}),
+      selectedByProvider: z.record(z.string(), z.number().int().nonnegative()).default({}),
       selectedByHealth: z.record(z.string(), z.number().int().nonnegative()).default({}),
       selectedSourceIds: z.array(z.string().min(1)).max(12).default([]),
       skippedSourceSamples: z.array(z.string().min(1)).max(12).default([]),
+    })
+    .optional(),
+  systemProfile: z
+    .object({
+      id: z.string().min(1),
+      label: z.string().min(1),
+      canonicalJobFamily: z.string().min(1).optional(),
+      queryTitleVariant: z.string().min(1).optional(),
+      titleVariantTier: z.number().int().nonnegative().optional(),
+      geography: z
+        .object({
+          id: z.string().min(1),
+          label: z.string().min(1),
+          scope: z.enum(["country", "state", "city"]),
+          country: z.string().min(1),
+          state: nullableOptional(z.string()),
+          city: nullableOptional(z.string()),
+          priorityOffset: z.number().int().nonnegative(),
+          variantTiers: z.array(z.number().int().nonnegative()).default([]),
+        })
+        .optional(),
+      platformPreference: z
+        .object({
+          mode: z.enum(["preference", "restriction"]),
+          platforms: z.array(z.string().min(1)).default([]),
+        })
+        .optional(),
+      priority: z.number().int().nonnegative().optional(),
+      enabled: z.boolean().optional(),
+      cadenceMs: z.number().int().nonnegative().optional(),
+      cooldownMs: z.number().int().nonnegative().optional(),
+      lastRunAt: nullableOptional(z.string().datetime()),
+      nextEligibleAt: nullableOptional(z.string().datetime()),
+      successCount: z.number().int().nonnegative().optional(),
+      failureCount: z.number().int().nonnegative().optional(),
+      consecutiveFailureCount: z.number().int().nonnegative().optional(),
+      filters: z.object({
+        title: z.string().min(1),
+        country: nullableOptional(z.string()),
+        state: nullableOptional(z.string()),
+        city: nullableOptional(z.string()),
+        platforms: z.array(z.string().min(1)).optional(),
+        crawlMode: nullableOptional(z.string()),
+      }),
     })
     .optional(),
   inventoryExpansion: z
@@ -534,6 +579,9 @@ export const crawlDiagnosticsSchema = z.object({
           "indexed_coverage_sufficient",
           "reused_completed_coverage",
           "insufficient_indexed_coverage",
+          "indexed_empty_background_requested",
+          "background_ingestion_already_active",
+          "background_ingestion_unavailable",
           "freshness_recovery",
           "retry_incomplete_previous_run",
         ])
@@ -544,6 +592,24 @@ export const crawlDiagnosticsSchema = z.object({
       previousRunStatus: nullableOptional(crawlRunStatusSchema),
       previousFinishedAt: nullableOptional(z.string().datetime()),
       latestIndexedJobAgeMs: nullableOptional(z.number().int().nonnegative()),
+      backgroundIngestion: z
+        .object({
+          status: z.enum([
+            "not_requested",
+            "started",
+            "already_active",
+            "disabled",
+            "mongo_unavailable",
+            "bootstrap_failed",
+            "failed",
+          ]),
+          searchId: nullableOptional(z.string()),
+          crawlRunId: nullableOptional(z.string()),
+          systemProfileId: nullableOptional(z.string()),
+          reason: nullableOptional(z.string()),
+          message: nullableOptional(z.string()),
+        })
+        .optional(),
     })
     .optional(),
   performance: z
@@ -878,6 +944,8 @@ export const persistableJobSchema = jobListingSchema.omit({
 export const searchDocumentSchema = z.object({
   _id: z.string().min(1),
   filters: searchFiltersSchema,
+  systemProfileId: nullableOptional(z.string()),
+  systemProfileLabel: nullableOptional(z.string()),
   latestCrawlRunId: nullableOptional(z.string()),
   latestSearchSessionId: nullableOptional(z.string()),
   createdAt: z.string().datetime(),

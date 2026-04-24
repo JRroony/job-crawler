@@ -612,6 +612,7 @@ function attachSessionDiagnostics(
       previousRunStatus: baseDiagnostics.session?.previousRunStatus,
       previousFinishedAt: baseDiagnostics.session?.previousFinishedAt,
       latestIndexedJobAgeMs: baseDiagnostics.session?.latestIndexedJobAgeMs,
+      backgroundIngestion: baseDiagnostics.session?.backgroundIngestion,
     },
   };
 }

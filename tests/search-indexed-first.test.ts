@@ -266,9 +266,7 @@ describe("jobs-first indexed search", () => {
       triggerReason: "insufficient_indexed_coverage",
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
-    const final = await getSearchDetails(initial.search._id, {
+    const final = await waitForSearchJobCount(initial.search._id, 2, {
       repository,
       now: new Date("2026-04-15T12:00:01.000Z"),
     });
@@ -705,110 +703,48 @@ describe("jobs-first indexed search", () => {
     expect(delta.delivery.indexedCursor).toBeGreaterThan(initial.delivery?.indexedCursor ?? 0);
   });
 
-  it("reuses persisted results for repeated identical searches instead of re-crawling sparse completed searches", async () => {
+  it("does not make request-time crawl primary when indexed coverage is empty", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
-    let providerCalls = 0;
-    const provider = createStubProvider("greenhouse", async () => {
-      providerCalls += 1;
+    const discover = vi.fn(async () => [
+      classifySourceCandidate({
+        url: "https://boards.greenhouse.io/acme",
+        token: "acme",
+        confidence: "high",
+        discoveryMethod: "configured_env",
+      }),
+    ]);
 
-      return {
-        provider: "greenhouse",
-        status: "success",
-        sourceCount: 1,
-        fetchedCount: 2,
-        matchedCount: 2,
-        warningCount: 0,
-        jobs: [
-          {
-            title: "Business Analyst",
-            company: "Acme",
-            country: "United States",
-            locationText: "Chicago, IL",
-            state: "Illinois",
-            city: "Chicago",
-            sourcePlatform: "greenhouse",
-            sourceJobId: "business-analyst-repeat-1",
-            sourceUrl: "https://example.com/jobs/business-analyst-repeat-1",
-            applyUrl: "https://example.com/jobs/business-analyst-repeat-1/apply",
-            canonicalUrl: "https://example.com/jobs/business-analyst-repeat-1",
-            discoveredAt: "2026-04-15T12:10:00.000Z",
-            rawSourceMetadata: {},
-          },
-          {
-            title: "Business Systems Analyst",
-            company: "Acme",
-            country: "United States",
-            locationText: "Remote - United States",
-            sourcePlatform: "greenhouse",
-            sourceJobId: "business-analyst-repeat-2",
-            sourceUrl: "https://example.com/jobs/business-analyst-repeat-2",
-            applyUrl: "https://example.com/jobs/business-analyst-repeat-2/apply",
-            canonicalUrl: "https://example.com/jobs/business-analyst-repeat-2",
-            discoveredAt: "2026-04-15T12:10:00.000Z",
-            rawSourceMetadata: {},
-          },
-        ],
-      };
-    });
-
-    const runtime = {
-      repository,
-      providers: [provider],
-      discovery: createDiscovery(),
-      fetchImpl: vi.fn() as unknown as typeof fetch,
-    };
-
-    const firstSearch = await startSearchFromFilters(
+    const started = await startSearchFromFilters(
       {
         title: "Business Analyst",
         country: "United States",
         platforms: ["greenhouse"],
       },
       {
-        ...runtime,
+        repository,
+        providers: [],
+        discovery: { discover },
+        fetchImpl: vi.fn() as unknown as typeof fetch,
         now: new Date("2026-04-15T12:10:00.000Z"),
-        requestOwnerKey: "business-analyst-repeat-initial",
+        requestOwnerKey: "empty-index-background-request",
       },
     );
 
-    expect(firstSearch.queued).toBe(true);
-
-    const completedFirstSearch = await getSearchDetails(firstSearch.result.search._id, {
-      repository,
-      now: new Date("2026-04-15T12:10:01.000Z"),
-    });
-
-    expect(providerCalls).toBe(1);
-    expect(completedFirstSearch.jobs.map((job) => job.title)).toEqual([
-      "Business Analyst",
-      "Business Systems Analyst",
-    ]);
-
-    const repeatedSearch = await startSearchFromFilters(
-      {
-        title: "Business Analyst",
-        country: "United States",
-        platforms: ["greenhouse"],
-      },
-      {
-        ...runtime,
-        now: new Date("2026-04-15T12:11:00.000Z"),
-        requestOwnerKey: "business-analyst-repeat-followup",
-      },
-    );
-
-    expect(repeatedSearch.result.search._id).toBe(firstSearch.result.search._id);
-    expect(repeatedSearch.queued).toBe(false);
-    expect(providerCalls).toBe(1);
-    expect(repeatedSearch.result.jobs.map((job) => job.title)).toEqual([
-      "Business Analyst",
-      "Business Systems Analyst",
-    ]);
-    expect(repeatedSearch.result.diagnostics.session).toMatchObject({
+    expect(started.queued).toBe(false);
+    expect(started.result.jobs).toEqual([]);
+    expect(started.result.crawlRun.status).toBe("completed");
+    expect(started.result.diagnostics.session).toMatchObject({
+      indexedResultsCount: 0,
+      totalVisibleResultsCount: 0,
       supplementalQueued: false,
       supplementalRunning: false,
-      triggerReason: "reused_completed_coverage",
+      triggerReason: "indexed_empty_background_requested",
+      backgroundIngestion: expect.objectContaining({
+        status: "started",
+        systemProfileId: expect.any(String),
+      }),
     });
+    expect(discover).not.toHaveBeenCalled();
   });
 
   it("triggers bounded supplemental freshness recovery when sparse indexed coverage is stale", async () => {
@@ -1767,3 +1703,23 @@ describe("jobs-first indexed search", () => {
     });
   });
 });
+
+async function waitForSearchJobCount(
+  searchId: string,
+  expectedCount: number,
+  runtime: Parameters<typeof getSearchDetails>[1],
+) {
+  const deadline = Date.now() + 2_000;
+  let latest = await getSearchDetails(searchId, runtime);
+
+  while (Date.now() < deadline) {
+    if (latest.jobs.length >= expectedCount) {
+      return latest;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    latest = await getSearchDetails(searchId, runtime);
+  }
+
+  return latest;
+}

@@ -1,5 +1,9 @@
 import "server-only";
 
+import {
+  listBackgroundSystemSearchProfiles,
+  selectBackgroundSystemSearchProfiles,
+} from "@/lib/server/background/constants";
 import { slugToLabel } from "@/lib/server/crawler/helpers";
 import type { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
@@ -54,90 +58,10 @@ export type SourceInventoryExpansionResult = {
 
 const defaultInventoryExpansionSearchesPerCycle = 2;
 
-const backgroundInventoryExpansionTitles = {
-  softwareEngineer: "software engineer",
-  aiEngineer: "ai engineer",
-  appliedScientist: "applied scientist",
-  researchScientist: "research scientist",
-  llmEngineer: "llm engineer",
-  machineLearningEngineer: "machine learning engineer",
-  dataAnalyst: "data analyst",
-  businessAnalyst: "business analyst",
-  productManager: "product manager",
-  customerSuccessManager: "customer success manager",
-  salesEngineer: "sales engineer",
-  technicalWriter: "technical writer",
-} as const;
-
-const backgroundInventoryExpansionMarkets = {
-  unitedStates: { country: "United States" },
-  unitedStatesCalifornia: { country: "United States", state: "CA" },
-  unitedStatesNewYork: { country: "United States", state: "NY" },
-  unitedStatesTexas: { country: "United States", state: "TX" },
-  unitedStatesWashington: { country: "United States", state: "WA" },
-  canada: { country: "Canada" },
-  canadaToronto: { country: "Canada", state: "ON", city: "Toronto" },
-  canadaVancouver: { country: "Canada", state: "BC", city: "Vancouver" },
-  canadaMontreal: { country: "Canada", state: "QC", city: "Montreal" },
-  canadaWaterloo: { country: "Canada", state: "ON", city: "Waterloo" },
-  canadaOttawa: { country: "Canada", state: "ON", city: "Ottawa" },
-} as const satisfies Record<
-  string,
-  Pick<SearchFilters, "country" | "state" | "city">
->;
-
-type BackgroundInventoryExpansionTitleKey =
-  keyof typeof backgroundInventoryExpansionTitles;
-type BackgroundInventoryExpansionMarketKey =
-  keyof typeof backgroundInventoryExpansionMarkets;
-
-type BackgroundInventoryExpansionSeed = {
-  title: BackgroundInventoryExpansionTitleKey;
-  market: BackgroundInventoryExpansionMarketKey;
-  platforms?: SearchFilters["platforms"];
-};
-
-const backgroundInventoryExpansionSeeds: BackgroundInventoryExpansionSeed[] = [
-  { title: "softwareEngineer", market: "unitedStates" },
-  { title: "softwareEngineer", market: "canada", platforms: ["greenhouse"] },
-  { title: "dataAnalyst", market: "unitedStates" },
-  { title: "dataAnalyst", market: "canadaMontreal" },
-  { title: "businessAnalyst", market: "unitedStates" },
-  { title: "aiEngineer", market: "canadaToronto" },
-  { title: "appliedScientist", market: "canada" },
-  { title: "productManager", market: "unitedStates" },
-  { title: "productManager", market: "canadaWaterloo" },
-  { title: "aiEngineer", market: "unitedStates" },
-  { title: "researchScientist", market: "unitedStates" },
-  { title: "machineLearningEngineer", market: "canadaVancouver" },
-  { title: "customerSuccessManager", market: "unitedStates" },
-  { title: "softwareEngineer", market: "canadaOttawa" },
-  { title: "salesEngineer", market: "unitedStates" },
-  { title: "productManager", market: "canadaVancouver" },
-  { title: "technicalWriter", market: "unitedStates" },
-  { title: "dataAnalyst", market: "canadaToronto" },
-  { title: "softwareEngineer", market: "unitedStatesCalifornia" },
-  { title: "aiEngineer", market: "canada" },
-  { title: "llmEngineer", market: "canadaToronto" },
-  { title: "dataAnalyst", market: "unitedStatesNewYork" },
-  { title: "machineLearningEngineer", market: "canadaToronto" },
-  { title: "productManager", market: "unitedStatesTexas" },
-  { title: "softwareEngineer", market: "canadaVancouver" },
-  { title: "businessAnalyst", market: "unitedStatesWashington" },
-  { title: "businessAnalyst", market: "canadaToronto" },
-  { title: "dataAnalyst", market: "canada" },
-];
-
-const backgroundInventoryExpansionPortfolio: SearchFilters[] =
-  backgroundInventoryExpansionSeeds.map((seed) => ({
-    title: backgroundInventoryExpansionTitles[seed.title],
-    ...backgroundInventoryExpansionMarkets[seed.market],
-    ...(seed.platforms ? { platforms: seed.platforms } : {}),
-    crawlMode: "balanced",
-  }));
-
 export function listBackgroundInventoryExpansionPortfolio() {
-  return backgroundInventoryExpansionPortfolio.map(copyExpansionFilter);
+  return listBackgroundSystemSearchProfiles().map((profile) =>
+    copyExpansionFilter(profile.filters),
+  );
 }
 
 export function createDiscoveryService(runtime: DiscoveryRuntime = {}): DiscoveryService {
@@ -596,15 +520,18 @@ export async function expandSourceInventory(input: {
   maxSources: number;
   refreshedInventory?: SourceInventoryRecord[];
   maxExpansionSearches?: number;
+  expansionFilters?: SearchFilters[];
 }): Promise<SourceInventoryExpansionResult> {
   const env = input.env ?? getEnv();
   const beforeRecords = input.refreshedInventory ?? await input.repository.listSourceInventory();
   const beforeIds = new Set(beforeRecords.map((record) => record._id));
-  const selectedFilters = selectBackgroundInventoryExpansionFilters({
-    now: input.now,
-    intervalMs: input.intervalMs,
-    maxSearches: input.maxExpansionSearches ?? defaultInventoryExpansionSearchesPerCycle,
-  });
+  const selectedFilters =
+    input.expansionFilters?.map(copyExpansionFilter) ??
+    selectBackgroundInventoryExpansionFilters({
+      now: input.now,
+      intervalMs: input.intervalMs,
+      maxSearches: input.maxExpansionSearches ?? defaultInventoryExpansionSearchesPerCycle,
+    });
   const baseDiagnostics: SourceInventoryExpansionDiagnostics = {
     beforeCount: beforeRecords.length,
     afterRefreshCount: beforeRecords.length,
@@ -753,28 +680,11 @@ export function selectBackgroundInventoryExpansionFilters(input: {
   intervalMs: number;
   maxSearches: number;
 }) {
-  const maxSearches = Math.max(0, Math.floor(input.maxSearches));
-  if (maxSearches <= 0) {
-    return [];
-  }
-
-  const cycle = Math.floor(input.now.getTime() / Math.max(1, input.intervalMs));
-  const startIndex = cycle % backgroundInventoryExpansionPortfolio.length;
-  const selected: SearchFilters[] = [];
-
-  for (
-    let offset = 0;
-    offset < Math.min(maxSearches, backgroundInventoryExpansionPortfolio.length);
-    offset += 1
-  ) {
-    selected.push(
-      copyExpansionFilter(backgroundInventoryExpansionPortfolio[
-        (startIndex + offset) % backgroundInventoryExpansionPortfolio.length
-      ]),
-    );
-  }
-
-  return selected;
+  return selectBackgroundSystemSearchProfiles({
+    now: input.now,
+    intervalMs: input.intervalMs,
+    maxProfiles: input.maxSearches,
+  }).map((profile) => copyExpansionFilter(profile.filters));
 }
 
 function copyExpansionFilter(filters: SearchFilters): SearchFilters {

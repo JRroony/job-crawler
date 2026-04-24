@@ -9,7 +9,10 @@ import {
   resolveExperienceLevel,
 } from "@/lib/experience";
 import { buildCanonicalJobIdentity, normalizeComparableIdentityText } from "@/lib/job-identity";
-import { isBackgroundIngestionSearchFilters } from "@/lib/server/background/constants";
+import {
+  isBackgroundIngestionSearchFilters,
+  type SystemSearchProfileRunState,
+} from "@/lib/server/background/constants";
 import { dedupeJobs, dedupeStoredJobs } from "@/lib/server/crawler/dedupe";
 import { buildSourceLookupKey, createId } from "@/lib/server/crawler/helpers";
 import { collectionNames } from "@/lib/server/db/collections";
@@ -173,10 +176,19 @@ let hasWarnedMemoryFallback = false;
 export class JobCrawlerRepository {
   constructor(private readonly db: DatabaseAdapter) {}
 
-  async createSearch(filters: SearchFilters, now = new Date().toISOString()) {
+  async createSearch(
+    filters: SearchFilters,
+    now = new Date().toISOString(),
+    options: {
+      systemProfileId?: string;
+      systemProfileLabel?: string;
+    } = {},
+  ) {
     const document = searchDocumentSchema.parse({
       _id: createId(),
       filters,
+      systemProfileId: options.systemProfileId,
+      systemProfileLabel: options.systemProfileLabel,
       createdAt: now,
       updatedAt: now,
     });
@@ -192,7 +204,11 @@ export class JobCrawlerRepository {
 
     return documents
       .map((document) => parseStoredSearch(document))
-      .filter((document) => !isBackgroundIngestionSearchFilters(document.filters));
+      .filter(
+        (document) =>
+          !document.systemProfileId &&
+          !isBackgroundIngestionSearchFilters(document.filters),
+      );
   }
 
   async getSearch(searchId: string) {
@@ -200,17 +216,100 @@ export class JobCrawlerRepository {
     return document ? parseStoredSearch(document) : null;
   }
 
-  async findMostRecentSearchByFilters(filters: SearchFilters) {
+  async findMostRecentSearchByFilters(
+    filters: SearchFilters,
+    options: {
+      systemProfileId?: string;
+      includeSystemProfiles?: boolean;
+    } = {},
+  ) {
     const documents = await this.searches()
       .find({}, { sort: { createdAt: -1 } })
       .toArray();
     const expected = stableSerialize(filters);
     const matched = documents.find((document) => {
       const parsed = parseStoredSearch(document);
+      if (options.systemProfileId && parsed.systemProfileId !== options.systemProfileId) {
+        return false;
+      }
+
+      if (!options.systemProfileId && !options.includeSystemProfiles && parsed.systemProfileId) {
+        return false;
+      }
+
       return stableSerialize(parsed.filters) === expected;
     });
 
     return matched ? parseStoredSearch(matched) : null;
+  }
+
+  async listSystemSearchProfileRunStates(): Promise<SystemSearchProfileRunState[]> {
+    const searches = (await this.searches()
+      .find({}, { sort: { createdAt: 1 } })
+      .toArray())
+      .map((document) => parseStoredSearch(document))
+      .filter((search) => Boolean(search.systemProfileId));
+    if (searches.length === 0) {
+      return [];
+    }
+
+    const profileSearches = new Map<string, SearchDocument[]>();
+    for (const search of searches) {
+      if (!search.systemProfileId) {
+        continue;
+      }
+
+      const existing = profileSearches.get(search.systemProfileId) ?? [];
+      existing.push(search);
+      profileSearches.set(search.systemProfileId, existing);
+    }
+
+    const crawlRunsBySearchId = new Map<string, CrawlRun[]>();
+    const runs = (await this.crawlRuns()
+      .find({}, { sort: { startedAt: 1 } })
+      .toArray())
+      .map((document) => parseStoredCrawlRun(document));
+    for (const run of runs) {
+      const existing = crawlRunsBySearchId.get(run.searchId) ?? [];
+      existing.push(run);
+      crawlRunsBySearchId.set(run.searchId, existing);
+    }
+
+    return Array.from(profileSearches.entries()).map(([profileId, profileSearchGroup]) => {
+      const profileRuns = profileSearchGroup.flatMap(
+        (search) => crawlRunsBySearchId.get(search._id) ?? [],
+      );
+      const sortedRuns = profileRuns.sort(compareCrawlRunsByActivity);
+      const latestRun = sortedRuns[sortedRuns.length - 1];
+      const successCount = sortedRuns.filter((run) => isSuccessfulProfileRunStatus(run.status)).length;
+      const failureCount = sortedRuns.filter((run) => isFailedProfileRunStatus(run.status)).length;
+      let consecutiveFailureCount = 0;
+
+      for (const run of sortedRuns.slice().reverse()) {
+        if (isFailedProfileRunStatus(run.status)) {
+          consecutiveFailureCount += 1;
+          continue;
+        }
+
+        if (isSuccessfulProfileRunStatus(run.status)) {
+          break;
+        }
+      }
+
+      const latestSearch = profileSearchGroup[profileSearchGroup.length - 1];
+
+      return {
+        profileId,
+        searchId: latestSearch?._id,
+        latestCrawlRunId: latestRun?._id ?? latestSearch?.latestCrawlRunId,
+        lastRunAt: latestRun?.startedAt ?? latestSearch?.updatedAt,
+        lastFinishedAt: latestRun?.finishedAt,
+        lastStatus: latestRun?.status ?? latestSearch?.lastStatus,
+        successCount,
+        failureCount,
+        consecutiveFailureCount,
+      };
+    });
   }
 
   async createSearchSession(
@@ -2734,6 +2833,22 @@ function normalizeLegacyStoredValue(value: unknown): unknown {
 function normalizeLegacyStoredRecord(value: Record<string, unknown>) {
   const normalized = normalizeLegacyStoredValue(value);
   return isRecord(normalized) ? normalized : value;
+}
+
+function compareCrawlRunsByActivity(left: CrawlRun, right: CrawlRun) {
+  return resolveCrawlRunActivityAt(left).localeCompare(resolveCrawlRunActivityAt(right));
+}
+
+function resolveCrawlRunActivityAt(run: CrawlRun) {
+  return run.finishedAt ?? run.lastHeartbeatAt ?? run.startedAt;
+}
+
+function isSuccessfulProfileRunStatus(status: CrawlRunStatus) {
+  return status === "completed" || status === "partial";
+}
+
+function isFailedProfileRunStatus(status: CrawlRunStatus) {
+  return status === "failed" || status === "aborted";
 }
 
 function normalizeOptionalDocumentString(value: unknown) {

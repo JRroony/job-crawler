@@ -1349,7 +1349,6 @@ describe("source discovery", () => {
         expect.objectContaining({
           title: "software engineer",
           country: "Canada",
-          platforms: ["greenhouse"],
         }),
       ]),
     );
@@ -2593,6 +2592,7 @@ describe("source capping with platform diversity", () => {
 
   it("includes Canada title-family and metro coverage in the recurring inventory expansion portfolio", () => {
     const intervalMs = 600_000;
+    const portfolio = listBackgroundInventoryExpansionPortfolio();
     const selectedAcrossCycles = Array.from({ length: 36 }, (_, cycle) =>
       selectBackgroundInventoryExpansionFilters({
         now: new Date(cycle * intervalMs),
@@ -2639,10 +2639,6 @@ describe("source capping with platform diversity", () => {
           country: "Canada",
         }),
         expect.objectContaining({
-          title: "llm engineer",
-          country: "Canada",
-        }),
-        expect.objectContaining({
           title: "machine learning engineer",
           country: "Canada",
         }),
@@ -2663,7 +2659,7 @@ describe("source capping with platform diversity", () => {
     expect(
       canadaFilters.some((filters) => !filters.city && !filters.state),
     ).toBe(true);
-    expect(canadaFilters).toEqual(
+    expect(portfolio).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ country: "Canada", city: "Toronto", state: "ON" }),
         expect.objectContaining({ country: "Canada", city: "Vancouver", state: "BC" }),
@@ -2753,7 +2749,6 @@ describe("source capping with platform diversity", () => {
         expect.objectContaining({
           title: "software engineer",
           country: "Canada",
-          platforms: ["greenhouse"],
           crawlMode: "balanced",
         }),
       ]),

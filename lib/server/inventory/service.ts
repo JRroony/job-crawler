@@ -17,6 +17,7 @@ import {
   type RecurringInventorySelectionPlan,
 } from "@/lib/server/inventory/selection";
 import { resolveRepository } from "@/lib/server/services/runtime";
+import type { SearchFilters } from "@/lib/types";
 
 export type InventoryExpansionResult = SourceInventoryExpansionResult;
 
@@ -38,6 +39,7 @@ export async function runPersistentInventoryExpansion(runtime: {
   intervalMs: number;
   maxSources: number;
   refreshedInventory?: SourceInventoryRecord[];
+  expansionFilters?: SearchFilters[];
 }) {
   const repository = await resolveRepository(runtime.repository);
   return expandSourceInventory({
@@ -47,6 +49,7 @@ export async function runPersistentInventoryExpansion(runtime: {
     intervalMs: runtime.intervalMs,
     maxSources: runtime.maxSources,
     refreshedInventory: runtime.refreshedInventory,
+    expansionFilters: runtime.expansionFilters,
   });
 }
 

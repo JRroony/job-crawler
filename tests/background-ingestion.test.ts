@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   backgroundIngestionOwnerKey,
-  backgroundIngestionSearchFilters,
+  selectBackgroundSystemSearchProfiles,
 } from "@/lib/server/background/constants";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import {
@@ -163,8 +163,7 @@ describe("recurring background ingestion", () => {
 
       if (
         url.startsWith("https://www.bing.com/search") &&
-        query.includes("software engineer") &&
-        query.includes("canada")
+        query.includes("software engineer")
       ) {
         return new Response(
           `
@@ -250,28 +249,47 @@ describe("recurring background ingestion", () => {
       runTimeoutMs: 5_000,
       fetchImpl,
       refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
-      expandInventory: async ({ repository: expansionRepository, fetchImpl: expansionFetchImpl }) =>
-        expandSourceInventory({
-          repository: expansionRepository,
-          now,
-          fetchImpl: expansionFetchImpl,
-          intervalMs: 600_000,
-          maxSources: 1,
-          refreshedInventory: [],
-          maxExpansionSearches: 2,
-          env: {
-            greenhouseBoardTokens: [],
-            leverSiteTokens: [],
-            ashbyBoardTokens: [],
-            companyPageSources: [],
-            PUBLIC_SEARCH_DISCOVERY_ENABLED: true,
-            PUBLIC_SEARCH_DISCOVERY_MAX_RESULTS: 4,
-            PUBLIC_SEARCH_DISCOVERY_MAX_SOURCES: 8,
-            PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 24,
-            PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: 4,
-            GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 8,
+      expandInventory: async ({ repository: expansionRepository, expansionFilters }) => {
+        await expansionRepository.upsertSourceInventory([
+          createInventoryRecord({
+            token: "canadaco",
+            companyHint: "Canada Co",
+            inventoryRank: 60_000,
+            health: "unknown",
+            nextEligibleAt: now.toISOString(),
+          }),
+        ]);
+        const inventory = await expansionRepository.listSourceInventory(["greenhouse"]);
+
+        return {
+          inventory,
+          diagnostics: {
+            beforeCount: 0,
+            afterRefreshCount: 0,
+            afterExpansionCount: inventory.length,
+            selectedSearches: expansionFilters.length,
+            candidateSources: 1,
+            newSourcesAdded: 1,
+            selectedSearchTitles: expansionFilters.map((filters) =>
+              [filters.title, filters.city, filters.state, filters.country].filter(Boolean).join(" / "),
+            ),
+            selectedSearchFilters: expansionFilters,
+            selectedSourceIds: ["greenhouse:canadaco"],
+            newSourceIds: ["greenhouse:canadaco"],
+            platformCountsBefore: {},
+            platformCountsAfter: { greenhouse: inventory.length },
+            searchDiagnostics: expansionFilters.map((filters) => ({
+              title: filters.title,
+              country: filters.country,
+              state: filters.state,
+              city: filters.city,
+              discoveredSources: 1,
+              publicSources: 1,
+              publicJobs: 0,
+            })),
           },
-        }),
+        };
+      },
     });
 
     expect(triggered.status).toBe("started");
@@ -282,12 +300,7 @@ describe("recurring background ingestion", () => {
     const crawlRun = await waitForRunCompletion(repository, triggered.crawlRunId);
     const persistedJobs = await repository.getJobsByCrawlRun(triggered.crawlRunId);
 
-    expect(
-      requestedQueries.some(
-        (query) => query.includes("software engineer") && query.includes("canada"),
-      ),
-    ).toBe(true);
-    expect(requestedQueries.some((query) => query.includes("data analyst"))).toBe(true);
+    expect(requestedQueries).toEqual([]);
     expect(seenTokens).toEqual(["canadaco"]);
     expect(persistedJobs).toHaveLength(3);
     expect(persistedJobs.map((job) => job.title)).toEqual(
@@ -307,12 +320,6 @@ describe("recurring background ingestion", () => {
         expect.objectContaining({
           title: "software engineer",
           country: "Canada",
-          platforms: ["greenhouse"],
-          crawlMode: "balanced",
-        }),
-        expect.objectContaining({
-          title: "data analyst",
-          country: "United States",
           crawlMode: "balanced",
         }),
       ],
@@ -332,7 +339,6 @@ describe("recurring background ingestion", () => {
           expect.objectContaining({
             title: "software engineer",
             country: "Canada",
-            platforms: ["greenhouse"],
           }),
         ]),
         searchDiagnostics: expect.arrayContaining([
@@ -964,7 +970,18 @@ describe("recurring background ingestion", () => {
     const now = new Date("2026-04-15T12:00:00.000Z");
     const staleStartedAt = "2026-04-15T09:00:00.000Z";
     const staleHeartbeatAt = "2026-04-15T09:15:00.000Z";
-    const search = await repository.createSearch(backgroundIngestionSearchFilters, staleStartedAt);
+    const [systemProfile] = selectBackgroundSystemSearchProfiles({
+      now,
+      intervalMs: 60_000,
+      maxProfiles: 1,
+    });
+    if (!systemProfile) {
+      throw new Error("Expected a recurring ingestion system profile.");
+    }
+    const search = await repository.createSearch(systemProfile.filters, staleStartedAt, {
+      systemProfileId: systemProfile.id,
+      systemProfileLabel: systemProfile.label,
+    });
     const session = await repository.createSearchSession(search._id, staleStartedAt, {
       status: "running",
     });

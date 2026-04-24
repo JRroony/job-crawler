@@ -2,7 +2,8 @@ import "server-only";
 
 import {
   backgroundIngestionOwnerKey,
-  backgroundIngestionSearchFilters,
+  selectBackgroundSystemSearchProfiles,
+  type SystemSearchProfile,
 } from "@/lib/server/background/constants";
 import { queueSearchRun } from "@/lib/server/crawler/background-runs";
 import { CrawlAbortedError, seedToPersistableJob } from "@/lib/server/crawler/pipeline";
@@ -55,12 +56,14 @@ type BackgroundIngestionRuntime = {
     fetchImpl?: typeof fetch;
     intervalMs: number;
     maxSources: number;
+    expansionFilters: SearchDocument["filters"][];
+    systemProfile: SystemSearchProfile;
   }) => Promise<InventoryExpansionResult>;
   resolveRepository?: () => Promise<JobCrawlerRepository>;
 };
 
 type BackgroundIngestionTriggerResult =
-  | { status: "started"; searchId: string; crawlRunId: string }
+  | { status: "started"; searchId: string; crawlRunId: string; systemProfileId: string }
   | {
       status:
         | "skipped-disabled"
@@ -68,6 +71,7 @@ type BackgroundIngestionTriggerResult =
         | "skipped-no-mongo"
         | "skipped-bootstrap-failed";
       searchId?: string;
+      systemProfileId?: string;
       reason?: "mongo_unavailable" | "bootstrap_failed";
       phase?: "repository_resolution" | "index_initialization";
       message?: string;
@@ -190,7 +194,26 @@ export async function triggerRecurringBackgroundIngestion(
   const repository = repositoryResolution.repository;
 
   const now = runtime.now ?? new Date();
-  const search = await ensureBackgroundSearch(repository, now);
+  const systemProfile = selectBackgroundSystemSearchProfiles({
+    now,
+    intervalMs: Math.max(
+      1,
+      Math.floor(runtime.schedulingIntervalMs ?? env.BACKGROUND_INGESTION_INTERVAL_MS),
+    ),
+    maxProfiles: 1,
+    profileRunStates: await repository.listSystemSearchProfileRunStates(),
+  })[0];
+  if (!systemProfile) {
+    const result = {
+      status: "skipped-disabled" as const,
+      message:
+        "No enabled system search profiles are currently eligible for recurring ingestion.",
+    };
+    logBackgroundIngestionTrigger(result);
+    return result;
+  }
+
+  const search = await ensureBackgroundSearch(repository, now, systemProfile);
   const staleAfterMs = Math.max(
     1,
     Math.floor(runtime.staleAfterMs ?? env.BACKGROUND_INGESTION_STALE_AFTER_MS),
@@ -198,9 +221,26 @@ export async function triggerRecurringBackgroundIngestion(
 
   await recoverStaleBackgroundRunIfNeeded(search._id, repository, now, staleAfterMs);
 
+  const activeBackgroundQueueEntry =
+    await repository.getActiveCrawlQueueEntryForOwner(backgroundIngestionOwnerKey);
+  if (activeBackgroundQueueEntry && activeBackgroundQueueEntry.searchId !== search._id) {
+    const activeSearch = await repository.getSearch(activeBackgroundQueueEntry.searchId);
+    const result = {
+      status: "skipped-active" as const,
+      searchId: activeBackgroundQueueEntry.searchId,
+      systemProfileId: activeSearch?.systemProfileId,
+    };
+    logBackgroundIngestionTrigger(result);
+    return result;
+  }
+
   const activeQueueEntry = await repository.getActiveCrawlQueueEntryForSearch(search._id);
   if (activeQueueEntry) {
-    const result = { status: "skipped-active" as const, searchId: search._id };
+    const result = {
+      status: "skipped-active" as const,
+      searchId: search._id,
+      systemProfileId: systemProfile.id,
+    };
     logBackgroundIngestionTrigger(result);
     return result;
   }
@@ -233,6 +273,7 @@ export async function triggerRecurringBackgroundIngestion(
           search,
           searchSession,
           crawlRunId: crawlRun._id,
+          systemProfile,
         },
         {
           repository,
@@ -260,7 +301,11 @@ export async function triggerRecurringBackgroundIngestion(
   );
 
   if (!queued) {
-    const result = { status: "skipped-active" as const, searchId: search._id };
+    const result = {
+      status: "skipped-active" as const,
+      searchId: search._id,
+      systemProfileId: systemProfile.id,
+    };
     logBackgroundIngestionTrigger(result);
     return result;
   }
@@ -269,6 +314,7 @@ export async function triggerRecurringBackgroundIngestion(
     status: "started",
     searchId: search._id,
     crawlRunId: crawlRun._id,
+    systemProfileId: systemProfile.id,
   } as const;
   logBackgroundIngestionTrigger(result);
   return result;
@@ -298,6 +344,7 @@ function logBackgroundIngestionTrigger(result: BackgroundIngestionTriggerResult)
     status: result.status,
     searchId: "searchId" in result ? result.searchId : undefined,
     crawlRunId: "crawlRunId" in result ? result.crawlRunId : undefined,
+    systemProfileId: "systemProfileId" in result ? result.systemProfileId : undefined,
     reason: "reason" in result ? result.reason : undefined,
     phase: "phase" in result ? result.phase : undefined,
     message: "message" in result ? result.message : undefined,
@@ -316,6 +363,7 @@ async function executeRecurringInventoryIngestion(
     search: SearchDocument;
     searchSession: SearchSessionDocument;
     crawlRunId: string;
+    systemProfile: SystemSearchProfile;
   },
   runtime: {
     repository: JobCrawlerRepository;
@@ -336,6 +384,8 @@ async function executeRecurringInventoryIngestion(
       fetchImpl?: typeof fetch;
       intervalMs: number;
       maxSources: number;
+      expansionFilters: SearchDocument["filters"][];
+      systemProfile: SystemSearchProfile;
     }) => Promise<InventoryExpansionResult>;
   },
 ) {
@@ -375,6 +425,41 @@ async function executeRecurringInventoryIngestion(
   const runTimestamp = () => new Date(startedAtMs + Math.max(0, Date.now() - startMs)).toISOString();
 
   try {
+    diagnostics.systemProfile = {
+      id: target.systemProfile.id,
+      label: target.systemProfile.label,
+      canonicalJobFamily: target.systemProfile.canonicalJobFamily,
+      queryTitleVariant: target.systemProfile.queryTitleVariant,
+      titleVariantTier: target.systemProfile.titleVariantTier,
+      geography: {
+        ...target.systemProfile.geography,
+        variantTiers: [...target.systemProfile.geography.variantTiers],
+      },
+      platformPreference: target.systemProfile.platformPreference
+        ? {
+            mode: target.systemProfile.platformPreference.mode,
+            platforms: [...target.systemProfile.platformPreference.platforms],
+          }
+        : undefined,
+      priority: target.systemProfile.priority,
+      enabled: target.systemProfile.enabled,
+      cadenceMs: target.systemProfile.cadenceMs,
+      cooldownMs: target.systemProfile.cooldownMs,
+      lastRunAt: target.systemProfile.lastRunAt,
+      nextEligibleAt: target.systemProfile.nextEligibleAt,
+      successCount: target.systemProfile.successCount,
+      failureCount: target.systemProfile.failureCount,
+      consecutiveFailureCount: target.systemProfile.consecutiveFailureCount,
+      filters: target.systemProfile.filters,
+    };
+    console.info("[background-ingestion:profile]", {
+      searchId: target.search._id,
+      crawlRunId: target.crawlRunId,
+      systemProfileId: target.systemProfile.id,
+      systemProfileLabel: target.systemProfile.label,
+      filters: target.systemProfile.filters,
+    });
+
     await repository.updateCrawlRunProgress(target.crawlRunId, {
       status: "running",
       stage: "discovering",
@@ -401,6 +486,7 @@ async function executeRecurringInventoryIngestion(
       refreshedInventory,
       refreshInventoryProvided: Boolean(runtime.refreshInventory),
       expandInventory: runtime.expandInventory,
+      systemProfile: target.systemProfile,
     });
     const inventory = inventoryExpansion.inventory;
     diagnostics.discoveredSources = inventory.length;
@@ -431,8 +517,19 @@ async function executeRecurringInventoryIngestion(
       selectionPlan.selectedRecords.map((record) => [record._id, record] as const),
     );
     const inventorySources = selectionPlan.selectedRecords.map(toDiscoveredSourceFromInventory);
+    const selectedByProvider = providers.reduce<Record<string, number>>((counts, provider) => {
+      counts[provider.provider] = inventorySources.filter((source) =>
+        provider.supportsSource(source),
+      ).length;
+      return counts;
+    }, {});
+    diagnostics.inventoryScheduling = {
+      ...selectionPlan.diagnostics,
+      selectedByProvider,
+    };
 
     console.info("[background-ingestion:inventory-expansion]", {
+      systemProfileId: target.systemProfile.id,
       beforeCount: inventoryExpansion.diagnostics.beforeCount,
       afterRefreshCount: inventoryExpansion.diagnostics.afterRefreshCount,
       afterExpansionCount: inventoryExpansion.diagnostics.afterExpansionCount,
@@ -456,6 +553,7 @@ async function executeRecurringInventoryIngestion(
     });
 
     console.info("[background-ingestion:source-selection]", {
+      systemProfileId: target.systemProfile.id,
       inventorySources: selectionPlan.diagnostics.inventorySources,
       crawlableSources: selectionPlan.diagnostics.crawlableSources,
       eligibleSources: selectionPlan.diagnostics.eligibleSources,
@@ -463,6 +561,7 @@ async function executeRecurringInventoryIngestion(
       skippedByReason: selectionPlan.diagnostics.skippedByReason,
       freshnessBuckets: selectionPlan.diagnostics.freshnessBuckets,
       selectedByPlatform: selectionPlan.diagnostics.selectedByPlatform,
+      selectedByProvider,
       selectedByHealth: selectionPlan.diagnostics.selectedByHealth,
       selectedSourceIds: selectionPlan.diagnostics.selectedSourceIds,
       skippedSourceSamples: selectionPlan.diagnostics.skippedSourceSamples,
@@ -504,7 +603,7 @@ async function executeRecurringInventoryIngestion(
           {
             fetchImpl: runtime.fetchImpl ?? fetch,
             now: runtime.now,
-            filters: backgroundIngestionSearchFilters,
+            filters: target.systemProfile.filters,
             signal: runController.signal,
             throwIfCanceled: () => runController.throwIfCanceled(),
           },
@@ -517,6 +616,7 @@ async function executeRecurringInventoryIngestion(
 
         diagnostics.performance.persistenceBatchCount += 1;
         console.info("[background-ingestion:persistence-batch-start]", {
+          systemProfileId: target.systemProfile.id,
           searchId: target.search._id,
           crawlRunId: target.crawlRunId,
           provider: provider.provider,
@@ -558,6 +658,7 @@ async function executeRecurringInventoryIngestion(
             backgroundPersistenceFailures,
           );
           console.error("[background-ingestion:persistence-batch-failed]", {
+            systemProfileId: target.systemProfile.id,
             searchId: target.search._id,
             crawlRunId: target.crawlRunId,
             provider: provider.provider,
@@ -601,6 +702,7 @@ async function executeRecurringInventoryIngestion(
         await repository.updateCrawlSourceResult(sourceResult);
 
         console.info("[background-ingestion:provider-summary]", {
+          systemProfileId: target.systemProfile.id,
           searchId: target.search._id,
           crawlRunId: target.crawlRunId,
           provider: provider.provider,
@@ -725,6 +827,7 @@ async function executeRecurringInventoryIngestion(
     const status = resolveFinalStatus(sourceResults, totalSavedJobs);
 
     console.info("[background-ingestion:persistence-summary]", {
+      systemProfileId: target.systemProfile.id,
       searchId: target.search._id,
       crawlRunId: target.crawlRunId,
       status,
@@ -847,13 +950,22 @@ async function finalizeBackgroundRun(input: {
   ]);
 }
 
-async function ensureBackgroundSearch(repository: JobCrawlerRepository, now: Date) {
-  const existing = await repository.findMostRecentSearchByFilters(backgroundIngestionSearchFilters);
+async function ensureBackgroundSearch(
+  repository: JobCrawlerRepository,
+  now: Date,
+  systemProfile: SystemSearchProfile,
+) {
+  const existing = await repository.findMostRecentSearchByFilters(systemProfile.filters, {
+    systemProfileId: systemProfile.id,
+  });
   if (existing) {
     return existing;
   }
 
-  return repository.createSearch(backgroundIngestionSearchFilters, now.toISOString());
+  return repository.createSearch(systemProfile.filters, now.toISOString(), {
+    systemProfileId: systemProfile.id,
+    systemProfileLabel: systemProfile.label,
+  });
 }
 
 async function resolveInventoryExpansion(input: {
@@ -870,7 +982,10 @@ async function resolveInventoryExpansion(input: {
     fetchImpl?: typeof fetch;
     intervalMs: number;
     maxSources: number;
+    expansionFilters: SearchDocument["filters"][];
+    systemProfile: SystemSearchProfile;
   }) => Promise<InventoryExpansionResult>;
+  systemProfile: SystemSearchProfile;
 }): Promise<InventoryExpansionResult> {
   if (input.expandInventory) {
     return input.expandInventory({
@@ -879,6 +994,8 @@ async function resolveInventoryExpansion(input: {
       fetchImpl: input.fetchImpl,
       intervalMs: input.intervalMs,
       maxSources: input.maxSources,
+      expansionFilters: [input.systemProfile.filters],
+      systemProfile: input.systemProfile,
     });
   }
 
@@ -911,6 +1028,7 @@ async function resolveInventoryExpansion(input: {
     intervalMs: input.intervalMs,
     maxSources: input.maxSources,
     refreshedInventory: input.refreshedInventory,
+    expansionFilters: [input.systemProfile.filters],
   });
 }
 
@@ -1280,6 +1398,7 @@ function createEmptyDiagnostics(): CrawlDiagnostics {
       skippedByReason: {},
       freshnessBuckets: {},
       selectedByPlatform: {},
+      selectedByProvider: {},
       selectedByHealth: {},
       selectedSourceIds: [],
       skippedSourceSamples: [],
