@@ -18,6 +18,11 @@ import {
   resolveSupportedCountryRegion,
 } from "@/lib/server/locations/world";
 import type { JobListing, ResolvedLocation, SearchFilters } from "@/lib/types";
+import {
+  matchJobLocationAgainstGeoIntent,
+  normalizeJobGeoLocation,
+} from "@/lib/server/geo/match";
+import { parseGeoIntentFromFilters } from "@/lib/server/geo/parse";
 
 type LocationWorkplaceMode = "any" | "remote" | "hybrid";
 type JobWorkplaceMode = "remote" | "hybrid" | "onsite" | "unknown";
@@ -94,18 +99,84 @@ const unitedStatesQueryAliases = [
 ];
 
 export function getLocationMatchResult(
-  job: LocationFilterableJob,
+  job: LocationFilterableJob & {
+    locationRaw?: string;
+    normalizedLocation?: string;
+    locationNormalized?: string;
+    geoLocation?: JobListing["geoLocation"];
+    rawSourceMetadata?: Record<string, unknown>;
+  },
   filters: Pick<SearchFilters, "country" | "state" | "city">,
   resolvedLocation: ResolvedLocation,
 ): LocationMatchResult | undefined {
+  const geoIntent = parseGeoIntentFromFilters(filters);
+  if (geoIntent.scope === "none") {
+    return undefined;
+  }
+  const geoLocation =
+    job.geoLocation ??
+    normalizeJobGeoLocation({
+      country: job.country,
+      state: job.state,
+      city: job.city,
+      locationText: job.locationText,
+      locationRaw: job.locationRaw,
+      normalizedLocation: job.normalizedLocation,
+      locationNormalized: job.locationNormalized,
+      resolvedLocation,
+      rawSourceMetadata: job.rawSourceMetadata,
+    });
+  const geoMatch = matchJobLocationAgainstGeoIntent(geoLocation, geoIntent, {
+    includePhysicalForRemoteCountry: false,
+  });
+  const diagnostics: JobLocationDiagnostics = {
+    raw: geoLocation.rawText,
+    normalized: geoLocation.normalizedText,
+    country: geoLocation.physicalLocations[0]?.country ?? geoLocation.remoteEligibility[0]?.country,
+    state: geoLocation.physicalLocations[0]?.region ?? geoLocation.remoteEligibility[0]?.region,
+    stateCode: geoLocation.physicalLocations[0]?.regionCode ?? geoLocation.remoteEligibility[0]?.regionCode,
+    city: geoLocation.physicalLocations[0]?.city ?? geoLocation.remoteEligibility[0]?.city,
+    workplaceMode: geoLocation.workplaceType,
+    isRemote: geoLocation.workplaceType === "remote",
+    isUnitedStates:
+      geoLocation.physicalLocations.some((point) => point.countryCode === "US") ||
+      geoLocation.remoteEligibility.some((point) => point.countryCode === "US"),
+    physicalLocations: resolvedLocation.physicalLocations ?? [],
+    eligibilityCountries:
+      geoLocation.remoteEligibility.map((point) => point.country).filter((value): value is string => Boolean(value)),
+    conflicts: resolvedLocation.conflicts ?? [],
+    aliasesUsed: geoLocation.searchKeys,
+  };
+  return {
+    matches: geoMatch.matches,
+    explanation: geoMatch.explanation,
+    matchedTerms: geoMatch.matchedKeys,
+    queryDiagnostics: {
+      original: geoIntent.rawInput,
+      normalized: geoIntent.normalizedInput,
+      country: geoIntent.country?.name,
+      state: geoIntent.region?.name,
+      city: geoIntent.city?.name,
+      workplaceMode: geoIntent.isRemote ? "remote" : "any",
+      scopesApplied:
+        geoIntent.scope === "country" || geoIntent.scope === "remote_country"
+          ? ["country"]
+          : geoIntent.scope === "region" || geoIntent.scope === "remote_region"
+            ? ["state"]
+            : ["city"],
+      expandedTerms: buildGeoIntentExpandedTerms(geoIntent),
+    },
+    jobDiagnostics: diagnostics,
+  };
+
   const countryQuery = filters.country
-    ? buildLocationQueryTermSet("country", filters.country)
+    ? buildLocationQueryTermSet("country", filters.country ?? "")
     : undefined;
   const stateQuery = filters.state
-    ? buildLocationQueryTermSet("state", filters.state)
+    ? buildLocationQueryTermSet("state", filters.state ?? "")
     : undefined;
   const cityQuery = filters.city
-    ? buildLocationQueryTermSet("city", filters.city)
+    ? buildLocationQueryTermSet("city", filters.city ?? "")
     : undefined;
   const activeQueries = [countryQuery, stateQuery, cityQuery].filter(
     (value): value is LocationQueryTermSet => Boolean(value),
@@ -142,6 +213,27 @@ export function getLocationMatchResult(
     queryDiagnostics: buildLocationQueryDiagnostics(activeQueries),
     jobDiagnostics,
   };
+}
+
+function buildGeoIntentExpandedTerms(geoIntent: ReturnType<typeof parseGeoIntentFromFilters>) {
+  const aliases = [
+    ...geoIntent.searchKeys,
+    ...(geoIntent.country?.aliases ?? []),
+    ...(geoIntent.region?.aliases ?? []),
+    ...(geoIntent.city?.aliases ?? []),
+  ];
+  if (geoIntent.isRemote) {
+    aliases.push(
+      ...[
+        geoIntent.country?.name,
+        geoIntent.country?.code,
+        ...(geoIntent.country?.aliases ?? []),
+      ]
+        .filter(Boolean)
+        .flatMap((value) => [`remote ${value}`, `remote in ${value}`, `${value} remote`]),
+    );
+  }
+  return dedupeTerms(aliases.map((value) => normalizeLocationText(value)));
 }
 
 function matchQueryScope(

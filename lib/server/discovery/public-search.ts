@@ -18,6 +18,9 @@ import {
   type CountryDiscoveryLocationClause,
   type CountryLocationIntent,
 } from "@/lib/server/locations/world";
+import { parseGeoIntentFromFilters } from "@/lib/server/geo/parse";
+import { buildDiscoveryClausesFromGeoIntent } from "@/lib/server/geo/discovery";
+import type { GeoIntent } from "@/lib/server/geo/intent";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import { safeFetchText } from "@/lib/server/net/fetcher";
 import type { NormalizedJobSeed } from "@/lib/server/providers/types";
@@ -62,7 +65,7 @@ type PublicSearchQuery = {
   roleKind: TitleQueryVariant["kind"];
   rolePriority: number;
   locationClause?: string;
-  locationKind: (UsDiscoveryLocationClause | CountryDiscoveryLocationClause)["kind"];
+  locationKind: (UsDiscoveryLocationClause | CountryDiscoveryLocationClause)["kind"] | "city" | "region";
   locationPriority: number;
   query: string;
   limit: number;
@@ -71,9 +74,9 @@ type PublicSearchQuery = {
 
 type PublicSearchPlatformPlan = {
   platform: SearchablePublicPlatform;
-  locationIntent: UsLocationIntent | CountryLocationIntent;
+  locationIntent: UsLocationIntent | CountryLocationIntent | GeoIntent;
   locationClauses: string[];
-  locationOptions: Array<UsDiscoveryLocationClause | CountryDiscoveryLocationClause>;
+  locationOptions: Array<UsDiscoveryLocationClause | CountryDiscoveryLocationClause | { clause: string; kind: PublicSearchQuery["locationKind"]; priority: number }>;
   queries: PublicSearchQuery[];
 };
 
@@ -560,53 +563,75 @@ function buildPlatformLocationPlan(
   filters: SearchFilters,
   maxLocationClauses: number,
 ): {
-  locationIntent: UsLocationIntent | CountryLocationIntent;
+  locationIntent: UsLocationIntent | CountryLocationIntent | GeoIntent;
   locationClauses: string[];
-  locationOptions: Array<UsDiscoveryLocationClause | CountryDiscoveryLocationClause>;
+  locationOptions: PublicSearchPlatformPlan["locationOptions"];
 } {
-  const locationPlan = buildUsDiscoveryLocationClauses(filters, {
+  const geoIntent = parseGeoIntentFromFilters(filters);
+  const clauses = buildDiscoveryClausesFromGeoIntent(geoIntent, {
     maxClauses: maxLocationClauses,
-  });
-
-  if (locationPlan.intent.kind === "none" || locationPlan.intent.kind === "non_us") {
-    const countryPlan = buildSupportedCountryDiscoveryLocationClauses(filters, {
-      maxClauses: Math.min(maxLocationClauses, 32),
-    });
-
-    if (countryPlan.intent.kind !== "none") {
-      return {
-        locationIntent: countryPlan.intent,
-        locationClauses: countryPlan.clauses.length > 0 ? countryPlan.clauses : [""],
-        locationOptions:
-          countryPlan.detailedClauses.length > 0
-            ? countryPlan.detailedClauses
-            : [
-                { clause: "", kind: "blank", priority: 0 } satisfies CountryDiscoveryLocationClause,
-              ],
-      };
-    }
+    includeRemoteExpansion: true,
+  }).map((clause) => clause.toLowerCase());
+  if (geoIntent.city && !clauses.includes("")) {
+    clauses.unshift("");
   }
-
-  if (locationPlan.intent.kind === "none" || locationPlan.intent.kind === "non_us") {
+  if (geoIntent.scope === "none" || clauses.length === 0) {
     return {
-      locationIntent: locationPlan.intent,
+      locationIntent: geoIntent,
       locationClauses: [""],
       locationOptions: [
         { clause: "", kind: "blank", priority: 0 } satisfies UsDiscoveryLocationClause,
       ],
     };
   }
-
   return {
-    locationIntent: locationPlan.intent,
-    locationClauses: locationPlan.clauses.length > 0 ? locationPlan.clauses : [""],
-    locationOptions:
-      locationPlan.detailedClauses.length > 0
-        ? locationPlan.detailedClauses
-        : [
-            { clause: "", kind: "blank", priority: 0 } satisfies UsDiscoveryLocationClause,
-          ],
+    locationIntent: {
+      ...geoIntent,
+      ...buildLegacyComparableLocationIntentFields(geoIntent),
+    } as GeoIntent,
+    locationClauses: clauses,
+    locationOptions: clauses.map((clause, index) => ({
+      clause,
+      kind: !clause
+        ? "blank"
+        : clause.startsWith("remote")
+          ? geoIntent.scope === "region" ? "remote_state" : "remote"
+          : geoIntent.scope === "city" || geoIntent.scope === "city_country" || geoIntent.scope === "city_region" ? "metro" : geoIntent.scope === "region" ? "state" : "country",
+      priority: index,
+    })),
   };
+}
+
+function buildLegacyComparableLocationIntentFields(geoIntent: GeoIntent) {
+  if (geoIntent.country?.code === "US" && geoIntent.scope === "country") {
+    return { kind: "broad_us" };
+  }
+  if (geoIntent.country?.code === "US" && geoIntent.scope === "region") {
+    return {
+      kind: "us_state",
+      stateName: geoIntent.region?.name,
+      stateCode: geoIntent.region?.code,
+    };
+  }
+  if (geoIntent.country?.code === "US" && geoIntent.city) {
+    return {
+      kind: "us_city",
+      city: geoIntent.city.name,
+      stateName: geoIntent.region?.name,
+      stateCode: geoIntent.region?.code,
+    };
+  }
+  if (geoIntent.country) {
+    return {
+      kind: geoIntent.scope === "region" ? "country_region" : geoIntent.city ? "country_city" : "country",
+      countryConcept: geoIntent.country.name.toLowerCase(),
+      countryName: geoIntent.country.name,
+      regionName: geoIntent.region?.name,
+      regionCode: geoIntent.region?.code,
+      city: geoIntent.city?.name,
+    };
+  }
+  return { kind: geoIntent.scope };
 }
 
 function logQueryPlan(filters: SearchFilters, plan: PublicSearchQueryPlan) {

@@ -29,6 +29,7 @@ import {
   buildIndexedJobCandidateQuery,
   buildJobSearchIndex,
 } from "@/lib/server/search/job-search-index";
+import { normalizeJobGeoLocation } from "@/lib/server/geo/match";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import type {
   CrawlControlDocument,
@@ -2554,6 +2555,17 @@ function normalizeStoredJobFields(document: Record<string, unknown>) {
       locationNormalized: normalizedLocation,
       contentFingerprint: dedupeFingerprint,
     }).canonicalJobKey;
+  const geoLocation = normalizeJobGeoLocation({
+    country: normalizeOptionalDocumentString(document.country),
+    state: normalizeOptionalDocumentString(document.state),
+    city: normalizeOptionalDocumentString(document.city),
+    locationText: normalizeOptionalDocumentString(document.locationText) ?? locationRaw,
+    locationRaw,
+    normalizedLocation,
+    locationNormalized: normalizedLocation,
+    resolvedLocation,
+    rawSourceMetadata,
+  });
   const searchIndex = buildJobSearchIndex({
     title,
     normalizedTitle,
@@ -2564,6 +2576,7 @@ function normalizeStoredJobFields(document: Record<string, unknown>) {
     normalizedLocation,
     locationNormalized: normalizedLocation,
     resolvedLocation,
+    geoLocation,
     experienceLevel: normalizeOptionalExperienceLevel(document.experienceLevel),
     experienceClassification: normalizeExperienceClassification(document.experienceClassification),
   });
@@ -2582,6 +2595,7 @@ function normalizeStoredJobFields(document: Record<string, unknown>) {
     normalizedLocation,
     locationText: normalizeOptionalDocumentString(document.locationText) ?? locationRaw,
     resolvedLocation,
+    geoLocation,
     remoteType: normalizeRemoteType(document.remoteType, resolvedLocation, locationRaw),
     employmentType: normalizeEmploymentType(document.employmentType),
     seniority:

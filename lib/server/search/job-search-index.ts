@@ -18,6 +18,10 @@ import {
   resolveSupportedCountryConcept,
   resolveSupportedCountryRegion,
 } from "@/lib/server/locations/world";
+import { normalizeJobGeoLocation } from "@/lib/server/geo/match";
+import { parseGeoIntentFromFilters } from "@/lib/server/geo/parse";
+import { normalizeGeoText } from "@/lib/server/geo/normalize";
+import { countryLocationAliases, geoCatalog } from "@/lib/server/geo/catalog";
 import {
   areTitleConceptsAdjacent,
   analyzeTitle,
@@ -178,6 +182,7 @@ export function buildJobSearchIndex(
     | "normalizedLocation"
     | "locationNormalized"
     | "resolvedLocation"
+    | "geoLocation"
     | "experienceLevel"
     | "experienceClassification"
   >,
@@ -262,98 +267,13 @@ function buildJobLocationSearchKeys(
     | "normalizedLocation"
     | "locationNormalized"
     | "resolvedLocation"
+    | "geoLocation"
   >,
 ) {
-  const countryKeys: string[] = [];
-  const regionKeys: string[] = [];
-  const cityKeys: string[] = [];
-
-  const addLocation = (input: {
-    country?: string;
-    state?: string;
-    stateCode?: string;
-    city?: string;
-    isUnitedStates?: boolean;
-  }) => {
-    const country = input.isUnitedStates
-      ? "United States"
-      : normalizeCountryName(input.country);
-    const normalizedCountry = normalizeSearchKey(country);
-    if (normalizedCountry) {
-      countryKeys.push(`country:${normalizedCountry}`);
-    }
-
-    for (const region of dedupeStrings([input.state, input.stateCode])) {
-      const normalizedRegion = normalizeSearchKey(region);
-      if (normalizedCountry && normalizedRegion) {
-        regionKeys.push(`region:${normalizedCountry}:${normalizedRegion}`);
-      }
-    }
-
-    const normalizedCity = normalizeSearchKey(input.city);
-    if (normalizedCountry && normalizedCity) {
-      cityKeys.push(`city:${normalizedCountry}:${normalizedCity}`);
-    }
-  };
-
-  addLocation({
-    country: job.country,
-    state: job.state,
-    city: job.city,
-    isUnitedStates: job.country ? isUnitedStatesValue(job.country) : undefined,
-  });
-  addLocation({
-    country: job.resolvedLocation?.country,
-    state: job.resolvedLocation?.state,
-    stateCode: job.resolvedLocation?.stateCode,
-    city: job.resolvedLocation?.city,
-    isUnitedStates: job.resolvedLocation?.isUnitedStates,
-  });
-
-  for (const point of job.resolvedLocation?.physicalLocations ?? []) {
-    addLocation({
-      country: point.country,
-      state: point.state,
-      stateCode: point.stateCode,
-      city: point.city,
-      isUnitedStates: point.country === "United States",
-    });
-  }
-
-  for (const country of job.resolvedLocation?.eligibilityCountries ?? []) {
-    addLocation({
-      country,
-      isUnitedStates: isUnitedStatesValue(country),
-    });
-  }
-
-  for (const text of dedupeStrings([
-    job.locationText,
-    job.normalizedLocation,
-    job.locationNormalized,
-  ])) {
-    const us = analyzeUsLocation(text);
-    if (us.isUnitedStates) {
-      addLocation({
-        country: "United States",
-        state: us.stateName,
-        stateCode: us.stateCode,
-        city: us.city,
-        isUnitedStates: true,
-      });
-      continue;
-    }
-
-    const supported = analyzeSupportedCountryLocation(text);
-    if (supported.country) {
-      addLocation({
-        country: supported.country,
-        state: supported.state,
-        stateCode: supported.stateCode,
-        city: supported.city,
-      });
-    }
-  }
+  const geoLocation = job.geoLocation ?? normalizeJobGeoLocation(job);
+  const countryKeys = geoLocation.searchKeys.filter((key) => key.startsWith("country:") || key.startsWith("country_code:"));
+  const regionKeys = geoLocation.searchKeys.filter((key) => key.startsWith("region:") || key.startsWith("region_code:"));
+  const cityKeys = geoLocation.searchKeys.filter((key) => key.startsWith("city:"));
 
   const dedupedCountryKeys = dedupeStrings(countryKeys);
   const dedupedRegionKeys = dedupeStrings(regionKeys);
@@ -392,63 +312,57 @@ function normalizeSearchKey(value?: string) {
 }
 
 function buildLocationCandidateClause(filters: SearchFilters) {
+  const geoIntent = parseGeoIntentFromFilters(filters);
   const legacyClauses: Record<string, unknown>[] = [];
-  const searchReadyKeys = buildFilterLocationSearchKeys(filters);
+  const searchReadyKeys = geoIntent.searchKeys;
   const searchReadyClause =
     searchReadyKeys.length > 0
       ? {
-          "searchIndex.locationSearchKeys": { $in: searchReadyKeys },
+          $or: [
+            { "searchIndex.locationSearchKeys": { $in: searchReadyKeys } },
+            { "geoLocation.searchKeys": { $in: searchReadyKeys } },
+          ],
         }
       : undefined;
 
-  if (filters.country) {
-    if (isUnitedStatesValue(filters.country)) {
-      const locationTextFallback = buildUnitedStatesLocationTextFallbackClause();
-      legacyClauses.push({
-        $or: [
-          { "resolvedLocation.isUnitedStates": true },
-          { "resolvedLocation.physicalLocations.country": "United States" },
-          { "resolvedLocation.eligibilityCountries": "United States" },
-          { country: "United States" },
-          ...(locationTextFallback ? [locationTextFallback] : []),
-        ],
-      });
-    } else {
-      const countryConcept =
-        resolveSupportedCountryConcept(filters.country) ??
-        findSupportedCountryConceptInText(filters.country);
-      const canonicalCountry =
-        getSupportedCountryCanonicalName(countryConcept) ?? filters.country;
-      const locationTextFallback = buildSupportedCountryLocationTextFallbackClause(
-        canonicalCountry,
-      );
-
-      legacyClauses.push({
-        $or: [
-          { country: canonicalCountry },
-          { "resolvedLocation.country": canonicalCountry },
-          { "resolvedLocation.physicalLocations.country": canonicalCountry },
-          { "resolvedLocation.eligibilityCountries": canonicalCountry },
-          ...(locationTextFallback ? [locationTextFallback] : []),
-        ],
-      });
-    }
+  if (geoIntent.country) {
+    const catalogCountry = geoCatalog.find(
+      (country) => country.code === geoIntent.country?.code || country.name === geoIntent.country?.name,
+    );
+    const aliases = dedupeStrings([
+      geoIntent.country.name,
+      geoIntent.country.code,
+      ...geoIntent.country.aliases,
+      ...(catalogCountry ? countryLocationAliases(catalogCountry) : []),
+    ]);
+    const locationTextFallback = buildGenericLocationTextFallbackClause(aliases);
+    legacyClauses.push({
+      $or: [
+        { country: geoIntent.country.name },
+        { "resolvedLocation.country": geoIntent.country.name },
+        { "resolvedLocation.physicalLocations.country": geoIntent.country.name },
+        { "resolvedLocation.eligibilityCountries": geoIntent.country.name },
+        { "geoLocation.physicalLocations.country": geoIntent.country.name },
+        { "geoLocation.remoteEligibility.country": geoIntent.country.name },
+        ...(locationTextFallback ? [locationTextFallback] : []),
+      ],
+    });
   }
 
-  if (filters.state) {
-    const supportedRegion =
-      resolveSupportedCountryRegion(filters.state) ??
-      findSupportedCountryRegionInText(filters.state);
-    const state = resolveUsState(filters.state) ?? supportedRegion?.name;
-    const stateCode =
-      resolveUsStateCode(filters.state) ??
-      (state ? resolveUsStateCode(state) : undefined) ??
-      supportedRegion?.code;
-    const stateClauses = dedupeStrings([state, stateCode, filters.state]).flatMap((value) => [
+  if (geoIntent.region) {
+    const stateClauses = dedupeStrings([
+      geoIntent.region.name,
+      geoIntent.region.code,
+      ...geoIntent.region.aliases,
+    ]).flatMap((value) => [
       { "resolvedLocation.state": value },
       { "resolvedLocation.stateCode": value },
       { "resolvedLocation.physicalLocations.state": value },
       { "resolvedLocation.physicalLocations.stateCode": value },
+      { "geoLocation.physicalLocations.region": value },
+      { "geoLocation.physicalLocations.regionCode": value },
+      { "geoLocation.remoteEligibility.region": value },
+      { "geoLocation.remoteEligibility.regionCode": value },
       { state: value },
     ]);
 
@@ -457,12 +371,15 @@ function buildLocationCandidateClause(filters: SearchFilters) {
     }
   }
 
-  if (filters.city) {
+  if (geoIntent.city) {
     legacyClauses.push({
       $or: [
-        { "resolvedLocation.city": filters.city },
-        { "resolvedLocation.physicalLocations.city": filters.city },
-        { city: filters.city },
+        { "resolvedLocation.city": geoIntent.city.name },
+        { "resolvedLocation.physicalLocations.city": geoIntent.city.name },
+        { "geoLocation.physicalLocations.city": geoIntent.city.name },
+        { "geoLocation.remoteEligibility.city": geoIntent.city.name },
+        { city: geoIntent.city.name },
+        ...(geoIntent.confidence === "low" ? [buildGenericLocationTextFallbackClause(geoIntent.city.aliases)] : []),
       ],
     });
   }
@@ -489,47 +406,8 @@ function buildLocationCandidateClause(filters: SearchFilters) {
   return { $or: [searchReadyClause, legacyClause] };
 }
 
-function buildUnitedStatesLocationTextFallbackClause() {
-  const stateTerms = getUsStateCatalog().flatMap((state) => [
-    state.name,
-    state.code,
-  ]);
-  const metroTerms = getUsMetroCatalog().flatMap((metro) => [
-    metro.city,
-    `${metro.city} ${metro.stateCode}`,
-    `${metro.city} ${metro.stateName}`,
-  ]);
-  const regex = buildNormalizedTermRegex([
-    "united states",
-    "usa",
-    "remote us",
-    "remote united states",
-    ...stateTerms,
-    ...metroTerms,
-  ]);
-
-  if (!regex) {
-    return undefined;
-  }
-
-  return {
-    $or: [
-      { normalizedLocation: { $regex: regex } },
-      { locationNormalized: { $regex: regex } },
-      { locationText: { $regex: regex } },
-    ],
-  };
-}
-
-function buildSupportedCountryLocationTextFallbackClause(country: string) {
-  const concept =
-    resolveSupportedCountryConcept(country) ??
-    findSupportedCountryConceptInText(country);
-  const countryName = getSupportedCountryCanonicalName(concept) ?? country;
-  const countryAliases = concept
-    ? [countryName, ...getSupportedCountryLocationAliases(concept)]
-    : [countryName];
-  const regex = buildNormalizedTermRegex(countryAliases);
+function buildGenericLocationTextFallbackClause(aliases: string[]) {
+  const regex = buildNormalizedTermRegex(aliases.map(normalizeGeoText));
 
   if (!regex) {
     return undefined;
@@ -683,36 +561,19 @@ export function buildIndexedJobCandidateQuery(
       titleSearchTerms,
       usedPlatformPrefilter: Boolean(allowedPlatforms?.length),
       usedLocationPrefilter: Boolean(locationClause),
-      usedLocationTextFallback: Boolean(filters.country && isUnitedStatesValue(filters.country)),
+      usedLocationTextFallback: Boolean(parseGeoIntentFromFilters(filters).rawInput),
       usedExperiencePrefilter: Boolean(experienceClause),
       usedNormalizedTitleRegex: Boolean(normalizedTitleRegex),
       usedFamilyRoleFallback: Boolean(familyRoleFallback),
       usedSearchReadyTitleKeys: titleSearchKeys.length > 0,
-      usedSearchReadyLocationKeys: buildFilterLocationSearchKeys(filters).length > 0,
+      usedSearchReadyLocationKeys: parseGeoIntentFromFilters(filters).searchKeys.length > 0,
       usedSearchReadyExperienceKeys: Boolean(filters.experienceLevels?.length),
     },
   };
 }
 
 function buildFilterLocationSearchKeys(filters: Pick<SearchFilters, "country" | "state" | "city">) {
-  const country = normalizeCountryName(filters.country);
-  const normalizedCountry = normalizeSearchKey(country);
-  if (!normalizedCountry) {
-    return [];
-  }
-
-  const region =
-    country && country === "United States"
-      ? resolveUsState(filters.state) ?? resolveUsStateCode(filters.state) ?? filters.state
-      : (resolveSupportedCountryRegion(filters.state, resolveSupportedCountryConcept(country))?.name ??
-        resolveSupportedCountryRegion(filters.state, resolveSupportedCountryConcept(country))?.code ??
-        filters.state);
-
-  return dedupeStrings([
-    `country:${normalizedCountry}`,
-    filters.state && region ? `region:${normalizedCountry}:${normalizeSearchKey(region)}` : undefined,
-    filters.city ? `city:${normalizedCountry}:${normalizeSearchKey(filters.city)}` : undefined,
-  ]);
+  return parseGeoIntentFromFilters(filters).searchKeys;
 }
 
 function buildFamilyRoleFallbackClause(title: string) {

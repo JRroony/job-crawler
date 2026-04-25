@@ -76,7 +76,12 @@ type ExperienceFilterableJob = Pick<
   | "experienceLevel"
   | "experienceClassification"
   | "rawSourceMetadata"
->;
+> & {
+  locationRaw?: string;
+  normalizedLocation?: string;
+  locationNormalized?: string;
+  geoLocation?: JobListing["geoLocation"];
+};
 
 type ExperienceSignal = {
   ruleId: string;

@@ -955,6 +955,29 @@ export const resolvedLocationSchema = z.object({
   conflicts: z.array(resolvedLocationConflictSchema).optional(),
 });
 
+export const geoLocationPointSchema = z.object({
+  country: z.string().min(1).optional(),
+  countryCode: z.string().min(1).optional(),
+  region: z.string().min(1).optional(),
+  regionCode: z.string().min(1).optional(),
+  city: z.string().min(1).optional(),
+  searchKeys: z.array(z.string().min(1)).default([]),
+  confidence: z.enum(["high", "medium", "low"]),
+  evidence: z.array(z.string().min(1)).default([]),
+});
+
+export const geoLocationSchema = z.object({
+  rawText: z.string().min(1),
+  normalizedText: z.string(),
+  physicalLocations: z.array(geoLocationPointSchema).default([]),
+  remoteEligibility: z.array(geoLocationPointSchema).default([]),
+  workplaceType: z.enum(["remote", "hybrid", "onsite", "unknown"]),
+  isGlobalRemote: z.boolean(),
+  unresolvedTerms: z.array(z.string()).default([]),
+  conflicts: z.array(z.string()).default([]),
+  searchKeys: z.array(z.string().min(1)).default([]),
+});
+
 export const jobSearchIndexSchema = z.object({
   titleNormalized: z.string().min(1),
   titleStrippedNormalized: z.string().min(1),
@@ -985,6 +1008,7 @@ export const jobListingSchema = z.object({
   normalizedLocation: z.string().min(1),
   locationText: z.string().min(1),
   resolvedLocation: resolvedLocationSchema.optional(),
+  geoLocation: geoLocationSchema.optional(),
   remoteType: remoteTypeSchema.default("unknown"),
   employmentType: employmentTypeSchema.optional(),
   seniority: experienceLevelSchema.optional(),

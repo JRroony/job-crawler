@@ -28,6 +28,7 @@ import { sortJobsForPersistence, sortJobsWithDiagnostics } from "@/lib/server/cr
 import { capSourcesWithPlatformDiversity } from "@/lib/server/crawler/source-capper";
 import { getEnv } from "@/lib/server/env";
 import { normalizeProviderJobSeed } from "@/lib/server/providers/shared";
+import { normalizeJobGeoLocation } from "@/lib/server/geo/match";
 import type {
   CrawlRunControlState,
   JobCrawlerRepository,
@@ -2316,6 +2317,17 @@ export function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): Persis
     locationNormalized,
     contentFingerprint: dedupeFingerprint,
   }).canonicalJobKey;
+  const geoLocation = normalizeJobGeoLocation({
+    country: resolvedLocation?.country ?? normalizedSeed.country,
+    state: resolvedLocation?.state ?? normalizedSeed.state,
+    city: resolvedLocation?.city ?? normalizedSeed.city,
+    locationText: normalizedSeed.locationText,
+    locationRaw,
+    normalizedLocation: locationNormalized,
+    locationNormalized,
+    resolvedLocation,
+    rawSourceMetadata: normalizedSeed.rawSourceMetadata,
+  });
 
   return {
     canonicalJobKey,
@@ -2330,6 +2342,7 @@ export function seedToPersistableJob(seed: NormalizedJobSeed, now: Date): Persis
     normalizedLocation: locationNormalized,
     locationText: normalizedSeed.locationText,
     resolvedLocation,
+    geoLocation,
     remoteType: normalizedSeed.remoteType ?? (resolvedLocation?.isRemote ? "remote" : "unknown"),
     employmentType: normalizedSeed.employmentType,
     seniority,

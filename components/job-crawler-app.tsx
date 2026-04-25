@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   BackgroundSupplementIndicator,
@@ -149,6 +149,35 @@ export function JobCrawlerApp({
   const activeIndexedDeliveryCursorRef = useRef(0);
   const clientRequestOwnerKeyRef = useRef(createClientRequestOwnerKey());
   const activeRequestControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (initialSearches.length > 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadRecentSearches() {
+      try {
+        const response = await fetch("/api/searches", { cache: "no-store" });
+        if (!response.ok) {
+          return;
+        }
+        const payload = (await response.json()) as { searches?: SearchDocument[] };
+        if (!cancelled && Array.isArray(payload.searches)) {
+          setRecentSearches(dedupeSearches(payload.searches.map(normalizeSearchDocumentForClient)));
+        }
+      } catch {
+        // Recent search history is non-blocking; search itself remains available.
+      }
+    }
+
+    void loadRecentSearches();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [initialSearches.length]);
 
   function buildLiveFilters(baseFilters: SearchFilters = filters) {
     return normalizeSearchFiltersForClient({

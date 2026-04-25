@@ -14,6 +14,9 @@ import type {
 import { activeCrawlerPlatforms, experienceLevels } from "@/lib/types";
 import { labelForCrawlerPlatform } from "@/components/job-crawler/ui-config";
 import { labelForExperience } from "@/lib/utils";
+import { parseGeoIntent } from "@/lib/geo/parse";
+import { matchJobLocationAgainstGeoIntent } from "@/lib/geo/match";
+import { normalizeJobGeoLocation } from "@/lib/geo/location";
 
 export type PostedDateFilter = "any" | "24h" | "7d" | "30d";
 
@@ -108,16 +111,16 @@ export function parseLocationInput(
   }
 
   if (parts.length === 1) {
-    const remoteCountry = parseRemoteCountryTerm(parts[0]);
-    if (remoteCountry) {
+    const intent = parseGeoIntent(parts[0]);
+    if (intent.scope === "remote_country" && intent.country) {
       return {
         city: "Remote",
         state: "",
-        country: remoteCountry,
+        country: intent.country.name,
       };
     }
 
-    if (isRemoteTerm(parts[0])) {
+    if (intent.scope === "global_remote") {
       return {
         city: "Remote",
         state: "",
@@ -125,18 +128,18 @@ export function parseLocationInput(
       };
     }
 
-    if (isCountryLike(parts[0])) {
+    if (intent.scope === "country" && intent.country) {
       return {
         city: "",
         state: "",
-        country: normalizeCountryLabel(parts[0]),
+        country: intent.country.name,
       };
     }
 
     return {
-      city: parts[0],
-      state: "",
-      country: "",
+      city: intent.city?.name ?? parts[0],
+      state: intent.region?.name ?? "",
+      country: intent.country?.name ?? "",
     };
   }
 
@@ -275,57 +278,12 @@ function matchesActiveSearchTitle(job: JobListing, filters: SearchFilters) {
 }
 
 function matchesActiveSearchLocation(job: JobListing, filters: SearchFilters) {
-  const country = normalizeCountryLabel(filters.country ?? "");
-  if (!country) {
+  const intent = parseGeoIntent(buildLocationInputValue(filters));
+  if (intent.scope === "none") {
     return true;
   }
-
-  const searchable = normalizeSearchText(
-    [
-      job.resolvedLocation?.country,
-      job.resolvedLocation?.state,
-      job.resolvedLocation?.stateCode,
-      job.resolvedLocation?.city,
-      ...(job.resolvedLocation?.physicalLocations ?? []).flatMap((location) => [
-        location.country,
-        location.state,
-        location.stateCode,
-        location.city,
-      ]),
-      ...(job.resolvedLocation?.eligibilityCountries ?? []),
-      job.country,
-      job.state,
-      job.city,
-      job.locationRaw,
-      job.locationText,
-      job.normalizedLocation,
-      job.locationNormalized,
-    ].filter(Boolean).join(" "),
-  );
-
-  if (country === "Canada") {
-    const hasCanadaEligibility = [
-      job.resolvedLocation?.country,
-      ...(job.resolvedLocation?.eligibilityCountries ?? []),
-      ...(job.resolvedLocation?.physicalLocations ?? []).map((location) => location.country),
-      job.country,
-    ].some((value) => normalizeCountryLabel(value ?? "") === "Canada");
-
-    return (
-      hasCanadaEligibility ||
-      /\b(remote canada|canada remote|remote in canada|remote within canada|ontario remote|bc remote)\b/.test(searchable) ||
-      /\b(toronto|vancouver|montreal|waterloo|kitchener|ottawa|markham|mississauga|calgary|edmonton|victoria|halifax|quebec city)\b/.test(searchable) ||
-      /\b(ontario|british columbia|quebec|alberta|manitoba|saskatchewan|nova scotia|new brunswick|newfoundland and labrador|prince edward island|northwest territories|yukon|nunavut)\b/.test(searchable) ||
-      /\b(on|bc|qc|ab|mb|sk|ns|nb|nl|pe|nt|yt|nu)\b/.test(searchable)
-    );
-  }
-
-  if (country === "United States") {
-    return /\b(united states|usa|remote us|remote united states)\b/.test(searchable) ||
-      normalizeCountryLabel(job.resolvedLocation?.country ?? job.country ?? "") === "United States";
-  }
-
-  return searchable.includes(normalizeSearchText(country));
+  const geoLocation = job.geoLocation ?? normalizeJobGeoLocation(job);
+  return matchJobLocationAgainstGeoIntent(geoLocation, intent).matches;
 }
 
 function parseRemoteCountryTerm(value: string) {
