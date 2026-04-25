@@ -601,6 +601,19 @@ export const crawlDiagnosticsSchema = z.object({
       message: nullableOptional(z.string()),
     })
     .optional(),
+  searchResponse: z
+    .object({
+      requestedFilters: z.record(z.string(), z.unknown()),
+      parsedFilters: z.record(z.string(), z.unknown()),
+      searchId: z.string().min(1),
+      sessionId: nullableOptional(z.string()),
+      candidateCount: z.number().int().nonnegative().default(0),
+      matchedCount: z.number().int().nonnegative().default(0),
+      excludedByTitleCount: z.number().int().nonnegative().default(0),
+      excludedByLocationCount: z.number().int().nonnegative().default(0),
+      excludedByExperienceCount: z.number().int().nonnegative().default(0),
+    })
+    .optional(),
   session: z
     .object({
       indexedResultsCount: z.number().int().nonnegative().default(0),

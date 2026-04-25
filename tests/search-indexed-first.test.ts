@@ -715,6 +715,110 @@ describe("jobs-first indexed search", () => {
     expect(delta.delivery.indexedCursor).toBeGreaterThan(initial.delivery?.indexedCursor ?? 0);
   });
 
+  it("returns only Canada or Remote Canada jobs for machine learning engineer Canada searches", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const jobs = [
+      createPersistableJob({
+        title: "Applied AI Engineer",
+        country: "Japan",
+        locationText: "Tokyo, Japan",
+        sourceJobId: "tokyo-ai",
+        canonicalUrl: "https://example.com/jobs/tokyo-ai",
+        applyUrl: "https://example.com/jobs/tokyo-ai/apply",
+        sourceUrl: "https://example.com/jobs/tokyo-ai",
+      }),
+      createPersistableJob({
+        title: "Applied AI Engineer",
+        country: "South Korea",
+        locationText: "Seoul, South Korea",
+        sourceJobId: "seoul-ai",
+        canonicalUrl: "https://example.com/jobs/seoul-ai",
+        applyUrl: "https://example.com/jobs/seoul-ai/apply",
+        sourceUrl: "https://example.com/jobs/seoul-ai",
+      }),
+      createPersistableJob({
+        title: "Machine Learning Engineer",
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Toronto, Canada",
+        sourceJobId: "toronto-mle",
+        canonicalUrl: "https://example.com/jobs/toronto-mle",
+        applyUrl: "https://example.com/jobs/toronto-mle/apply",
+        sourceUrl: "https://example.com/jobs/toronto-mle",
+      }),
+      createPersistableJob({
+        title: "ML Engineer",
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Vancouver, BC",
+        sourceJobId: "vancouver-ml",
+        canonicalUrl: "https://example.com/jobs/vancouver-ml",
+        applyUrl: "https://example.com/jobs/vancouver-ml/apply",
+        sourceUrl: "https://example.com/jobs/vancouver-ml",
+      }),
+      createPersistableJob({
+        title: "AI Engineer",
+        country: "Canada",
+        locationText: "Remote Canada",
+        remoteType: "remote",
+        sourceJobId: "remote-ca-ai",
+        canonicalUrl: "https://example.com/jobs/remote-ca-ai",
+        applyUrl: "https://example.com/jobs/remote-ca-ai/apply",
+        sourceUrl: "https://example.com/jobs/remote-ca-ai",
+      }),
+    ];
+
+    await seedIndexedJobs(repository, jobs);
+
+    const indexed = await getIndexedJobsForSearch(repository, {
+      title: "machine learning engineer",
+      country: "Canada",
+    });
+    expect(indexed.matches.map(({ job }) => job.sourceJobId).sort()).toEqual([
+      "remote-ca-ai",
+      "toronto-mle",
+      "vancouver-ml",
+    ]);
+    expect(indexed.candidateCount).toBe(3);
+
+    const active = await createActiveSearchState(repository, {
+      title: "machine learning engineer",
+      country: "Canada",
+    });
+    await repository.persistJobs(
+      active.crawlRun._id,
+      [jobs[0]!, jobs[1]!, jobs[2]!, jobs[3]!, jobs[4]!],
+      { searchSessionId: active.searchSession._id },
+    );
+
+    const details = await getSearchDetails(active.search._id, { repository });
+    expect(details.jobs.map((job) => job.sourceJobId).sort()).toEqual([
+      "remote-ca-ai",
+      "toronto-mle",
+      "vancouver-ml",
+    ]);
+    expect(details.jobs.map((job) => job.sourceJobId)).not.toContain("tokyo-ai");
+    expect(details.jobs.map((job) => job.sourceJobId)).not.toContain("seoul-ai");
+    expect(details.diagnostics.searchResponse).toMatchObject({
+      parsedFilters: {
+        title: "machine learning engineer",
+        country: "Canada",
+      },
+      candidateCount: expect.any(Number),
+      matchedCount: 3,
+      excludedByLocationCount: expect.any(Number),
+      searchId: active.search._id,
+      sessionId: active.searchSession._id,
+    });
+    expect(
+      details.jobs.every((job) =>
+        JSON.stringify(job.rawSourceMetadata).includes("locationMatch"),
+      ),
+    ).toBe(true);
+  });
+
   it("dedupes overlapping session and indexed deltas when background and active-session writes converge on the same job", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const active = await createActiveSearchState(repository, {

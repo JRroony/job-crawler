@@ -108,6 +108,75 @@ const supportedCountryDefinitions: SupportedCountryDefinition[] = [
         aliases: ["alberta", "ab", "alberta canada", "ab canada"],
         priority: 4,
       },
+      {
+        countryConcept: "canada",
+        name: "Manitoba",
+        code: "MB",
+        aliases: ["manitoba", "mb", "manitoba canada", "mb canada"],
+        priority: 5,
+      },
+      {
+        countryConcept: "canada",
+        name: "Saskatchewan",
+        code: "SK",
+        aliases: ["saskatchewan", "sk", "saskatchewan canada", "sk canada"],
+        priority: 6,
+      },
+      {
+        countryConcept: "canada",
+        name: "Nova Scotia",
+        code: "NS",
+        aliases: ["nova scotia", "ns", "nova scotia canada", "ns canada"],
+        priority: 7,
+      },
+      {
+        countryConcept: "canada",
+        name: "New Brunswick",
+        code: "NB",
+        aliases: ["new brunswick", "nb", "new brunswick canada", "nb canada"],
+        priority: 8,
+      },
+      {
+        countryConcept: "canada",
+        name: "Newfoundland and Labrador",
+        code: "NL",
+        aliases: [
+          "newfoundland and labrador",
+          "newfoundland",
+          "nl",
+          "newfoundland and labrador canada",
+          "nl canada",
+        ],
+        priority: 9,
+      },
+      {
+        countryConcept: "canada",
+        name: "Prince Edward Island",
+        code: "PE",
+        aliases: ["prince edward island", "pei", "pe", "prince edward island canada", "pe canada"],
+        priority: 10,
+      },
+      {
+        countryConcept: "canada",
+        name: "Northwest Territories",
+        code: "NT",
+        aliases: ["northwest territories", "nt", "northwest territories canada", "nt canada"],
+        priority: 11,
+      },
+      {
+        countryConcept: "canada",
+        name: "Yukon",
+        code: "YT",
+        aliases: ["yukon", "yt", "yukon canada", "yt canada"],
+        priority: 12,
+      },
+      {
+        countryConcept: "canada",
+        name: "Nunavut",
+        code: "NU",
+        aliases: ["nunavut", "nu", "nunavut canada", "nu canada"],
+        priority: 13,
+      },
     ],
     metros: [
       {
@@ -151,6 +220,78 @@ const supportedCountryDefinitions: SupportedCountryDefinition[] = [
         regionCode: "AB",
         aliases: ["calgary", "calgary ab", "calgary alberta", "calgary canada"],
         priority: 4,
+      },
+      {
+        countryConcept: "canada",
+        city: "Waterloo",
+        regionName: "Ontario",
+        regionCode: "ON",
+        aliases: ["waterloo", "waterloo on", "waterloo ontario", "waterloo canada"],
+        priority: 5,
+      },
+      {
+        countryConcept: "canada",
+        city: "Kitchener",
+        regionName: "Ontario",
+        regionCode: "ON",
+        aliases: ["kitchener", "kitchener on", "kitchener ontario", "kitchener canada"],
+        priority: 6,
+      },
+      {
+        countryConcept: "canada",
+        city: "Ottawa",
+        regionName: "Ontario",
+        regionCode: "ON",
+        aliases: ["ottawa", "ottawa on", "ottawa ontario", "ottawa canada"],
+        priority: 7,
+      },
+      {
+        countryConcept: "canada",
+        city: "Markham",
+        regionName: "Ontario",
+        regionCode: "ON",
+        aliases: ["markham", "markham on", "markham ontario", "markham canada"],
+        priority: 8,
+      },
+      {
+        countryConcept: "canada",
+        city: "Mississauga",
+        regionName: "Ontario",
+        regionCode: "ON",
+        aliases: ["mississauga", "mississauga on", "mississauga ontario", "mississauga canada"],
+        priority: 9,
+      },
+      {
+        countryConcept: "canada",
+        city: "Edmonton",
+        regionName: "Alberta",
+        regionCode: "AB",
+        aliases: ["edmonton", "edmonton ab", "edmonton alberta", "edmonton canada"],
+        priority: 10,
+      },
+      {
+        countryConcept: "canada",
+        city: "Victoria",
+        regionName: "British Columbia",
+        regionCode: "BC",
+        aliases: ["victoria", "victoria bc", "victoria british columbia", "victoria canada"],
+        priority: 11,
+      },
+      {
+        countryConcept: "canada",
+        city: "Halifax",
+        regionName: "Nova Scotia",
+        regionCode: "NS",
+        aliases: ["halifax", "halifax ns", "halifax nova scotia", "halifax canada"],
+        priority: 12,
+      },
+      {
+        countryConcept: "canada",
+        city: "Quebec City",
+        regionName: "Quebec",
+        regionCode: "QC",
+        aliases: ["quebec city", "quebec city qc", "quebec city quebec", "ville de quebec"],
+        priority: 13,
       },
     ],
   },
@@ -332,6 +473,53 @@ export function getSupportedCountryCanonicalName(concept?: SupportedCountryConce
 export function getSupportedCountryAliases(concept?: SupportedCountryConcept) {
   const definition = concept ? supportedCountriesByConcept.get(concept) : undefined;
   return definition ? definition.aliases.map((alias) => normalizeLocationText(alias)) : [];
+}
+
+export function getSupportedCountryLocationAliases(concept?: SupportedCountryConcept) {
+  const definition = concept ? supportedCountriesByConcept.get(concept) : undefined;
+  if (!definition) {
+    return [];
+  }
+
+  return dedupeLocationAliasStrings([
+    ...definition.aliases.map((alias) => normalizeLocationText(alias)),
+    ...definition.aliases.flatMap((alias) => [
+      normalizeLocationText(`remote ${alias}`),
+      normalizeLocationText(`${alias} remote`),
+      normalizeLocationText(`remote in ${alias}`),
+    ]),
+    ...definition.regions.flatMap((region) => [
+      region.name,
+      region.code,
+      ...region.aliases,
+      `remote ${region.name}`,
+      `${region.name} remote`,
+      region.code ? `${region.code} remote` : undefined,
+    ]),
+    ...definition.metros.flatMap((metro) => [
+      metro.city,
+      `${metro.city} ${metro.regionCode ?? ""}`,
+      `${metro.city} ${metro.regionName ?? ""}`,
+      `${metro.city} ${definition.canonicalName}`,
+    ]),
+  ]);
+}
+
+function dedupeLocationAliasStrings(values: Array<string | undefined>) {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+
+  for (const value of values) {
+    const normalized = normalizeLocationText(value);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    deduped.push(normalized);
+  }
+
+  return deduped;
 }
 
 export function resolveSupportedCountryRegion(

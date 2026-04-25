@@ -291,6 +291,9 @@ export function JobCrawlerApp({
     setViewState("loading");
     setMessage("");
     setErrorKind(null);
+    setActiveResult(null);
+    activeDeliveryCursorRef.current = 0;
+    activeIndexedDeliveryCursorRef.current = 0;
 
     try {
       const response = await fetch("/api/searches", {
@@ -559,7 +562,7 @@ export function JobCrawlerApp({
     activeDeliveryCursorRef.current = normalizedPayload.delivery.cursor;
     activeIndexedDeliveryCursorRef.current = normalizedPayload.delivery.indexedCursor ?? 0;
     setActiveResult((current) => {
-      mergedResult = mergeCrawlDeltaIntoResult(current, normalizedPayload);
+      mergedResult = mergeCrawlDeltaIntoResult(current, normalizedPayload, normalizedPayload.search.filters);
       return mergedResult;
     });
     hydrateSearchForm(normalizedPayload.search.filters);
@@ -1253,9 +1256,16 @@ function normalizeCrawlDeltaResponseForClient(payload: CrawlDeltaResponse): Craw
 export function mergeCrawlDeltaIntoResult(
   current: CrawlResponse | null,
   payload: CrawlDeltaResponse,
+  activeFilters: SearchFilters = payload.search.filters,
 ): CrawlResponse {
-  const baseJobs = current?.search._id === payload.search._id ? current.jobs : [];
-  const mergedJobs = dedupeJobsForSessionRender([...baseJobs, ...payload.jobs]).sort(jobComparator);
+  const sameSearch = current?.search._id === payload.search._id;
+  const currentSessionId = current?.searchSession?._id;
+  const payloadSessionId = payload.searchSession?._id;
+  const sameSession =
+    sameSearch && (!currentSessionId || !payloadSessionId || currentSessionId === payloadSessionId);
+  const baseJobs = sameSession ? current?.jobs ?? [] : [];
+  const guardedDeltaJobs = filterJobsForDisplay(payload.jobs, activeFilters, defaultClientResultFilters);
+  const mergedJobs = dedupeJobsForSessionRender([...baseJobs, ...guardedDeltaJobs]).sort(jobComparator);
 
   return {
     search: payload.search,

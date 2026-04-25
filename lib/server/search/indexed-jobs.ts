@@ -22,8 +22,12 @@ type IndexedJobDelta = {
 
 export type IndexedJobSearchResult = {
   candidateCount: number;
+  matchedCount: number;
   requestTimeEvaluationCount: number;
   requestTimeExcludedCount: number;
+  excludedByTitleCount: number;
+  excludedByLocationCount: number;
+  excludedByExperienceCount: number;
   timingsMs: {
     candidateQuery: number;
     requestTimeRefinement: number;
@@ -48,9 +52,11 @@ export async function getIndexedJobsForSearch(
 
   return {
     candidateCount: candidateResult.jobs.length,
+    matchedCount: matches.length,
     candidateQuery: candidateResult.query.diagnostics,
     requestTimeEvaluationCount: candidateResult.jobs.length,
     requestTimeExcludedCount: Math.max(0, candidateResult.jobs.length - matches.length),
+    ...countIndexedExclusions(candidateResult.jobs, filters),
     timingsMs: {
       candidateQuery: candidateLoadedAt - startedAt,
       requestTimeRefinement: finishedAt - candidateLoadedAt,
@@ -109,6 +115,34 @@ function matchIndexedJobsForSearch(
       evaluation,
     }];
   });
+}
+
+function countIndexedExclusions(jobs: JobListing[], filters: SearchFilters) {
+  const counts = {
+    excludedByTitleCount: 0,
+    excludedByLocationCount: 0,
+    excludedByExperienceCount: 0,
+  };
+
+  for (const job of jobs) {
+    const normalizedJob = applyResolvedExperienceLevel(job);
+    const evaluation = evaluateSearchFilters(normalizedJob, filters, {
+      includeExperience: true,
+    });
+    if (evaluation.matches) {
+      continue;
+    }
+
+    if (evaluation.reason === "title") {
+      counts.excludedByTitleCount += 1;
+    } else if (evaluation.reason === "location") {
+      counts.excludedByLocationCount += 1;
+    } else if (evaluation.reason === "experience") {
+      counts.excludedByExperienceCount += 1;
+    }
+  }
+
+  return counts;
 }
 
 function matchesPlatformFilter(

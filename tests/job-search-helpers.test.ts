@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   disabledPlatformFilterOptions,
+  defaultClientResultFilters,
   describeSelectedPlatforms,
   filterJobsForDisplay,
   isRemoteJob,
@@ -118,6 +119,86 @@ describe("job-search helpers", () => {
       state: "",
       country: "Canada",
     });
+    expect(parseLocationInput("Remote Canada")).toEqual({
+      city: "Remote",
+      state: "",
+      country: "Canada",
+    });
+  });
+
+  it("defensively hides non-Canada jobs for active Canada search filters", () => {
+    const filters: SearchFilters = {
+      title: "machine learning engineer",
+      country: "Canada",
+    };
+    const visible = filterJobsForDisplay(
+      [
+        createJob({
+          _id: "tokyo",
+          title: "Applied AI Engineer",
+          normalizedTitle: "applied ai engineer",
+          country: "Japan",
+          locationText: "Tokyo, Japan",
+          locationRaw: "Tokyo, Japan",
+          normalizedLocation: "tokyo japan",
+          locationNormalized: "tokyo japan",
+          sourceJobId: "tokyo",
+        }),
+        createJob({
+          _id: "seoul",
+          title: "Applied AI Engineer",
+          normalizedTitle: "applied ai engineer",
+          country: "South Korea",
+          locationText: "Seoul, South Korea",
+          locationRaw: "Seoul, South Korea",
+          normalizedLocation: "seoul south korea",
+          locationNormalized: "seoul south korea",
+          sourceJobId: "seoul",
+        }),
+        createJob({
+          _id: "toronto",
+          title: "Machine Learning Engineer",
+          normalizedTitle: "machine learning engineer",
+          country: undefined,
+          locationText: "Toronto, Canada",
+          locationRaw: "Toronto, Canada",
+          normalizedLocation: "toronto canada",
+          locationNormalized: "toronto canada",
+          sourceJobId: "toronto",
+        }),
+        createJob({
+          _id: "vancouver",
+          title: "ML Engineer",
+          normalizedTitle: "ml engineer",
+          country: undefined,
+          locationText: "Vancouver, BC",
+          locationRaw: "Vancouver, BC",
+          normalizedLocation: "vancouver bc",
+          locationNormalized: "vancouver bc",
+          sourceJobId: "vancouver",
+        }),
+        createJob({
+          _id: "remote-ca",
+          title: "AI Engineer",
+          normalizedTitle: "ai engineer",
+          country: "Canada",
+          locationText: "Remote Canada",
+          locationRaw: "Remote Canada",
+          normalizedLocation: "remote canada",
+          locationNormalized: "remote canada",
+          remoteType: "remote",
+          sourceJobId: "remote-ca",
+        }),
+      ],
+      filters,
+      defaultClientResultFilters,
+    );
+
+    expect(visible.map((job) => job.sourceJobId).sort()).toEqual([
+      "remote-ca",
+      "toronto",
+      "vancouver",
+    ]);
   });
 
   it("uses normalized remote type before falling back to raw text", () => {

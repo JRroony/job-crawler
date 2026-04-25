@@ -5,6 +5,7 @@ import {
   defaultCrawlLinkValidationMode,
   refreshStaleJobs,
 } from "@/lib/server/crawler/pipeline";
+import { evaluateSearchFilters } from "@/lib/server/crawler/helpers";
 import { abortOwnerSearchRun, abortSearchRun, isSearchRunPending } from "@/lib/server/crawler/background-runs";
 import { createId } from "@/lib/server/crawler/helpers";
 import { sortJobsWithDiagnostics } from "@/lib/server/crawler/sort";
@@ -239,17 +240,36 @@ export async function getSearchDetails(searchId: string, runtime: JobCrawlerRunt
   if (resolved.crawlRun.status !== "running") {
     jobs = await refreshStaleJobs(jobs, repository, runtime.fetchImpl ?? fetch, runtime.now ?? new Date());
   }
+  const filteredSessionJobs = filterAndDecorateSearchJobs(
+    jobs.map(applyResolvedExperienceLevel),
+    resolved.search.filters,
+    "supplemental_session",
+  );
   const sourceResults = await repository.getCrawlSourceResults(resolved.crawlRun._id);
   const deliveryCursor = resolved.searchSession
     ? await repository.getSearchSessionDeliveryCursor(resolved.searchSession._id)
     : await repository.getCrawlRunDeliveryCursor(resolved.crawlRun._id);
-  const mergedJobs = mergeSearchResultJobs(indexedJobs, jobs.map(applyResolvedExperienceLevel));
+  const mergedJobs = filterAndDecorateSearchJobs(
+    mergeSearchResultJobs(indexedJobs, filteredSessionJobs),
+    resolved.search.filters,
+    "response_guard",
+  );
   const diagnostics = attachSessionDiagnostics(
     resolved.crawlRun.diagnostics,
     indexedJobs.length,
     mergedJobs.length,
     deliveryCursor,
     resolved.crawlRun,
+    resolved.search,
+    {
+      candidateCount: resolved.crawlRun.diagnostics.session?.indexedCandidateCount ?? indexedJobs.length,
+      matchedCount: mergedJobs.length,
+      excludedByTitleCount: resolved.crawlRun.diagnostics.excludedByTitle,
+      excludedByLocationCount:
+        resolved.crawlRun.diagnostics.excludedByLocation +
+        Math.max(0, jobs.length - filteredSessionJobs.length),
+      excludedByExperienceCount: resolved.crawlRun.diagnostics.excludedByExperience,
+    },
   );
 
   return crawlResponseSchema.parse({
@@ -313,14 +333,33 @@ export async function getSearchJobDeltas(
   ]);
   const mergedDeltaJobs = mergeSearchResultJobs(
     indexedDelta.jobs,
-    jobDelta.jobs.map(applyResolvedExperienceLevel),
+    filterAndDecorateSearchJobs(
+      jobDelta.jobs.map(applyResolvedExperienceLevel),
+      resolved.search.filters,
+      "supplemental_delta",
+    ),
+  );
+  const filteredDeltaJobs = filterAndDecorateSearchJobs(
+    mergedDeltaJobs,
+    resolved.search.filters,
+    "delta_response_guard",
   );
   const diagnostics = attachSessionDiagnostics(
     resolved.crawlRun.diagnostics,
     (resolved.crawlRun.diagnostics.session?.indexedResultsCount ?? 0) + indexedDelta.jobs.length,
-    (resolved.crawlRun.diagnostics.session?.totalVisibleResultsCount ?? 0) + mergedDeltaJobs.length,
+    (resolved.crawlRun.diagnostics.session?.totalVisibleResultsCount ?? 0) + filteredDeltaJobs.length,
     jobDelta.cursor,
     resolved.crawlRun,
+    resolved.search,
+    {
+      candidateCount: resolved.crawlRun.diagnostics.session?.indexedCandidateCount ?? indexedDelta.jobs.length,
+      matchedCount: filteredDeltaJobs.length,
+      excludedByTitleCount: resolved.crawlRun.diagnostics.excludedByTitle,
+      excludedByLocationCount:
+        resolved.crawlRun.diagnostics.excludedByLocation +
+        Math.max(0, mergedDeltaJobs.length - filteredDeltaJobs.length),
+      excludedByExperienceCount: resolved.crawlRun.diagnostics.excludedByExperience,
+    },
   );
 
   return crawlDeltaResponseSchema.parse({
@@ -329,11 +368,11 @@ export async function getSearchJobDeltas(
     crawlRun: resolved.crawlRun,
     sourceResults,
     jobs: sortJobsWithDiagnostics(
-      mergedDeltaJobs,
+      filteredDeltaJobs,
       resolved.search.filters.title,
       runtime.now ?? new Date(),
     ),
-    diagnostics,
+  diagnostics,
     delivery: {
       mode: "delta",
       previousCursor: afterCursor,
@@ -475,6 +514,17 @@ function buildSyntheticCrawlResponse(
       supplementalQueued: false,
       supplementalRunning: status === "running",
     },
+    searchResponse: {
+      requestedFilters: search.filters,
+      parsedFilters: search.filters,
+      searchId: search._id,
+      sessionId: search.latestSearchSessionId,
+      candidateCount: jobs.length,
+      matchedCount: jobs.length,
+      excludedByTitleCount: 0,
+      excludedByLocationCount: 0,
+      excludedByExperienceCount: 0,
+    },
   };
 
   return crawlResponseSchema.parse({
@@ -567,6 +617,55 @@ async function loadIndexedSearchJobs(
   return indexedSearch.matches.map(({ job }) => job);
 }
 
+function filterAndDecorateSearchJobs(
+  jobs: JobListing[],
+  filters: SearchDocument["filters"],
+  source: "supplemental_session" | "response_guard" | "supplemental_delta" | "delta_response_guard",
+) {
+  return jobs.flatMap((job) => {
+    const evaluation = evaluateSearchFilters(job, filters, {
+      includeExperience: true,
+    });
+
+    if (!evaluation.matches) {
+      return [];
+    }
+
+    return [
+      {
+        ...job,
+        rawSourceMetadata: {
+          ...(job.rawSourceMetadata ?? {}),
+          searchResponse: {
+            source,
+            titleMatch: {
+              tier: evaluation.titleMatch.tier,
+              score: evaluation.titleMatch.score,
+              explanation: evaluation.titleMatch.explanation,
+            },
+            locationMatch: evaluation.locationMatch
+              ? {
+                  matches: evaluation.locationMatch.matches,
+                  explanation: evaluation.locationMatch.explanation,
+                  matchedTerms: evaluation.locationMatch.matchedTerms,
+                  queryDiagnostics: evaluation.locationMatch.queryDiagnostics,
+                  jobDiagnostics: evaluation.locationMatch.jobDiagnostics,
+                }
+              : undefined,
+            experienceMatch: evaluation.experienceMatch
+              ? {
+                  matches: evaluation.experienceMatch.matches,
+                  matchedLevel: evaluation.experienceMatch.matchedLevel,
+                  explanation: evaluation.experienceMatch.explanation,
+                }
+              : undefined,
+          },
+        },
+      },
+    ] satisfies JobListing[];
+  });
+}
+
 function attachSessionDiagnostics(
   diagnostics: CrawlDiagnostics | undefined,
   indexedResultsCount: number,
@@ -575,6 +674,14 @@ function attachSessionDiagnostics(
   crawlRun: {
     status: "running" | "completed" | "partial" | "failed" | "aborted";
     finishedAt?: string | null;
+  },
+  search?: SearchDocument,
+  searchResponse?: {
+    candidateCount: number;
+    matchedCount: number;
+    excludedByTitleCount: number;
+    excludedByLocationCount: number;
+    excludedByExperienceCount: number;
   },
 ): CrawlDiagnostics {
   const baseDiagnostics = crawlDiagnosticsSchema.parse(diagnostics ?? {});
@@ -593,6 +700,27 @@ function attachSessionDiagnostics(
 
   return {
     ...baseDiagnostics,
+    ...(search
+      ? {
+          searchResponse: {
+            requestedFilters: search.filters,
+            parsedFilters: search.filters,
+            searchId: search._id,
+            sessionId: search.latestSearchSessionId,
+            candidateCount:
+              searchResponse?.candidateCount ??
+              baseDiagnostics.session?.indexedCandidateCount ??
+              indexedResultsCount,
+            matchedCount: searchResponse?.matchedCount ?? totalVisibleResultsCount,
+            excludedByTitleCount:
+              searchResponse?.excludedByTitleCount ?? baseDiagnostics.excludedByTitle,
+            excludedByLocationCount:
+              searchResponse?.excludedByLocationCount ?? baseDiagnostics.excludedByLocation,
+            excludedByExperienceCount:
+              searchResponse?.excludedByExperienceCount ?? baseDiagnostics.excludedByExperience,
+          },
+        }
+      : {}),
     session: {
       indexedResultsCount: visibleIndexedResultsCount,
       initialIndexedResultsCount,

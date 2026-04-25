@@ -13,6 +13,7 @@ import {
   analyzeSupportedCountryLocation,
   findSupportedCountryConceptInText,
   findSupportedCountryRegionInText,
+  getSupportedCountryLocationAliases,
   getSupportedCountryCanonicalName,
   resolveSupportedCountryConcept,
   resolveSupportedCountryRegion,
@@ -418,6 +419,9 @@ function buildLocationCandidateClause(filters: SearchFilters) {
         findSupportedCountryConceptInText(filters.country);
       const canonicalCountry =
         getSupportedCountryCanonicalName(countryConcept) ?? filters.country;
+      const locationTextFallback = buildSupportedCountryLocationTextFallbackClause(
+        canonicalCountry,
+      );
 
       legacyClauses.push({
         $or: [
@@ -425,6 +429,7 @@ function buildLocationCandidateClause(filters: SearchFilters) {
           { "resolvedLocation.country": canonicalCountry },
           { "resolvedLocation.physicalLocations.country": canonicalCountry },
           { "resolvedLocation.eligibilityCountries": canonicalCountry },
+          ...(locationTextFallback ? [locationTextFallback] : []),
         ],
       });
     }
@@ -502,6 +507,29 @@ function buildUnitedStatesLocationTextFallbackClause() {
     ...stateTerms,
     ...metroTerms,
   ]);
+
+  if (!regex) {
+    return undefined;
+  }
+
+  return {
+    $or: [
+      { normalizedLocation: { $regex: regex } },
+      { locationNormalized: { $regex: regex } },
+      { locationText: { $regex: regex } },
+    ],
+  };
+}
+
+function buildSupportedCountryLocationTextFallbackClause(country: string) {
+  const concept =
+    resolveSupportedCountryConcept(country) ??
+    findSupportedCountryConceptInText(country);
+  const countryName = getSupportedCountryCanonicalName(concept) ?? country;
+  const countryAliases = concept
+    ? [countryName, ...getSupportedCountryLocationAliases(concept)]
+    : [countryName];
+  const regex = buildNormalizedTermRegex(countryAliases);
 
   if (!regex) {
     return undefined;

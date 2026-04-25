@@ -167,13 +167,16 @@ const roleFamilyTemplates: readonly RoleFamilyTemplate[] = [
   roleFamily("machine_learning_engineer", "Machine Learning Engineer", 34, [
     variant("machine learning engineer", 0),
     variant("ml engineer", 1),
+    variant("applied ml engineer", 1),
     variant("ml platform engineer", 1),
     variant("machine learning infrastructure engineer", 2),
+    variant("deep learning engineer", 2),
   ]),
   roleFamily("ai_engineer", "AI Engineer", 36, [
     variant("ai engineer", 0),
     variant("artificial intelligence engineer", 1),
     variant("applied ai engineer", 1),
+    variant("llm engineer", 1),
     variant("generative ai engineer", 2),
   ]),
   roleFamily("applied_scientist", "Applied Scientist", 38, [

@@ -211,6 +211,9 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     latestIndexedJobAgeMs: supplementalDecision.latestIndexedJobAgeMs,
     indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
     indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
+      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
+      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
     indexedSearchTimingsMs: indexedSearch.timingsMs,
   });
 
@@ -273,6 +276,9 @@ type SupplementalDecision = {
   indexedCandidateCount: number;
   indexedRequestTimeEvaluationCount: number;
   indexedRequestTimeExcludedCount: number;
+  indexedExcludedByTitleCount: number;
+  indexedExcludedByLocationCount: number;
+  indexedExcludedByExperienceCount: number;
   indexedSearchTimingsMs: Awaited<ReturnType<typeof getIndexedJobsForSearch>>["timingsMs"];
   indexedJobCount: number;
   reusedExistingSearch: boolean;
@@ -326,6 +332,9 @@ function resolveSupplementalCrawlDecision(
       indexedCandidateCount: indexedSearch.candidateCount,
       indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
       indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
+      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
+      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
       indexedSearchTimingsMs: indexedSearch.timingsMs,
       indexedJobCount,
       reusedExistingSearch: previousCoverage.reusedExistingSearch,
@@ -347,6 +356,9 @@ function resolveSupplementalCrawlDecision(
       indexedCandidateCount: indexedSearch.candidateCount,
       indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
       indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
+      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
+      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
       indexedSearchTimingsMs: indexedSearch.timingsMs,
       indexedJobCount,
       reusedExistingSearch: previousCoverage.reusedExistingSearch,
@@ -368,6 +380,9 @@ function resolveSupplementalCrawlDecision(
       indexedCandidateCount: indexedSearch.candidateCount,
       indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
       indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
+      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
+      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
       indexedSearchTimingsMs: indexedSearch.timingsMs,
       indexedJobCount,
       reusedExistingSearch: previousCoverage.reusedExistingSearch,
@@ -394,6 +409,9 @@ function resolveSupplementalCrawlDecision(
       indexedCandidateCount: indexedSearch.candidateCount,
       indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
       indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
+      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
+      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
       indexedSearchTimingsMs: indexedSearch.timingsMs,
       indexedJobCount,
       reusedExistingSearch: previousCoverage.reusedExistingSearch,
@@ -422,6 +440,9 @@ function resolveSupplementalCrawlDecision(
         indexedCandidateCount: indexedSearch.candidateCount,
         indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
         indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
+      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
+      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
         indexedSearchTimingsMs: indexedSearch.timingsMs,
         indexedJobCount,
         reusedExistingSearch: previousCoverage.reusedExistingSearch,
@@ -442,6 +463,9 @@ function resolveSupplementalCrawlDecision(
       indexedCandidateCount: indexedSearch.candidateCount,
       indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
       indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
+      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
+      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
       indexedSearchTimingsMs: indexedSearch.timingsMs,
       indexedJobCount,
       reusedExistingSearch: previousCoverage.reusedExistingSearch,
@@ -467,6 +491,9 @@ function resolveSupplementalCrawlDecision(
       indexedCandidateCount: indexedSearch.candidateCount,
       indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
       indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
+      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
+      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
       indexedSearchTimingsMs: indexedSearch.timingsMs,
       indexedJobCount,
       reusedExistingSearch: previousCoverage.reusedExistingSearch,
@@ -487,6 +514,9 @@ function resolveSupplementalCrawlDecision(
     indexedCandidateCount: indexedSearch.candidateCount,
     indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
     indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
+      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
+      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
     indexedSearchTimingsMs: indexedSearch.timingsMs,
     indexedJobCount,
     reusedExistingSearch: previousCoverage.reusedExistingSearch,
@@ -510,9 +540,9 @@ function buildPrimedSessionDiagnostics(
     directJobsHarvested: 0,
     jobsBeforeDedupe: indexedJobCount,
     jobsAfterDedupe: indexedJobCount,
-    excludedByTitle: 0,
-    excludedByLocation: 0,
-    excludedByExperience: 0,
+    excludedByTitle: decision.indexedExcludedByTitleCount,
+    excludedByLocation: decision.indexedExcludedByLocationCount,
+    excludedByExperience: decision.indexedExcludedByExperienceCount,
     dedupedOut: 0,
     validationDeferred: 0,
     session: {

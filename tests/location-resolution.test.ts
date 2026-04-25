@@ -59,6 +59,10 @@ describe("location resolution", () => {
       expected: { country: "Canada", city: "Toronto", state: "Ontario", stateCode: "ON" },
     },
     {
+      locationText: "Waterloo, Ontario",
+      expected: { country: "Canada", city: "Waterloo", state: "Ontario", stateCode: "ON" },
+    },
+    {
       locationText: "Berlin, Germany",
       expected: { country: "Germany", city: "Berlin", state: "Berlin" },
     },
@@ -81,6 +85,27 @@ describe("location resolution", () => {
     ).toMatchObject({
       isUnitedStates: false,
       physicalLocations: expect.arrayContaining([expect.objectContaining(expected)]),
+      ...expected,
+    });
+  });
+
+  it.each([
+    {
+      locationText: "Remote - Canada",
+      expected: { country: "Canada", isRemote: true },
+    },
+    {
+      locationText: "BC Remote",
+      expected: { country: "Canada", state: "British Columbia", stateCode: "BC", isRemote: true },
+    },
+  ])("resolves $locationText as remote Canada eligibility", ({ locationText, expected }) => {
+    expect(
+      resolveJobLocation({
+        locationText,
+      }),
+    ).toMatchObject({
+      isUnitedStates: false,
+      eligibilityCountries: expect.arrayContaining(["Canada"]),
       ...expected,
     });
   });

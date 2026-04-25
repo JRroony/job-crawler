@@ -108,6 +108,15 @@ export function parseLocationInput(
   }
 
   if (parts.length === 1) {
+    const remoteCountry = parseRemoteCountryTerm(parts[0]);
+    if (remoteCountry) {
+      return {
+        city: "Remote",
+        state: "",
+        country: remoteCountry,
+      };
+    }
+
     if (isRemoteTerm(parts[0])) {
       return {
         city: "Remote",
@@ -180,6 +189,14 @@ export function filterJobsForDisplay(
     searchFilters.experienceMatchMode === "broad";
 
   return jobs.filter((job) => {
+    if (!matchesActiveSearchTitle(job, searchFilters)) {
+      return false;
+    }
+
+    if (!matchesActiveSearchLocation(job, searchFilters)) {
+      return false;
+    }
+
     if (selectedPlatforms.size > 0 && !selectedPlatforms.has(job.sourcePlatform as ActiveCrawlerPlatform)) {
       return false;
     }
@@ -218,6 +235,108 @@ export function filterJobsForDisplay(
 
     return true;
   });
+}
+
+function matchesActiveSearchTitle(job: JobListing, filters: SearchFilters) {
+  const query = normalizeSearchText(filters.title);
+  if (!query) {
+    return true;
+  }
+
+  const title = normalizeSearchText(job.normalizedTitle || job.title);
+  if (!title) {
+    return false;
+  }
+
+  if (title.includes(query) || query.includes(title)) {
+    return true;
+  }
+
+  if (query === "machine learning engineer") {
+    return [
+      "machine learning engineer",
+      "ml engineer",
+      "ai engineer",
+      "applied ai engineer",
+      "applied ml engineer",
+      "machine learning infrastructure engineer",
+      "deep learning engineer",
+      "computer vision engineer",
+      "nlp engineer",
+      "llm engineer",
+      "generative ai engineer",
+      "research engineer ml",
+      "ai research engineer",
+    ].some((variant) => title.includes(variant));
+  }
+
+  const queryTerms = query.split(" ").filter((term) => term.length > 2);
+  return queryTerms.length > 0 && queryTerms.every((term) => title.includes(term));
+}
+
+function matchesActiveSearchLocation(job: JobListing, filters: SearchFilters) {
+  const country = normalizeCountryLabel(filters.country ?? "");
+  if (!country) {
+    return true;
+  }
+
+  const searchable = normalizeSearchText(
+    [
+      job.resolvedLocation?.country,
+      job.resolvedLocation?.state,
+      job.resolvedLocation?.stateCode,
+      job.resolvedLocation?.city,
+      ...(job.resolvedLocation?.physicalLocations ?? []).flatMap((location) => [
+        location.country,
+        location.state,
+        location.stateCode,
+        location.city,
+      ]),
+      ...(job.resolvedLocation?.eligibilityCountries ?? []),
+      job.country,
+      job.state,
+      job.city,
+      job.locationRaw,
+      job.locationText,
+      job.normalizedLocation,
+      job.locationNormalized,
+    ].filter(Boolean).join(" "),
+  );
+
+  if (country === "Canada") {
+    const hasCanadaEligibility = [
+      job.resolvedLocation?.country,
+      ...(job.resolvedLocation?.eligibilityCountries ?? []),
+      ...(job.resolvedLocation?.physicalLocations ?? []).map((location) => location.country),
+      job.country,
+    ].some((value) => normalizeCountryLabel(value ?? "") === "Canada");
+
+    return (
+      hasCanadaEligibility ||
+      /\b(remote canada|canada remote|remote in canada|remote within canada|ontario remote|bc remote)\b/.test(searchable) ||
+      /\b(toronto|vancouver|montreal|waterloo|kitchener|ottawa|markham|mississauga|calgary|edmonton|victoria|halifax|quebec city)\b/.test(searchable) ||
+      /\b(ontario|british columbia|quebec|alberta|manitoba|saskatchewan|nova scotia|new brunswick|newfoundland and labrador|prince edward island|northwest territories|yukon|nunavut)\b/.test(searchable) ||
+      /\b(on|bc|qc|ab|mb|sk|ns|nb|nl|pe|nt|yt|nu)\b/.test(searchable)
+    );
+  }
+
+  if (country === "United States") {
+    return /\b(united states|usa|remote us|remote united states)\b/.test(searchable) ||
+      normalizeCountryLabel(job.resolvedLocation?.country ?? job.country ?? "") === "United States";
+  }
+
+  return searchable.includes(normalizeSearchText(country));
+}
+
+function parseRemoteCountryTerm(value: string) {
+  const normalized = normalizeSearchText(value);
+  const match = normalized.match(/^remote(?:\s+(?:in|within))?\s+(.+)$/);
+  if (match) {
+    return normalizeCountryLabel(match[1] ?? "");
+  }
+
+  const reverseMatch = normalized.match(/^(.+)\s+remote$/);
+  return reverseMatch ? normalizeCountryLabel(reverseMatch[1] ?? "") : undefined;
 }
 
 export function getJobTags(job: JobListing) {
@@ -406,6 +525,14 @@ function isUnitedStatesAlias(value: string) {
 
 function normalizeCountryLabel(value: string) {
   return resolveCountryLabel(value) ?? value.trim();
+}
+
+function normalizeSearchText(value?: string) {
+  return (value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
 }
 
 function resolveCountryLabel(value: string) {
