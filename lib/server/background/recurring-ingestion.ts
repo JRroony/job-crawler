@@ -45,6 +45,8 @@ type BackgroundIngestionRuntime = {
   staleAfterMs?: number;
   runTimeoutMs?: number;
   maxSources?: number;
+  maxProfiles?: number;
+  providerTimeoutMs?: number;
   schedulingIntervalMs?: number;
   refreshInventory?: (runtime: {
     repository: JobCrawlerRepository;
@@ -63,7 +65,17 @@ type BackgroundIngestionRuntime = {
 };
 
 type BackgroundIngestionTriggerResult =
-  | { status: "started"; searchId: string; crawlRunId: string; systemProfileId: string }
+  | {
+      status: "started";
+      searchId: string;
+      crawlRunId: string;
+      systemProfileId: string;
+      selectedProfileIds: string[];
+      startedRuns: BackgroundIngestionStartedRun[];
+      skippedActiveRuns: BackgroundIngestionSkippedRun[];
+      sourceBudgetPerCycle: number;
+      sourceBudgetPerProfile: number;
+    }
   | {
       status:
         | "skipped-disabled"
@@ -77,6 +89,17 @@ type BackgroundIngestionTriggerResult =
       message?: string;
     };
 
+type BackgroundIngestionStartedRun = {
+  searchId: string;
+  crawlRunId: string;
+  systemProfileId: string;
+};
+
+type BackgroundIngestionSkippedRun = {
+  searchId?: string;
+  systemProfileId?: string;
+};
+
 type BackgroundSchedulerState = {
   startedAt: string;
   intervalMs: number;
@@ -87,6 +110,15 @@ type BackgroundPersistenceCounts = Pick<
   PersistJobsWithStatsResult,
   "insertedCount" | "updatedCount" | "linkedToRunCount" | "indexedEventCount"
 >;
+
+type BackgroundProviderThroughputCounts = BackgroundPersistenceCounts & {
+  sourceCount: number;
+  fetchedCount: number;
+  matchedCount: number;
+  seedCount: number;
+  warningCount: number;
+  failedBatches: number;
+};
 
 declare global {
   // eslint-disable-next-line no-var
@@ -130,7 +162,14 @@ export function startRecurringBackgroundIngestionScheduler(
   const scheduleNext = (delayMs: number) => {
     state.timer = setTimeout(() => {
       scheduleNext(intervalMs);
-      void triggerRecurringBackgroundIngestion(runtime).catch((error) => {
+      void triggerRecurringBackgroundIngestion({
+        ...runtime,
+        maxProfiles: runtime.maxProfiles ?? env.BACKGROUND_INGESTION_PROFILES_PER_CYCLE,
+        maxSources: runtime.maxSources ?? env.BACKGROUND_INGESTION_MAX_SOURCES_PER_CYCLE,
+        providerTimeoutMs:
+          runtime.providerTimeoutMs ?? env.BACKGROUND_INGESTION_PROVIDER_TIMEOUT_MS,
+        schedulingIntervalMs: runtime.schedulingIntervalMs ?? intervalMs,
+      }).catch((error) => {
         console.error("[background-ingestion:scheduler]", {
           message:
             error instanceof Error
@@ -194,16 +233,18 @@ export async function triggerRecurringBackgroundIngestion(
   const repository = repositoryResolution.repository;
 
   const now = runtime.now ?? new Date();
-  const systemProfile = selectBackgroundSystemSearchProfiles({
+  const schedulingIntervalMs = Math.max(
+    1,
+    Math.floor(runtime.schedulingIntervalMs ?? env.BACKGROUND_INGESTION_INTERVAL_MS),
+  );
+  const maxProfiles = Math.max(1, Math.floor(runtime.maxProfiles ?? 1));
+  const systemProfiles = selectBackgroundSystemSearchProfiles({
     now,
-    intervalMs: Math.max(
-      1,
-      Math.floor(runtime.schedulingIntervalMs ?? env.BACKGROUND_INGESTION_INTERVAL_MS),
-    ),
-    maxProfiles: 1,
+    intervalMs: schedulingIntervalMs,
+    maxProfiles,
     profileRunStates: await repository.listSystemSearchProfileRunStates(),
-  })[0];
-  if (!systemProfile) {
+  });
+  if (systemProfiles.length === 0) {
     const result = {
       status: "skipped-disabled" as const,
       message:
@@ -213,36 +254,168 @@ export async function triggerRecurringBackgroundIngestion(
     return result;
   }
 
-  const search = await ensureBackgroundSearch(repository, now, systemProfile);
-  const staleAfterMs = Math.max(
+  const sourceBudgetPerCycle = Math.max(
     1,
-    Math.floor(runtime.staleAfterMs ?? env.BACKGROUND_INGESTION_STALE_AFTER_MS),
+    Math.floor(runtime.maxSources ?? env.BACKGROUND_INGESTION_MAX_SOURCES_PER_CYCLE),
+  );
+  const sourceBudgetPerProfile = Math.max(
+    1,
+    Math.ceil(sourceBudgetPerCycle / systemProfiles.length),
+  );
+  const providerTimeoutMs = Math.max(
+    1,
+    Math.floor(runtime.providerTimeoutMs ?? env.BACKGROUND_INGESTION_PROVIDER_TIMEOUT_MS),
+  );
+  const runTimeoutMs = Math.max(
+    1,
+    Math.floor(runtime.runTimeoutMs ?? env.BACKGROUND_INGESTION_RUN_TIMEOUT_MS),
   );
 
-  await recoverStaleBackgroundRunIfNeeded(search._id, repository, now, staleAfterMs);
+  console.info("[background-ingestion:profiles-selected]", {
+    selectedProfiles: systemProfiles.length,
+    selectedProfileIds: systemProfiles.map((profile) => profile.id),
+    selectedProfileLabels: systemProfiles.map((profile) => profile.label),
+    sourceBudgetPerCycle,
+    sourceBudgetPerProfile,
+    schedulingIntervalMs,
+    providerTimeoutMs,
+    runTimeoutMs,
+  });
 
-  const activeBackgroundQueueEntry =
-    await repository.getActiveCrawlQueueEntryForOwner(backgroundIngestionOwnerKey);
-  if (activeBackgroundQueueEntry && activeBackgroundQueueEntry.searchId !== search._id) {
-    const activeSearch = await repository.getSearch(activeBackgroundQueueEntry.searchId);
+  const startedRuns: BackgroundIngestionStartedRun[] = [];
+  const skippedActiveRuns: BackgroundIngestionSkippedRun[] = [];
+
+  for (const systemProfile of systemProfiles) {
+    const result = await startRecurringBackgroundProfileIngestion({
+      repository,
+      runtime,
+      now,
+      systemProfile,
+      schedulingIntervalMs,
+      staleAfterMs: Math.max(
+        1,
+        Math.floor(runtime.staleAfterMs ?? env.BACKGROUND_INGESTION_STALE_AFTER_MS),
+      ),
+      runTimeoutMs,
+      maxSources: sourceBudgetPerProfile,
+      providerTimeoutMs,
+      cycleDiagnostics: {
+        selectedProfiles: systemProfiles.length,
+        selectedProfileIds: systemProfiles.map((profile) => profile.id),
+        selectedProfileLabels: systemProfiles.map((profile) => profile.label),
+        startedRuns: 0,
+        skippedActiveRuns: 0,
+        sourceBudgetPerCycle,
+        sourceBudgetPerProfile,
+        schedulingIntervalMs,
+        providerTimeoutMs,
+        runTimeoutMs,
+      },
+    });
+
+    if (result.status === "started") {
+      startedRuns.push({
+        searchId: result.searchId,
+        crawlRunId: result.crawlRunId,
+        systemProfileId: result.systemProfileId,
+      });
+      continue;
+    }
+
+    if (result.status === "skipped-active") {
+      skippedActiveRuns.push({
+        searchId: result.searchId,
+        systemProfileId: result.systemProfileId,
+      });
+    }
+  }
+
+  if (startedRuns.length > 0) {
+    const firstRun = startedRuns[0]!;
     const result = {
-      status: "skipped-active" as const,
-      searchId: activeBackgroundQueueEntry.searchId,
-      systemProfileId: activeSearch?.systemProfileId,
-    };
+      status: "started",
+      searchId: firstRun.searchId,
+      crawlRunId: firstRun.crawlRunId,
+      systemProfileId: firstRun.systemProfileId,
+      selectedProfileIds: systemProfiles.map((profile) => profile.id),
+      startedRuns,
+      skippedActiveRuns,
+      sourceBudgetPerCycle,
+      sourceBudgetPerProfile,
+    } as const;
     logBackgroundIngestionTrigger(result);
     return result;
   }
 
+  const activeRun = skippedActiveRuns[0];
+  if (activeRun) {
+    const result = {
+      status: "skipped-active",
+      searchId: activeRun.searchId,
+      systemProfileId: activeRun.systemProfileId,
+    } as const;
+    logBackgroundIngestionTrigger(result);
+    return result;
+  }
+
+  const result = {
+    status: "skipped-disabled" as const,
+    message: "No recurring background ingestion profile run could be queued.",
+  };
+  logBackgroundIngestionTrigger(result);
+  return result;
+}
+
+async function startRecurringBackgroundProfileIngestion(input: {
+  repository: JobCrawlerRepository;
+  runtime: BackgroundIngestionRuntime;
+  now: Date;
+  systemProfile: SystemSearchProfile;
+  schedulingIntervalMs: number;
+  staleAfterMs: number;
+  runTimeoutMs: number;
+  maxSources: number;
+  providerTimeoutMs: number;
+  cycleDiagnostics: NonNullable<CrawlDiagnostics["backgroundCycle"]>;
+}): Promise<
+  | { status: "started"; searchId: string; crawlRunId: string; systemProfileId: string }
+  | { status: "skipped-active"; searchId?: string; systemProfileId?: string }
+> {
+  const {
+    repository,
+    runtime,
+    now,
+    systemProfile,
+    schedulingIntervalMs,
+    staleAfterMs,
+    runTimeoutMs,
+    maxSources,
+    providerTimeoutMs,
+    cycleDiagnostics,
+  } = input;
+  const search = await ensureBackgroundSearch(repository, now, systemProfile);
+
+  await recoverStaleBackgroundRunIfNeeded(search._id, repository, now, staleAfterMs);
+
+  const ownerKey = resolveBackgroundRunOwnerKey(systemProfile.id, cycleDiagnostics.selectedProfiles);
+  const activeBackgroundQueueEntry =
+    await repository.getActiveCrawlQueueEntryForOwner(ownerKey);
+  if (activeBackgroundQueueEntry && activeBackgroundQueueEntry.searchId !== search._id) {
+    const activeSearch = await repository.getSearch(activeBackgroundQueueEntry.searchId);
+    return {
+      status: "skipped-active" as const,
+      searchId: activeBackgroundQueueEntry.searchId,
+      systemProfileId: activeSearch?.systemProfileId,
+    };
+  }
+
   const activeQueueEntry = await repository.getActiveCrawlQueueEntryForSearch(search._id);
   if (activeQueueEntry) {
-    const result = {
+    return {
       status: "skipped-active" as const,
       searchId: search._id,
       systemProfileId: systemProfile.id,
     };
-    logBackgroundIngestionTrigger(result);
-    return result;
   }
 
   const searchSession = await repository.createSearchSession(search._id, now.toISOString(), {
@@ -281,19 +454,22 @@ export async function triggerRecurringBackgroundIngestion(
           fetchImpl: runtime.fetchImpl,
           now,
           signal,
-          runTimeoutMs: runtime.runTimeoutMs ?? env.BACKGROUND_INGESTION_RUN_TIMEOUT_MS,
-          maxSources: Math.max(1, Math.floor(runtime.maxSources ?? env.CRAWL_MAX_SOURCES)),
-          schedulingIntervalMs: Math.max(
-            1,
-            Math.floor(runtime.schedulingIntervalMs ?? env.BACKGROUND_INGESTION_INTERVAL_MS),
-          ),
+          runTimeoutMs,
+          maxSources,
+          providerTimeoutMs,
+          schedulingIntervalMs,
+          cycleDiagnostics: {
+            ...cycleDiagnostics,
+            startedRuns: 1,
+            skippedActiveRuns: 0,
+          },
           refreshInventory: runtime.refreshInventory,
           expandInventory: runtime.expandInventory,
         },
       );
     },
     {
-      ownerKey: backgroundIngestionOwnerKey,
+      ownerKey,
       crawlRunId: crawlRun._id,
       searchSessionId: searchSession._id,
       queuedAt: now.toISOString(),
@@ -301,23 +477,19 @@ export async function triggerRecurringBackgroundIngestion(
   );
 
   if (!queued) {
-    const result = {
+    return {
       status: "skipped-active" as const,
       searchId: search._id,
       systemProfileId: systemProfile.id,
     };
-    logBackgroundIngestionTrigger(result);
-    return result;
   }
 
-  const result = {
+  return {
     status: "started",
     searchId: search._id,
     crawlRunId: crawlRun._id,
     systemProfileId: systemProfile.id,
   } as const;
-  logBackgroundIngestionTrigger(result);
-  return result;
 }
 
 function logBackgroundSchedulerStart(result: {
@@ -345,6 +517,14 @@ function logBackgroundIngestionTrigger(result: BackgroundIngestionTriggerResult)
     searchId: "searchId" in result ? result.searchId : undefined,
     crawlRunId: "crawlRunId" in result ? result.crawlRunId : undefined,
     systemProfileId: "systemProfileId" in result ? result.systemProfileId : undefined,
+    selectedProfileIds: "selectedProfileIds" in result ? result.selectedProfileIds : undefined,
+    startedRuns: "startedRuns" in result ? result.startedRuns.length : undefined,
+    skippedActiveRuns:
+      "skippedActiveRuns" in result ? result.skippedActiveRuns.length : undefined,
+    sourceBudgetPerCycle:
+      "sourceBudgetPerCycle" in result ? result.sourceBudgetPerCycle : undefined,
+    sourceBudgetPerProfile:
+      "sourceBudgetPerProfile" in result ? result.sourceBudgetPerProfile : undefined,
     reason: "reason" in result ? result.reason : undefined,
     phase: "phase" in result ? result.phase : undefined,
     message: "message" in result ? result.message : undefined,
@@ -373,7 +553,9 @@ async function executeRecurringInventoryIngestion(
     signal?: AbortSignal;
     runTimeoutMs: number;
     maxSources: number;
+    providerTimeoutMs: number;
     schedulingIntervalMs: number;
+    cycleDiagnostics?: NonNullable<CrawlDiagnostics["backgroundCycle"]>;
     refreshInventory?: (runtime: {
       repository: JobCrawlerRepository;
       now: Date;
@@ -417,14 +599,15 @@ async function executeRecurringInventoryIngestion(
   let totalMatchedJobs = 0;
   let totalSavedJobs = 0;
   const totalPersistenceStats = createEmptyPersistenceStats();
-  const providerPersistenceTotals = new Map<
+  const providerThroughputTotals = new Map<
     CrawlSourceResult["provider"],
-    BackgroundPersistenceCounts
+    BackgroundProviderThroughputCounts
   >();
   const backgroundPersistenceFailures: string[] = [];
   const runTimestamp = () => new Date(startedAtMs + Math.max(0, Date.now() - startMs)).toISOString();
 
   try {
+    diagnostics.backgroundCycle = runtime.cycleDiagnostics;
     diagnostics.systemProfile = {
       id: target.systemProfile.id,
       label: target.systemProfile.label,
@@ -508,7 +691,7 @@ async function executeRecurringInventoryIngestion(
     if (selectionSkippedReason) {
       diagnostics.backgroundPersistence = buildBackgroundPersistenceDiagnostics(
         totalPersistenceStats,
-        Array.from(providerPersistenceTotals.entries()),
+        Array.from(providerThroughputTotals.entries()),
         selectionSkippedReason,
         backgroundPersistenceFailures,
       );
@@ -564,6 +747,7 @@ async function executeRecurringInventoryIngestion(
       skippedByPlatformReason: selectionPlan.diagnostics.skippedByPlatformReason,
       freshnessBuckets: selectionPlan.diagnostics.freshnessBuckets,
       selectedByPlatform: selectionPlan.diagnostics.selectedByPlatform,
+      platformSelectionBudgets: selectionPlan.diagnostics.platformSelectionBudgets,
       selectedByProvider,
       selectedByHealth: selectionPlan.diagnostics.selectedByHealth,
       selectedSourceIds: selectionPlan.diagnostics.selectedSourceIds,
@@ -602,7 +786,8 @@ async function executeRecurringInventoryIngestion(
       const providerStartedMs = Date.now();
 
       try {
-        const result = await provider.crawlSources(
+        const result = await crawlProviderSourcesWithTimeout(
+          provider,
           {
             fetchImpl: runtime.fetchImpl ?? fetch,
             now: runtime.now,
@@ -611,6 +796,7 @@ async function executeRecurringInventoryIngestion(
             throwIfCanceled: () => runController.throwIfCanceled(),
           },
           providerSources,
+          runtime.providerTimeoutMs,
         );
 
         totalFetchedJobs += result.fetchedCount;
@@ -656,7 +842,7 @@ async function executeRecurringInventoryIngestion(
           backgroundPersistenceFailures.push(`${provider.provider}: ${message}`);
           diagnostics.backgroundPersistence = buildBackgroundPersistenceDiagnostics(
             totalPersistenceStats,
-            Array.from(providerPersistenceTotals.entries()),
+            Array.from(providerThroughputTotals.entries()),
             diagnostics.backgroundPersistence?.skippedReason,
             backgroundPersistenceFailures,
           );
@@ -676,10 +862,18 @@ async function executeRecurringInventoryIngestion(
         const savedJobs = persistence.jobs;
         totalSavedJobs += persistence.linkedToRunCount;
         accumulatePersistenceStats(totalPersistenceStats, persistence);
-        accumulateProviderPersistenceStats(providerPersistenceTotals, provider.provider, persistence);
+        accumulateProviderThroughputStats(providerThroughputTotals, provider.provider, {
+          sourceCount: providerSources.length,
+          fetchedCount: result.fetchedCount,
+          matchedCount: result.matchedCount,
+          seedCount: result.jobs.length,
+          warningCount: result.warningCount ?? 0,
+          failedBatches: 0,
+          ...persistence,
+        });
         diagnostics.backgroundPersistence = buildBackgroundPersistenceDiagnostics(
           totalPersistenceStats,
-          Array.from(providerPersistenceTotals.entries()),
+          Array.from(providerThroughputTotals.entries()),
           diagnostics.backgroundPersistence?.skippedReason,
           backgroundPersistenceFailures,
         );
@@ -712,6 +906,7 @@ async function executeRecurringInventoryIngestion(
           sourceCount: providerSources.length,
           fetchedCount: result.fetchedCount,
           matchedCount: result.matchedCount,
+          seedCount: result.jobs.length,
           savedCount: savedJobs.length,
           insertedCount: persistence.insertedCount,
           updatedCount: persistence.updatedCount,
@@ -760,6 +955,8 @@ async function executeRecurringInventoryIngestion(
         });
       } catch (error) {
         const abortLike = error instanceof Error && error.name === "AbortError";
+        const providerTimedOut =
+          error instanceof Error && error.name === "ProviderTimeoutError";
         if (!abortLike) {
           diagnostics.providerFailures += 1;
         }
@@ -804,7 +1001,16 @@ async function executeRecurringInventoryIngestion(
           provider: provider.provider,
           duration: Date.now() - providerStartedMs,
           sourceCount: providerSources.length,
-          timedOut: abortLike,
+          timedOut: providerTimedOut,
+        });
+        accumulateProviderThroughputStats(providerThroughputTotals, provider.provider, {
+          ...createEmptyPersistenceStats(),
+          sourceCount: providerSources.length,
+          fetchedCount: 0,
+          matchedCount: 0,
+          seedCount: 0,
+          warningCount: 0,
+          failedBatches: 1,
         });
 
         if (abortLike) {
@@ -822,7 +1028,7 @@ async function executeRecurringInventoryIngestion(
     diagnostics.performance.providerTimingsMs = providerTimings;
     diagnostics.backgroundPersistence = buildBackgroundPersistenceDiagnostics(
       totalPersistenceStats,
-      Array.from(providerPersistenceTotals.entries()),
+      Array.from(providerThroughputTotals.entries()),
       diagnostics.backgroundPersistence?.skippedReason,
       backgroundPersistenceFailures,
     );
@@ -862,7 +1068,7 @@ async function executeRecurringInventoryIngestion(
     diagnostics.performance.providerTimingsMs = providerTimings;
     diagnostics.backgroundPersistence = buildBackgroundPersistenceDiagnostics(
       totalPersistenceStats,
-      Array.from(providerPersistenceTotals.entries()),
+      Array.from(providerThroughputTotals.entries()),
       diagnostics.backgroundPersistence?.skippedReason,
       backgroundPersistenceFailures,
     );
@@ -1061,12 +1267,30 @@ function accumulatePersistenceStats(
   total.indexedEventCount += next.indexedEventCount;
 }
 
-function accumulateProviderPersistenceStats(
-  totals: Map<CrawlSourceResult["provider"], BackgroundPersistenceCounts>,
+function createEmptyProviderThroughputStats(): BackgroundProviderThroughputCounts {
+  return {
+    ...createEmptyPersistenceStats(),
+    sourceCount: 0,
+    fetchedCount: 0,
+    matchedCount: 0,
+    seedCount: 0,
+    warningCount: 0,
+    failedBatches: 0,
+  };
+}
+
+function accumulateProviderThroughputStats(
+  totals: Map<CrawlSourceResult["provider"], BackgroundProviderThroughputCounts>,
   provider: CrawlSourceResult["provider"],
-  next: BackgroundPersistenceCounts,
+  next: BackgroundProviderThroughputCounts,
 ) {
-  const current = totals.get(provider) ?? createEmptyPersistenceStats();
+  const current = totals.get(provider) ?? createEmptyProviderThroughputStats();
+  current.sourceCount += next.sourceCount;
+  current.fetchedCount += next.fetchedCount;
+  current.matchedCount += next.matchedCount;
+  current.seedCount += next.seedCount;
+  current.warningCount += next.warningCount;
+  current.failedBatches += next.failedBatches;
   accumulatePersistenceStats(current, next);
   totals.set(provider, current);
 }
@@ -1099,7 +1323,7 @@ function hydrateBackgroundJobs(seeds: NormalizedJobSeed[], now: Date) {
 
 function buildBackgroundPersistenceDiagnostics(
   total: BackgroundPersistenceCounts,
-  providerStats: Array<[CrawlSourceResult["provider"], BackgroundPersistenceCounts]>,
+  providerStats: Array<[CrawlSourceResult["provider"], BackgroundProviderThroughputCounts]>,
   skippedReason?: string,
   failureSamples: string[] = [],
 ): NonNullable<CrawlDiagnostics["backgroundPersistence"]> {
@@ -1113,11 +1337,17 @@ function buildBackgroundPersistenceDiagnostics(
     skippedReason,
     providerStats: providerStats.map(([provider, stats]) => ({
       provider,
+      sourceCount: stats.sourceCount,
+      fetchedCount: stats.fetchedCount,
+      matchedCount: stats.matchedCount,
+      seedCount: stats.seedCount,
       savedCount: stats.linkedToRunCount,
       insertedCount: stats.insertedCount,
       updatedCount: stats.updatedCount,
       linkedToRunCount: stats.linkedToRunCount,
       indexedEventCount: stats.indexedEventCount,
+      warningCount: stats.warningCount,
+      failedBatches: stats.failedBatches,
     })),
   };
 }
@@ -1372,11 +1602,57 @@ async function createBackgroundRunController(input: {
   };
 }
 
+async function crawlProviderSourcesWithTimeout(
+  provider: CrawlProvider,
+  context: Parameters<CrawlProvider["crawlSources"]>[0],
+  sources: Parameters<CrawlProvider["crawlSources"]>[1],
+  timeoutMs: number,
+): Promise<Awaited<ReturnType<CrawlProvider["crawlSources"]>>> {
+  const timeoutController = new AbortController();
+  const timeoutError = Object.assign(
+    new Error(
+      `Background provider ${provider.provider} exceeded the ${timeoutMs}ms crawl budget and was failed fast.`,
+    ),
+    { name: "ProviderTimeoutError" },
+  );
+  const timeoutHandle = setTimeout(() => {
+    timeoutController.abort(timeoutError);
+  }, timeoutMs);
+  timeoutHandle.unref?.();
+
+  try {
+    const timedContext = {
+      ...context,
+      signal: mergeSignals(context.signal, timeoutController.signal),
+    };
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutController.signal.addEventListener(
+        "abort",
+        () => reject(timeoutController.signal.reason ?? timeoutError),
+        { once: true },
+      );
+    });
+
+    return await Promise.race([
+      provider.crawlSources(timedContext, sources),
+      timeoutPromise,
+    ]);
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
 function createSourceResult(input: Omit<CrawlSourceResult, "_id">): CrawlSourceResult {
   return {
     _id: `${input.crawlRunId}:${input.provider}`,
     ...input,
   };
+}
+
+function resolveBackgroundRunOwnerKey(systemProfileId: string, selectedProfiles: number) {
+  return selectedProfiles > 1
+    ? `${backgroundIngestionOwnerKey}:${systemProfileId}`
+    : backgroundIngestionOwnerKey;
 }
 
 function createEmptyDiagnostics(): CrawlDiagnostics {
@@ -1404,6 +1680,7 @@ function createEmptyDiagnostics(): CrawlDiagnostics {
       skippedByPlatformReason: {},
       freshnessBuckets: {},
       selectedByPlatform: {},
+      platformSelectionBudgets: {},
       selectedByProvider: {},
       selectedByHealth: {},
       selectedSourceIds: [],

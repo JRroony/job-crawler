@@ -9,6 +9,8 @@ const dayMs = 24 * hourMs;
 export type SystemSearchProfileGeography = {
   id: string;
   label: string;
+  templateId: string;
+  templateLabel: string;
   scope: "country" | "state" | "province" | "city";
   country: string;
   state?: string;
@@ -71,6 +73,21 @@ type RoleFamilyTemplate = {
   cooldownMs?: number;
   platformPreference?: SystemSearchPlatformPreference;
   variants: readonly RoleTitleVariant[];
+};
+
+type GeographyTemplateRegion = Omit<
+  SystemSearchProfileGeography,
+  "priorityOffset" | "templateId" | "templateLabel" | "variantTiers"
+> & {
+  priorityOffset: number;
+  variantTiers?: readonly number[];
+};
+
+type GeographyTemplate = {
+  id: string;
+  label: string;
+  variantTiers: readonly number[];
+  regions: readonly GeographyTemplateRegion[];
 };
 
 const defaultCadenceMs = 18 * hourMs;
@@ -227,40 +244,57 @@ const roleFamilyTemplates: readonly RoleFamilyTemplate[] = [
   ]),
 ];
 
-const geographyTemplates: readonly SystemSearchProfileGeography[] = [
-  countryGeography("us", "United States", "United States", 0, [0, 1, 2]),
-  countryGeography("canada", "Canada", "Canada", 4, [0, 1, 2]),
-  stateGeography("us_ca", "California", "CA", 20),
-  stateGeography("us_wa", "Washington", "WA", 22),
-  stateGeography("us_ny", "New York", "NY", 24),
-  stateGeography("us_tx", "Texas", "TX", 26),
-  stateGeography("us_ma", "Massachusetts", "MA", 28),
-  stateGeography("us_il", "Illinois", "IL", 30),
-  stateGeography("us_nj", "New Jersey", "NJ", 32),
-  stateGeography("us_va", "Virginia", "VA", 34),
-  stateGeography("us_ga", "Georgia", "GA", 36),
-  stateGeography("us_nc", "North Carolina", "NC", 38),
-  stateGeography("us_co", "Colorado", "CO", 40),
-  stateGeography("us_fl", "Florida", "FL", 42),
-  provinceGeography("ca_on", "Ontario", "ON", 44, [0, 1]),
-  provinceGeography("ca_bc", "British Columbia", "BC", 46, [0, 1]),
-  provinceGeography("ca_qc", "Quebec", "QC", 48, [0, 1]),
-  provinceGeography("ca_ab", "Alberta", "AB", 49, [0, 1]),
-  cityGeography("us_seattle_wa", "Seattle, WA", "United States", "WA", "Seattle", 50),
-  cityGeography("us_bellevue_wa", "Bellevue, WA", "United States", "WA", "Bellevue", 52),
-  cityGeography("us_redmond_wa", "Redmond, WA", "United States", "WA", "Redmond", 54),
-  cityGeography("us_san_francisco_ca", "San Francisco, CA", "United States", "CA", "San Francisco", 56),
-  cityGeography("us_san_jose_ca", "San Jose, CA", "United States", "CA", "San Jose", 58),
-  cityGeography("us_new_york_city_ny", "New York City, NY", "United States", "NY", "New York City", 60),
-  cityGeography("us_austin_tx", "Austin, TX", "United States", "TX", "Austin", 62),
-  cityGeography("us_boston_ma", "Boston, MA", "United States", "MA", "Boston", 64),
-  cityGeography("ca_toronto_on", "Toronto, ON", "Canada", "ON", "Toronto", 70),
-  cityGeography("ca_waterloo_on", "Waterloo, ON", "Canada", "ON", "Waterloo", 72),
-  cityGeography("ca_ottawa_on", "Ottawa, ON", "Canada", "ON", "Ottawa", 74),
-  cityGeography("ca_vancouver_bc", "Vancouver, BC", "Canada", "BC", "Vancouver", 76),
-  cityGeography("ca_montreal_qc", "Montreal, QC", "Canada", "QC", "Montreal", 78),
-  cityGeography("ca_calgary_ab", "Calgary, AB", "Canada", "AB", "Calgary", 80),
+const geographyTemplateDefinitions: readonly GeographyTemplate[] = [
+  geographyTemplate("national_markets", "National market coverage", [0, 1, 2], [
+    countryRegion("us", "United States", "United States", 0),
+    countryRegion("canada", "Canada", "Canada", 4),
+  ]),
+  geographyTemplate("us_west_coast_cluster", "US West Coast and Mountain tech markets", [0], [
+    stateRegion("us_ca", "California", "CA", 20),
+    stateRegion("us_wa", "Washington", "WA", 22),
+    stateRegion("us_co", "Colorado", "CO", 40),
+    cityRegion("us_seattle_wa", "Seattle, WA", "United States", "WA", "Seattle", 50),
+    cityRegion("us_bellevue_wa", "Bellevue, WA", "United States", "WA", "Bellevue", 52),
+    cityRegion("us_redmond_wa", "Redmond, WA", "United States", "WA", "Redmond", 54),
+    cityRegion("us_san_francisco_ca", "San Francisco, CA", "United States", "CA", "San Francisco", 56),
+    cityRegion("us_san_jose_ca", "San Jose, CA", "United States", "CA", "San Jose", 58),
+  ]),
+  geographyTemplate("us_northeast_cluster", "US Northeast tech and finance markets", [0], [
+    stateRegion("us_ny", "New York", "NY", 24),
+    stateRegion("us_ma", "Massachusetts", "MA", 28),
+    stateRegion("us_nj", "New Jersey", "NJ", 32),
+    cityRegion("us_new_york_city_ny", "New York City, NY", "United States", "NY", "New York City", 60),
+    cityRegion("us_boston_ma", "Boston, MA", "United States", "MA", "Boston", 64),
+  ]),
+  geographyTemplate("us_south_and_midsouth_cluster", "US South and Mid-South growth markets", [0], [
+    stateRegion("us_tx", "Texas", "TX", 26),
+    stateRegion("us_va", "Virginia", "VA", 34),
+    stateRegion("us_ga", "Georgia", "GA", 36),
+    stateRegion("us_nc", "North Carolina", "NC", 38),
+    stateRegion("us_fl", "Florida", "FL", 42),
+    cityRegion("us_austin_tx", "Austin, TX", "United States", "TX", "Austin", 62),
+  ]),
+  geographyTemplate("us_midwest_cluster", "US Midwest operating markets", [0], [
+    stateRegion("us_il", "Illinois", "IL", 30),
+  ]),
+  geographyTemplate("canada_province_markets", "Canada provincial markets", [0, 1], [
+    provinceRegion("ca_on", "Ontario", "ON", 44),
+    provinceRegion("ca_bc", "British Columbia", "BC", 46),
+    provinceRegion("ca_qc", "Quebec", "QC", 48),
+    provinceRegion("ca_ab", "Alberta", "AB", 49),
+  ]),
+  geographyTemplate("canada_major_metros", "Canada major metro markets", [0], [
+    cityRegion("ca_toronto_on", "Toronto, ON", "Canada", "ON", "Toronto", 70),
+    cityRegion("ca_waterloo_on", "Waterloo, ON", "Canada", "ON", "Waterloo", 72),
+    cityRegion("ca_ottawa_on", "Ottawa, ON", "Canada", "ON", "Ottawa", 74),
+    cityRegion("ca_vancouver_bc", "Vancouver, BC", "Canada", "BC", "Vancouver", 76),
+    cityRegion("ca_montreal_qc", "Montreal, QC", "Canada", "QC", "Montreal", 78),
+    cityRegion("ca_calgary_ab", "Calgary, AB", "Canada", "AB", "Calgary", 80),
+  ]),
 ];
+
+const geographyTemplates: readonly SystemSearchProfileGeography[] =
+  expandGeographyTemplates(geographyTemplateDefinitions);
 
 export const backgroundSystemSearchProfiles: SystemSearchProfile[] =
   generateBackgroundSystemSearchProfiles();
@@ -287,6 +321,15 @@ export function listBackgroundSystemRoleFamilies() {
 
 export function listBackgroundSystemGeographies() {
   return geographyTemplates.map(copyGeography);
+}
+
+export function listBackgroundSystemGeographyTemplates() {
+  return geographyTemplateDefinitions.map((template) => ({
+    id: template.id,
+    label: template.label,
+    variantTiers: [...template.variantTiers],
+    regions: template.regions.map((region) => ({ ...region })),
+  }));
 }
 
 export function selectBackgroundSystemSearchProfiles(input: {
@@ -597,29 +640,41 @@ function variant(title: string, tier: RoleTitleVariant["tier"]): RoleTitleVarian
   return { title, tier };
 }
 
-function countryGeography(
+function geographyTemplate(
+  id: string,
+  label: string,
+  variantTiers: readonly number[],
+  regions: readonly GeographyTemplateRegion[],
+): GeographyTemplate {
+  return {
+    id,
+    label,
+    variantTiers,
+    regions,
+  };
+}
+
+function countryRegion(
   id: string,
   label: string,
   country: string,
   priorityOffset: number,
-  variantTiers: readonly number[],
-): SystemSearchProfileGeography {
+): GeographyTemplateRegion {
   return {
     id,
     label,
     scope: "country",
     country,
     priorityOffset,
-    variantTiers,
   };
 }
 
-function stateGeography(
+function stateRegion(
   id: string,
   label: string,
   state: string,
   priorityOffset: number,
-): SystemSearchProfileGeography {
+): GeographyTemplateRegion {
   return {
     id,
     label,
@@ -627,17 +682,15 @@ function stateGeography(
     country: "United States",
     state,
     priorityOffset,
-    variantTiers: [0],
   };
 }
 
-function provinceGeography(
+function provinceRegion(
   id: string,
   label: string,
   provinceCode: string,
   priorityOffset: number,
-  variantTiers: readonly number[],
-): SystemSearchProfileGeography {
+): GeographyTemplateRegion {
   return {
     id,
     label,
@@ -645,18 +698,17 @@ function provinceGeography(
     country: "Canada",
     state: provinceCode,
     priorityOffset,
-    variantTiers,
   };
 }
 
-function cityGeography(
+function cityRegion(
   id: string,
   label: string,
   country: string,
   state: string,
   city: string,
   priorityOffset: number,
-): SystemSearchProfileGeography {
+): GeographyTemplateRegion {
   return {
     id,
     label,
@@ -665,8 +717,51 @@ function cityGeography(
     state,
     city,
     priorityOffset,
-    variantTiers: [0],
   };
+}
+
+function expandGeographyTemplates(
+  templates: readonly GeographyTemplate[],
+): SystemSearchProfileGeography[] {
+  const dedupedRegions = new Map<string, SystemSearchProfileGeography>();
+
+  for (const template of templates) {
+    for (const region of template.regions) {
+      const geography: SystemSearchProfileGeography = {
+        ...region,
+        templateId: template.id,
+        templateLabel: template.label,
+        variantTiers: [...(region.variantTiers ?? template.variantTiers)],
+      };
+      const duplicateKey = [
+        normalizeProfileKey(geography.country),
+        normalizeProfileKey(geography.state),
+        normalizeProfileKey(geography.city),
+      ].join("|");
+      const existing = dedupedRegions.get(duplicateKey);
+
+      if (!existing || geography.priorityOffset < existing.priorityOffset) {
+        dedupedRegions.set(duplicateKey, geography);
+      }
+    }
+  }
+
+  return Array.from(dedupedRegions.values()).sort(compareGeographyTemplateRegion);
+}
+
+function compareGeographyTemplateRegion(
+  left: SystemSearchProfileGeography,
+  right: SystemSearchProfileGeography,
+) {
+  if (left.priorityOffset !== right.priorityOffset) {
+    return left.priorityOffset - right.priorityOffset;
+  }
+
+  if (left.scope !== right.scope) {
+    return geographyScopeRank(left.scope) - geographyScopeRank(right.scope);
+  }
+
+  return left.id.localeCompare(right.id);
 }
 
 function copySystemSearchProfile(profile: SystemSearchProfile): SystemSearchProfile {
@@ -703,6 +798,8 @@ function copyGeography(geography: SystemSearchProfileGeography): SystemSearchPro
   return {
     id: geography.id,
     label: geography.label,
+    templateId: geography.templateId,
+    templateLabel: geography.templateLabel,
     scope: geography.scope,
     country: geography.country,
     ...(geography.state ? { state: geography.state } : {}),

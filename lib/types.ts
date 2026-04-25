@@ -181,8 +181,8 @@ export const crawlerPlatforms = [
   "lever",
   "ashby",
   "smartrecruiters",
-  "company_page",
   "workday",
+  "company_page",
 ] as const;
 
 export const crawlerPlatformSchema = z.enum(crawlerPlatforms);
@@ -245,7 +245,7 @@ export function normalizeCrawlerPlatforms(
   value?: CrawlerPlatform[] | null,
 ) {
   const candidates = Array.isArray(value) ? value : [];
-  const normalized = crawlerPlatforms.filter((platform) =>
+  const normalized = activeCrawlerPlatforms.filter((platform) =>
     candidates.includes(platform),
   );
 
@@ -443,6 +443,20 @@ export const crawlDiagnosticsSchema = z.object({
   excludedByExperience: z.number().int().nonnegative().default(0),
   dedupedOut: z.number().int().nonnegative().default(0),
   validationDeferred: z.number().int().nonnegative().default(0),
+  backgroundCycle: z
+    .object({
+      selectedProfiles: z.number().int().nonnegative().default(0),
+      selectedProfileIds: z.array(z.string().min(1)).max(24).default([]),
+      selectedProfileLabels: z.array(z.string().min(1)).max(24).default([]),
+      startedRuns: z.number().int().nonnegative().default(0),
+      skippedActiveRuns: z.number().int().nonnegative().default(0),
+      sourceBudgetPerCycle: z.number().int().nonnegative().default(0),
+      sourceBudgetPerProfile: z.number().int().nonnegative().default(0),
+      schedulingIntervalMs: z.number().int().nonnegative().default(0),
+      providerTimeoutMs: z.number().int().nonnegative().default(0),
+      runTimeoutMs: z.number().int().nonnegative().default(0),
+    })
+    .optional(),
   inventoryScheduling: z
     .object({
       inventorySources: z.number().int().nonnegative().default(0),
@@ -455,6 +469,7 @@ export const crawlDiagnosticsSchema = z.object({
       skippedByPlatformReason: z.record(z.string(), z.number().int().nonnegative()).default({}),
       freshnessBuckets: z.record(z.string(), z.number().int().nonnegative()).default({}),
       selectedByPlatform: z.record(z.string(), z.number().int().nonnegative()).default({}),
+      platformSelectionBudgets: z.record(z.string(), z.number().int().nonnegative()).default({}),
       selectedByProvider: z.record(z.string(), z.number().int().nonnegative()).default({}),
       selectedByHealth: z.record(z.string(), z.number().int().nonnegative()).default({}),
       selectedSourceIds: z.array(z.string().min(1)).max(12).default([]),
@@ -562,11 +577,17 @@ export const crawlDiagnosticsSchema = z.object({
         .array(
           z.object({
             provider: providerPlatformSchema,
+            sourceCount: z.number().int().nonnegative().default(0),
+            fetchedCount: z.number().int().nonnegative().default(0),
+            matchedCount: z.number().int().nonnegative().default(0),
+            seedCount: z.number().int().nonnegative().default(0),
             savedCount: z.number().int().nonnegative().default(0),
             insertedCount: z.number().int().nonnegative().default(0),
             updatedCount: z.number().int().nonnegative().default(0),
             linkedToRunCount: z.number().int().nonnegative().default(0),
             indexedEventCount: z.number().int().nonnegative().default(0),
+            warningCount: z.number().int().nonnegative().default(0),
+            failedBatches: z.number().int().nonnegative().default(0),
           }),
         )
         .default([]),
@@ -596,11 +617,15 @@ export const crawlDiagnosticsSchema = z.object({
           "indexed_coverage_sufficient",
           "reused_completed_coverage",
           "insufficient_indexed_coverage",
+          "insufficient_indexed_coverage_background_requested",
           "indexed_empty_background_requested",
           "background_ingestion_already_active",
           "background_ingestion_unavailable",
+          "explicit_request_time_recovery",
           "freshness_recovery",
+          "stale_indexed_coverage_background_requested",
           "retry_incomplete_previous_run",
+          "incomplete_previous_run_background_requested",
         ])
         .optional(),
       triggerExplanation: nullableOptional(z.string()),

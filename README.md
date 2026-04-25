@@ -155,14 +155,14 @@ Implemented platform families:
 - Greenhouse
 - Lever
 - Ashby
+- SmartRecruiters
+- Workday
 - Company page
 
 Greenhouse is the reliability focus of the current MVP. The other enabled families remain available, but they are not the hard requirement this iteration is optimized around.
 
 Visible but not active crawler targets:
 
-- Workday
-  Shown as disabled. Discovery can classify Workday URLs, but there is no active Workday provider yet.
 - LinkedIn
   Labeled as limited. Not an active crawler provider.
 - Indeed
@@ -231,6 +231,12 @@ tests/
 - The app ships with a maintained built-in Greenhouse board registry so Greenhouse crawling is not dependent on search-engine discovery.
 - To add more public Greenhouse boards locally, append comma-separated tokens in `.env.local` with `GREENHOUSE_BOARD_REGISTRY_APPEND`.
 - `GREENHOUSE_BOARD_TOKENS` is still supported as a legacy alias, but `GREENHOUSE_BOARD_REGISTRY_APPEND` is the preferred setting going forward.
+
+## Extending non-Greenhouse source supply
+
+- Lever and Ashby also ship with registry-backed public board seeds, so recurring ingestion has durable non-Greenhouse inventory before search-time discovery runs.
+- Add structured Lever, Ashby, or Workday entries with `SOURCE_REGISTRY_CONFIG`.
+- Workday can also be configured with `WORKDAY_SOURCE_CONFIG`, a JSON array of `{ "tenant", "host", "careerSitePath", "company" }` records. The app derives the display URL, API URL, token, persistence key, and inventory metadata from those durable fields.
 
 ### Persistence
 
@@ -400,8 +406,9 @@ Important fields:
 
 ### Workday
 
-- Not implemented as an active crawler provider yet.
-- The codebase can classify Workday URLs during discovery, but it does not fetch or normalize Workday jobs.
+- Supports discovered Workday sources through the public JSON endpoint when available.
+- Falls back to public HTML/detail-page recovery for supported public Workday URLs.
+- Coverage depends on tenant/site path recovery and public response shape.
 
 ### LinkedIn and Indeed
 
@@ -412,7 +419,6 @@ Important fields:
 ## Current limitations
 
 - Discovery is configuration-driven. There is no true public-web source discovery yet.
-- Workday is classified but not supported as a runnable provider.
 - LinkedIn and Indeed are intentionally not treated as active crawler platforms.
 - Company-page extraction works best when feeds or structured HTML/JSON-LD data are present.
 - Validation is point-in-time and can remain deferred after a crawl by design.

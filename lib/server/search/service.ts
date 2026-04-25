@@ -169,8 +169,10 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     session.searchReuse,
     session.now,
     {
-      allowRequestTimePrimaryCrawl:
-        Boolean(runtime.discovery) && Boolean(runtime.providers?.length),
+      allowRequestTimeSupplementalCrawl:
+        runtime.allowRequestTimeSupplementalCrawl === true,
+      allowRequestTimeFreshnessRecovery:
+        (runtime.providers?.length ?? 1) > 0 && Boolean(runtime.discovery ?? true),
     },
   );
   const backgroundIngestion = supplementalDecision.requestBackgroundIngestion
@@ -289,7 +291,8 @@ function resolveSupplementalCrawlDecision(
   },
   now: Date,
   options: {
-    allowRequestTimePrimaryCrawl?: boolean;
+    allowRequestTimeSupplementalCrawl?: boolean;
+    allowRequestTimeFreshnessRecovery?: boolean;
   } = {},
 ): SupplementalDecision {
   const env = getEnv();
@@ -306,7 +309,25 @@ function resolveSupplementalCrawlDecision(
     now,
   );
 
-  if (indexedJobCount === 0 && !options.allowRequestTimePrimaryCrawl) {
+  if (options.allowRequestTimeSupplementalCrawl && indexedJobCount < minimumIndexedCoverage) {
+    return {
+      shouldQueue: true,
+      requestBackgroundIngestion: false,
+      triggerReason: "explicit_request_time_recovery",
+      triggerExplanation: `An explicit request-time supplemental recovery opt-in was provided and indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${mode} threshold.`,
+      minimumIndexedCoverage,
+      targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
+      indexedCandidateCount: indexedSearch.candidateCount,
+      indexedJobCount,
+      reusedExistingSearch: previousCoverage.reusedExistingSearch,
+      previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
+      previousRunStatus: previousCoverage.previousRunStatus,
+      previousFinishedAt: previousCoverage.previousFinishedAt,
+      latestIndexedJobAgeMs,
+    };
+  }
+
+  if (indexedJobCount === 0) {
     return {
       shouldQueue: false,
       requestBackgroundIngestion: true,
@@ -372,11 +393,29 @@ function resolveSupplementalCrawlDecision(
     latestIndexedJobAgeMs >= staleAfterMs;
 
   if (freshnessRecoveryEligible) {
+    if (mode !== "deep" || !options.allowRequestTimeFreshnessRecovery) {
+      return {
+        shouldQueue: false,
+        requestBackgroundIngestion: true,
+        triggerReason: "stale_indexed_coverage_background_requested",
+        triggerExplanation: `Indexed coverage is below the ${minimumIndexedCoverage}-job ${mode} threshold and the newest indexed match is stale, so background ingestion was requested instead of making the search request crawl.`,
+        minimumIndexedCoverage,
+        targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
+        indexedCandidateCount: indexedSearch.candidateCount,
+        indexedJobCount,
+        reusedExistingSearch: previousCoverage.reusedExistingSearch,
+        previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
+        previousRunStatus: previousCoverage.previousRunStatus,
+        previousFinishedAt: previousCoverage.previousFinishedAt,
+        latestIndexedJobAgeMs,
+      };
+    }
+
     return {
       shouldQueue: true,
       requestBackgroundIngestion: false,
       triggerReason: "freshness_recovery",
-      triggerExplanation: `Indexed coverage is below the ${minimumIndexedCoverage}-job ${mode} threshold and the newest indexed match is stale, so a bounded supplemental refresh was queued.`,
+      triggerExplanation: `Deep mode explicitly requested broader retrieval and indexed coverage is below the ${minimumIndexedCoverage}-job threshold with stale matches, so a bounded supplemental freshness recovery was queued.`,
       minimumIndexedCoverage,
       targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
       indexedCandidateCount: indexedSearch.candidateCount,
@@ -395,10 +434,10 @@ function resolveSupplementalCrawlDecision(
     previousCoverage.previousRunStatus !== "completed"
   ) {
     return {
-      shouldQueue: true,
-      requestBackgroundIngestion: false,
-      triggerReason: "retry_incomplete_previous_run",
-      triggerExplanation: "The previous identical session did not complete cleanly and indexed coverage is still below threshold, so supplemental recovery was retried.",
+      shouldQueue: false,
+      requestBackgroundIngestion: true,
+      triggerReason: "incomplete_previous_run_background_requested",
+      triggerExplanation: "The previous identical session did not complete cleanly and indexed coverage is still below threshold, so background ingestion was requested instead of retrying crawl work in the search request.",
       minimumIndexedCoverage,
       targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
       indexedCandidateCount: indexedSearch.candidateCount,
@@ -412,10 +451,10 @@ function resolveSupplementalCrawlDecision(
   }
 
   return {
-    shouldQueue: true,
-    requestBackgroundIngestion: false,
-    triggerReason: "insufficient_indexed_coverage",
-    triggerExplanation: `Indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${mode} threshold, so a bounded supplemental crawl was queued.`,
+    shouldQueue: false,
+    requestBackgroundIngestion: true,
+    triggerReason: "insufficient_indexed_coverage_background_requested",
+    triggerExplanation: `Indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${mode} threshold, so background ingestion was requested and the search request stayed DB-first.`,
     minimumIndexedCoverage,
     targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
     indexedCandidateCount: indexedSearch.candidateCount,

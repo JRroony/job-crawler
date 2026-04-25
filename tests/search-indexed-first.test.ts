@@ -187,7 +187,7 @@ async function createActiveSearchState(
 }
 
 describe("jobs-first indexed search", () => {
-  it("treats runSearchFromFilters as an indexed-first search entry point instead of waiting for ingestion completion", async () => {
+  it("treats runSearchFromFilters as an indexed-first search entry point and keeps ordinary low coverage off the request crawl path", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     await seedIndexedJobs(repository, [
       createPersistableJob({
@@ -206,35 +206,14 @@ describe("jobs-first indexed search", () => {
       }),
     ]);
 
-    let providerFinished = false;
-    const provider = createStubProvider("greenhouse", async () => {
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      providerFinished = true;
-
-      return {
-        provider: "greenhouse",
-        status: "success",
-        sourceCount: 1,
-        fetchedCount: 1,
-        matchedCount: 1,
-        warningCount: 0,
-        jobs: [
-          {
-            title: "Software Engineer II",
-            company: "Acme",
-            country: "United States",
-            locationText: "Remote - United States",
-            sourcePlatform: "greenhouse",
-            sourceJobId: "supplemental-role",
-            sourceUrl: "https://example.com/jobs/supplemental-role",
-            applyUrl: "https://example.com/jobs/supplemental-role/apply",
-            canonicalUrl: "https://example.com/jobs/supplemental-role",
-            discoveredAt: "2026-04-15T12:00:00.000Z",
-            rawSourceMetadata: {},
-          },
-        ],
-      };
-    });
+    const discover = vi.fn(async () => [
+      classifySourceCandidate({
+        url: "https://boards.greenhouse.io/acme",
+        token: "acme",
+        confidence: "high",
+        discoveryMethod: "configured_env",
+      }),
+    ]);
 
     const initial = await runSearchFromFilters(
       {
@@ -244,38 +223,31 @@ describe("jobs-first indexed search", () => {
       },
       {
         repository,
-        providers: [provider],
-        discovery: createDiscovery(),
+        providers: [],
+        discovery: { discover },
         fetchImpl: vi.fn() as unknown as typeof fetch,
         now: new Date("2026-04-15T12:00:00.000Z"),
         requestOwnerKey: "run-search-default",
       },
     );
 
-    expect(providerFinished).toBe(false);
     expect(initial.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
     expect(initial.jobs[0]?.rawSourceMetadata.indexedSearch).toMatchObject({
       source: "jobs_collection",
     });
+    expect(initial.crawlRun.status).toBe("completed");
     expect(initial.diagnostics.session).toMatchObject({
       indexedResultsCount: 1,
       supplementalResultsCount: 0,
       totalVisibleResultsCount: 1,
-      supplementalQueued: true,
-      supplementalRunning: true,
-      triggerReason: "insufficient_indexed_coverage",
+      supplementalQueued: false,
+      supplementalRunning: false,
+      triggerReason: "insufficient_indexed_coverage_background_requested",
+      backgroundIngestion: expect.objectContaining({
+        status: expect.stringMatching(/^(started|already_active)$/),
+      }),
     });
-
-    const final = await waitForSearchJobCount(initial.search._id, 2, {
-      repository,
-      now: new Date("2026-04-15T12:00:01.000Z"),
-    });
-
-    expect(providerFinished).toBe(true);
-    expect(final.jobs.map((job) => job.title)).toEqual([
-      "Software Engineer",
-      "Software Engineer II",
-    ]);
+    expect(discover).not.toHaveBeenCalled();
   });
 
   it("keeps the full crawl pipeline available through the explicit ingestion entry point", async () => {
@@ -344,7 +316,7 @@ describe("jobs-first indexed search", () => {
     expect(result.crawlRun.status).toBe("completed");
   });
 
-  it("returns indexed jobs immediately before the supplemental crawl finishes", async () => {
+  it("returns indexed jobs immediately and completes the request session when low fresh coverage should be replenished in the background", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     await seedIndexedJobs(repository, [
       createPersistableJob({
@@ -396,20 +368,25 @@ describe("jobs-first indexed search", () => {
     );
 
     expect(providerResolved).toBe(false);
+    expect(started.queued).toBe(false);
     expect(started.result.jobs).toHaveLength(1);
     expect(started.result.jobs[0]?.title).toBe("Software Engineer");
     expect(started.result.jobs[0]?.rawSourceMetadata.indexedSearch).toMatchObject({
       source: "jobs_collection",
     });
     expect(started.result.delivery?.cursor).toBe(1);
-    expect(started.result.crawlRun.status).toBe("running");
+    expect(started.result.crawlRun.status).toBe("completed");
+    expect(await repository.hasActiveCrawlQueueEntryForSearch(started.result.search._id)).toBe(false);
     expect(started.result.diagnostics.session).toMatchObject({
       indexedResultsCount: 1,
       supplementalResultsCount: 0,
       totalVisibleResultsCount: 1,
-      supplementalQueued: true,
-      supplementalRunning: true,
-      triggerReason: "insufficient_indexed_coverage",
+      supplementalQueued: false,
+      supplementalRunning: false,
+      triggerReason: "insufficient_indexed_coverage_background_requested",
+      backgroundIngestion: expect.objectContaining({
+        status: expect.stringMatching(/^(started|already_active)$/),
+      }),
     });
 
     const initialDelta = await getSearchJobDeltas(started.result.search._id, 1, {
@@ -419,17 +396,6 @@ describe("jobs-first indexed search", () => {
 
     expect(initialDelta.jobs).toEqual([]);
     expect(initialDelta.delivery.cursor).toBe(1);
-
-    await new Promise((resolve) => setTimeout(resolve, 250));
-
-    const finalResult = await getSearchDetails(started.result.search._id, {
-      repository,
-      now: new Date("2026-04-15T12:00:01.000Z"),
-    });
-
-    expect(providerResolved).toBe(true);
-    expect(finalResult.jobs).toHaveLength(1);
-    expect(finalResult.jobs[0]?.title).toBe("Software Engineer");
   });
 
   it("skips supplemental crawling when indexed coverage is already sufficient for the session", async () => {
@@ -740,14 +706,75 @@ describe("jobs-first indexed search", () => {
       supplementalRunning: false,
       triggerReason: "indexed_empty_background_requested",
       backgroundIngestion: expect.objectContaining({
-        status: "started",
+        status: expect.stringMatching(/^(started|already_active)$/),
         systemProfileId: expect.any(String),
       }),
     });
     expect(discover).not.toHaveBeenCalled();
   });
 
-  it("triggers bounded supplemental freshness recovery when sparse indexed coverage is stale", async () => {
+  it("requests background replenishment instead of request-time crawl when sparse indexed coverage is stale in balanced mode", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    await seedIndexedJobs(repository, [
+      createPersistableJob({
+        title: "Data Analyst",
+        sourceJobId: "stale-balanced-data-analyst",
+        canonicalUrl: "https://example.com/jobs/stale-balanced-data-analyst",
+        applyUrl: "https://example.com/jobs/stale-balanced-data-analyst/apply",
+        sourceUrl: "https://example.com/jobs/stale-balanced-data-analyst",
+        locationText: "Remote - United States",
+        postingDate: "2026-03-01T00:00:00.000Z",
+        discoveredAt: "2026-03-01T12:00:00.000Z",
+        crawledAt: "2026-03-01T12:00:00.000Z",
+        indexedAt: "2026-03-01T12:00:00.000Z",
+      }),
+    ]);
+
+    const crawlSources: CrawlProvider["crawlSources"] = vi.fn(async () => ({
+      provider: "greenhouse" as const,
+      status: "success" as const,
+      sourceCount: 1,
+      fetchedCount: 1,
+      matchedCount: 1,
+      warningCount: 0,
+      jobs: [],
+    }));
+    const provider = createStubProvider("greenhouse", crawlSources);
+
+    const started = await startSearchFromFilters(
+      {
+        title: "Data Analyst",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery: createDiscovery(),
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now: new Date("2026-04-15T12:00:00.000Z"),
+        requestOwnerKey: "stale-balanced-data-analyst-background",
+      },
+    );
+
+    expect(started.queued).toBe(false);
+    expect(await repository.hasActiveCrawlQueueEntryForSearch(started.result.search._id)).toBe(false);
+    expect(started.result.jobs.map((job) => job.title)).toEqual(["Data Analyst"]);
+    expect(started.result.diagnostics.session).toMatchObject({
+      indexedResultsCount: 1,
+      supplementalResultsCount: 0,
+      totalVisibleResultsCount: 1,
+      supplementalQueued: false,
+      supplementalRunning: false,
+      triggerReason: "stale_indexed_coverage_background_requested",
+      backgroundIngestion: expect.objectContaining({
+        status: expect.stringMatching(/^(started|already_active)$/),
+      }),
+    });
+    expect(started.result.diagnostics.session?.latestIndexedJobAgeMs).toBeGreaterThan(0);
+  });
+
+  it("triggers bounded supplemental freshness recovery only when deep mode explicitly asks for it", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     await seedIndexedJobs(repository, [
       createPersistableJob({
@@ -795,6 +822,7 @@ describe("jobs-first indexed search", () => {
       {
         title: "Data Analyst",
         country: "United States",
+        crawlMode: "deep",
         platforms: ["greenhouse"],
       },
       {

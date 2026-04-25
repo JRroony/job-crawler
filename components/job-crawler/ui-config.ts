@@ -12,55 +12,60 @@ import type {
 } from "@/lib/types";
 import {
   activeCrawlerPlatforms,
-  crawlerPlatforms,
   resolveOperationalCrawlerPlatforms,
 } from "@/lib/types";
+
+const activePlatformPresentation = {
+  greenhouse: {
+    label: "Greenhouse",
+    detail: "Registry-backed board crawl with public discovery as a supplement",
+    availability: "MVP focus",
+  },
+  lever: {
+    label: "Lever",
+    detail: "Available, but not the reliability focus of this MVP",
+    availability: "Secondary",
+  },
+  ashby: {
+    label: "Ashby",
+    detail: "Available, but not the reliability focus of this MVP",
+    availability: "Secondary",
+  },
+  smartrecruiters: {
+    label: "SmartRecruiters",
+    detail: "Available through public board discovery and detail-page normalization",
+    availability: "Secondary",
+  },
+  workday: {
+    label: "Workday",
+    detail: "Available through public Workday source discovery, API crawling, and detail-page recovery",
+    availability: "Secondary",
+  },
+  company_page: {
+    label: "Company page",
+    detail: "Available for configured feeds and pages, but not the focus of this MVP",
+    availability: "Secondary",
+  },
+} satisfies Record<
+  ActiveCrawlerPlatform,
+  {
+    label: string;
+    detail: string;
+    availability: string;
+  }
+>;
 
 export const selectablePlatformOptions: Array<{
   platform: ActiveCrawlerPlatform;
   label: string;
   detail: string;
   availability: string;
-}> = [
-  {
-    platform: "greenhouse",
-    label: "Greenhouse",
-    detail: "Registry-backed board crawl with public discovery as a supplement",
-    availability: "MVP focus",
-  },
-  {
-    platform: "lever",
-    label: "Lever",
-    detail: "Available, but not the reliability focus of this MVP",
-    availability: "Secondary",
-  },
-  {
-    platform: "ashby",
-    label: "Ashby",
-    detail: "Available, but not the reliability focus of this MVP",
-    availability: "Secondary",
-  },
-  {
-    platform: "smartrecruiters",
-    label: "SmartRecruiters",
-    detail: "Available through public board discovery and detail-page normalization",
-    availability: "Secondary",
-  },
-  {
-    platform: "company_page",
-    label: "Company page",
-    detail: "Available for configured feeds and pages, but not the focus of this MVP",
-    availability: "Secondary",
-  },
-];
+}> = activeCrawlerPlatforms.map((platform) => ({
+  platform,
+  ...activePlatformPresentation[platform],
+}));
 
 export const passivePlatformOptions = [
-  {
-    platform: "workday",
-    label: "Workday",
-    tone: "disabled",
-    detail: "Not implemented yet.",
-  },
   {
     label: "LinkedIn",
     tone: "limited",
@@ -149,7 +154,7 @@ export function togglePlatformSelection(
     current.add(platform);
   }
 
-  const normalized = crawlerPlatforms.filter((candidate) => current.has(candidate));
+  const normalized = activeCrawlerPlatforms.filter((candidate) => current.has(candidate));
   const matchesDefaultImplementedScope =
     normalized.length === activeCrawlerPlatforms.length &&
     activeCrawlerPlatforms.every((candidate, index) => normalized[index] === candidate);

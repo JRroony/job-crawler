@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  disabledPlatformFilterOptions,
+  describeSelectedPlatforms,
   filterJobsForDisplay,
   isRemoteJob,
   isVisaFriendlyJob,
   matchesPostedDateFilter,
   parseLocationInput,
+  platformFilterOptions,
 } from "@/components/job-search/helpers";
+import { activeCrawlerPlatforms } from "@/lib/types";
 import type { JobListing, SearchFilters } from "@/lib/types";
 
 function createJob(overrides: Partial<JobListing> = {}): JobListing {
@@ -80,6 +84,24 @@ function createJob(overrides: Partial<JobListing> = {}): JobListing {
 }
 
 describe("job-search helpers", () => {
+  it("keeps the result filter platform options aligned with active crawler platforms", () => {
+    expect(platformFilterOptions.map((option) => option.value)).toEqual(
+      activeCrawlerPlatforms,
+    );
+    expect(platformFilterOptions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: "workday",
+          label: "Workday",
+        }),
+      ]),
+    );
+    expect(disabledPlatformFilterOptions.map((option) => option.label)).not.toContain(
+      "Workday",
+    );
+    expect(describeSelectedPlatforms({ title: "Software Engineer" })).toContain("Workday");
+  });
+
   it("promotes single country-like location input instead of treating Canada as a city", () => {
     expect(parseLocationInput("Canada")).toEqual({
       city: "",

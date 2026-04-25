@@ -32,33 +32,19 @@ export const defaultClientResultFilters: ClientResultFilters = {
 export const platformFilterOptions: Array<{
   value: ActiveCrawlerPlatform;
   label: string;
-}> = [
-  {
-    value: "greenhouse",
-    label: "Greenhouse",
-  },
-  {
-    value: "lever",
-    label: "Lever",
-  },
-  {
-    value: "ashby",
-    label: "Ashby",
-  },
-  {
-    value: "smartrecruiters",
-    label: "SmartRecruiters",
-  },
-  {
-    value: "company_page",
-    label: "Company Pages",
-  },
-];
+}> = activeCrawlerPlatforms.map((platform) => ({
+  value: platform,
+  label: labelForCrawlerPlatform(platform),
+}));
 
 export const disabledPlatformFilterOptions = [
   {
-    label: "Workday",
-    detail: "Coming soon",
+    label: "LinkedIn",
+    detail: "Limited",
+  },
+  {
+    label: "Indeed",
+    detail: "Limited",
   },
 ];
 

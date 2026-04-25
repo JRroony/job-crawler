@@ -3,7 +3,10 @@ import "server-only";
 import { z } from "zod";
 
 import { resolveGreenhouseRegistryTokens } from "@/lib/server/discovery/greenhouse-registry";
-import { parseSourceRegistryConfig } from "@/lib/server/discovery/source-registry";
+import {
+  parseSourceRegistryConfig,
+  parseWorkdaySourceRegistryConfig,
+} from "@/lib/server/discovery/source-registry";
 import { companyPageSourceConfigSchema } from "@/lib/types";
 
 const envSchema = z.object({
@@ -16,6 +19,7 @@ const envSchema = z.object({
   LEVER_SITE_TOKENS: z.string().default("figma,plaid,robinhood"),
   ASHBY_BOARD_TOKENS: z.string().default("notion,ramp,replit"),
   SOURCE_REGISTRY_CONFIG: z.string().optional(),
+  WORKDAY_SOURCE_CONFIG: z.string().optional(),
   COMPANY_PAGE_SOURCE_CONFIG: z.string().optional(),
   PUBLIC_SEARCH_DISCOVERY_ENABLED: z
     .enum(["true", "false"])
@@ -37,9 +41,12 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("true")
     .transform((value) => value === "true"),
-  BACKGROUND_INGESTION_INTERVAL_MS: z.coerce.number().int().positive().default(600000),
+  BACKGROUND_INGESTION_INTERVAL_MS: z.coerce.number().int().positive().default(120000),
+  BACKGROUND_INGESTION_PROFILES_PER_CYCLE: z.coerce.number().int().positive().default(4),
+  BACKGROUND_INGESTION_MAX_SOURCES_PER_CYCLE: z.coerce.number().int().positive().default(160),
+  BACKGROUND_INGESTION_PROVIDER_TIMEOUT_MS: z.coerce.number().int().positive().default(120000),
   BACKGROUND_INGESTION_STALE_AFTER_MS: z.coerce.number().int().positive().default(1800000),
-  BACKGROUND_INGESTION_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(540000),
+  BACKGROUND_INGESTION_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(900000),
 });
 
 type ParsedEnv = z.infer<typeof envSchema>;
@@ -74,6 +81,7 @@ export function getEnv() {
       LEVER_SITE_TOKENS: process.env.LEVER_SITE_TOKENS ?? "figma,plaid,robinhood",
       ASHBY_BOARD_TOKENS: process.env.ASHBY_BOARD_TOKENS ?? "notion,ramp,replit",
       SOURCE_REGISTRY_CONFIG: process.env.SOURCE_REGISTRY_CONFIG,
+      WORKDAY_SOURCE_CONFIG: process.env.WORKDAY_SOURCE_CONFIG,
       COMPANY_PAGE_SOURCE_CONFIG: process.env.COMPANY_PAGE_SOURCE_CONFIG,
       PUBLIC_SEARCH_DISCOVERY_ENABLED:
         process.env.PUBLIC_SEARCH_DISCOVERY_ENABLED ?? "true",
@@ -104,11 +112,17 @@ export function getEnv() {
       BACKGROUND_INGESTION_ENABLED:
         process.env.BACKGROUND_INGESTION_ENABLED ?? "true",
       BACKGROUND_INGESTION_INTERVAL_MS:
-        process.env.BACKGROUND_INGESTION_INTERVAL_MS ?? "600000",
+        process.env.BACKGROUND_INGESTION_INTERVAL_MS ?? "120000",
+      BACKGROUND_INGESTION_PROFILES_PER_CYCLE:
+        process.env.BACKGROUND_INGESTION_PROFILES_PER_CYCLE ?? "4",
+      BACKGROUND_INGESTION_MAX_SOURCES_PER_CYCLE:
+        process.env.BACKGROUND_INGESTION_MAX_SOURCES_PER_CYCLE ?? "160",
+      BACKGROUND_INGESTION_PROVIDER_TIMEOUT_MS:
+        process.env.BACKGROUND_INGESTION_PROVIDER_TIMEOUT_MS ?? "120000",
       BACKGROUND_INGESTION_STALE_AFTER_MS:
         process.env.BACKGROUND_INGESTION_STALE_AFTER_MS ?? "1800000",
       BACKGROUND_INGESTION_RUN_TIMEOUT_MS:
-        process.env.BACKGROUND_INGESTION_RUN_TIMEOUT_MS ?? "540000",
+        process.env.BACKGROUND_INGESTION_RUN_TIMEOUT_MS ?? "900000",
     });
   }
 
@@ -120,7 +134,10 @@ export function getEnv() {
     ),
     leverSiteTokens: tokenize(cachedEnv.LEVER_SITE_TOKENS),
     ashbyBoardTokens: tokenize(cachedEnv.ASHBY_BOARD_TOKENS),
-    sourceRegistryEntries: parseSourceRegistryConfig(cachedEnv.SOURCE_REGISTRY_CONFIG),
+    sourceRegistryEntries: [
+      ...parseSourceRegistryConfig(cachedEnv.SOURCE_REGISTRY_CONFIG),
+      ...parseWorkdaySourceRegistryConfig(cachedEnv.WORKDAY_SOURCE_CONFIG),
+    ],
     companyPageSources: parseCompanyPageConfig(cachedEnv.COMPANY_PAGE_SOURCE_CONFIG),
   };
 }

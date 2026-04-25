@@ -2880,8 +2880,8 @@ function selectProvidersForSearch(
     resolveOperationalCrawlerPlatforms(selectedPlatforms),
   );
 
-  // Provider execution is limited to the implemented families that survived the
-  // requested platform scope, so disabled platforms never reach crawlSources.
+  // Provider execution is limited to operational families that survived the
+  // requested platform scope, so limited/future-only providers never reach crawlSources.
   return providers.filter(
     (provider) =>
       isOperationalProvider(provider.provider) && allowedPlatforms.has(provider.provider),

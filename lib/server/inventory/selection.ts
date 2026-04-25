@@ -32,6 +32,7 @@ export type InventorySchedulingDiagnostics = {
   skippedByPlatformReason: Record<string, number>;
   freshnessBuckets: Record<string, number>;
   selectedByPlatform: Record<string, number>;
+  platformSelectionBudgets: Record<string, number>;
   selectedByProvider: Record<string, number>;
   selectedByHealth: Record<string, number>;
   selectedSourceIds: string[];
@@ -61,6 +62,7 @@ export function planRecurringInventorySourceSelection(input: {
   const selectedByPlatform: Record<string, number> = {};
   const selectedByProvider: Record<string, number> = {};
   const selectedByHealth: Record<string, number> = {};
+  const platformSelectionBudgets: Record<string, number> = {};
   const skippedSourceSamples: string[] = [];
   const eligible: Array<{
     record: SourceInventoryRecord;
@@ -124,10 +126,16 @@ export function planRecurringInventorySourceSelection(input: {
 
   eligible.sort((left, right) => compareCandidates(left, right));
 
+  Object.assign(
+    platformSelectionBudgets,
+    resolvePlatformSelectionBudgets(eligible, input.maxSources),
+  );
+
   const selectedCandidates = selectRecurringInventoryCandidates(
     eligible,
     input.maxSources,
     prioritySourceIds,
+    platformSelectionBudgets,
   );
   const selectedIds = new Set(selectedCandidates.map((candidate) => candidate.record._id));
   const selectedRecords = selectedCandidates.map((candidate) => candidate.record);
@@ -165,6 +173,7 @@ export function planRecurringInventorySourceSelection(input: {
       skippedByPlatformReason,
       freshnessBuckets,
       selectedByPlatform,
+      platformSelectionBudgets,
       selectedByProvider,
       selectedByHealth,
       selectedSourceIds: selectedRecords.slice(0, 12).map((record) => record._id),
@@ -182,6 +191,7 @@ function selectRecurringInventoryCandidates(
   }>,
   maxSources: number,
   prioritySourceIds: Set<string> = new Set(),
+  platformSelectionBudgets: Record<string, number> = {},
 ) {
   const limit = Math.max(0, Math.floor(maxSources));
   if (limit <= 0 || eligible.length <= limit) {
@@ -196,6 +206,7 @@ function selectRecurringInventoryCandidates(
   );
   const selected: typeof eligible = [];
   const selectedIds = new Set<string>();
+  const selectedPlatformCounts: Record<string, number> = {};
   const priorityReserve =
     priorityCandidates.length > 0
       ? Math.min(priorityCandidates.length, Math.max(1, Math.ceil(limit * 0.5)))
@@ -208,6 +219,7 @@ function selectRecurringInventoryCandidates(
   for (const candidate of priorityCandidates.slice(0, priorityReserve)) {
     selected.push(candidate);
     selectedIds.add(candidate.record._id);
+    incrementCount(selectedPlatformCounts, candidate.record.platform);
   }
 
   for (const candidate of selectFirstCandidatePerPlatform(eligible)) {
@@ -219,8 +231,19 @@ function selectRecurringInventoryCandidates(
       continue;
     }
 
+    if (
+      !canSelectWithinPlatformBudget(
+        candidate.record.platform,
+        selectedPlatformCounts,
+        platformSelectionBudgets,
+      )
+    ) {
+      continue;
+    }
+
     selected.push(candidate);
     selectedIds.add(candidate.record._id);
+    incrementCount(selectedPlatformCounts, candidate.record.platform);
   }
 
   for (const candidate of neverCrawledCandidates.slice(0, neverCrawledReserve)) {
@@ -234,6 +257,31 @@ function selectRecurringInventoryCandidates(
 
     selected.push(candidate);
     selectedIds.add(candidate.record._id);
+    incrementCount(selectedPlatformCounts, candidate.record.platform);
+  }
+
+  for (const candidate of eligible) {
+    if (selected.length >= limit) {
+      break;
+    }
+
+    if (selectedIds.has(candidate.record._id)) {
+      continue;
+    }
+
+    if (
+      !canSelectWithinPlatformBudget(
+        candidate.record.platform,
+        selectedPlatformCounts,
+        platformSelectionBudgets,
+      )
+    ) {
+      continue;
+    }
+
+    selected.push(candidate);
+    selectedIds.add(candidate.record._id);
+    incrementCount(selectedPlatformCounts, candidate.record.platform);
   }
 
   for (const candidate of eligible) {
@@ -247,9 +295,75 @@ function selectRecurringInventoryCandidates(
 
     selected.push(candidate);
     selectedIds.add(candidate.record._id);
+    incrementCount(selectedPlatformCounts, candidate.record.platform);
   }
 
   return selected;
+}
+
+function canSelectWithinPlatformBudget(
+  platform: string,
+  selectedPlatformCounts: Record<string, number>,
+  platformSelectionBudgets: Record<string, number>,
+) {
+  const platformBudget = platformSelectionBudgets[platform];
+  return (
+    typeof platformBudget !== "number" ||
+    (selectedPlatformCounts[platform] ?? 0) < platformBudget
+  );
+}
+
+function resolvePlatformSelectionBudgets(
+  eligible: Array<{ record: SourceInventoryRecord }>,
+  maxSources: number,
+) {
+  const limit = Math.max(0, Math.floor(maxSources));
+  if (limit <= 0) {
+    return {};
+  }
+
+  const platformCapacity = new Map<string, number>();
+  const platformOrder: string[] = [];
+  for (const candidate of eligible) {
+    const platform = candidate.record.platform;
+    if (!platformCapacity.has(platform)) {
+      platformOrder.push(platform);
+    }
+
+    platformCapacity.set(platform, (platformCapacity.get(platform) ?? 0) + 1);
+  }
+
+  const budgets: Record<string, number> = {};
+  const basePlatforms = platformOrder.slice(0, limit);
+  for (const platform of basePlatforms) {
+    budgets[platform] = 1;
+  }
+
+  let remaining = limit - basePlatforms.length;
+  while (remaining > 0) {
+    let assignedInRound = 0;
+
+    for (const platform of platformOrder) {
+      if (remaining <= 0) {
+        break;
+      }
+
+      const capacity = platformCapacity.get(platform) ?? 0;
+      if ((budgets[platform] ?? 0) >= capacity) {
+        continue;
+      }
+
+      budgets[platform] = (budgets[platform] ?? 0) + 1;
+      remaining -= 1;
+      assignedInRound += 1;
+    }
+
+    if (assignedInRound === 0) {
+      break;
+    }
+  }
+
+  return budgets;
 }
 
 function selectFirstCandidatePerPlatform<TCandidate extends { record: SourceInventoryRecord }>(

@@ -7,7 +7,10 @@ import {
   buildSourceInventorySeeds,
   toSourceInventoryRecord,
 } from "@/lib/server/discovery/inventory";
-import { getDefaultSourceRegistryEntries } from "@/lib/server/discovery/source-registry";
+import {
+  getDefaultSourceRegistryEntries,
+  parseWorkdaySourceRegistryConfig,
+} from "@/lib/server/discovery/source-registry";
 import { classifyPublicSearchCandidate } from "@/lib/server/discovery/public-search-candidates";
 import {
   buildPublicSearchQueryPlan,
@@ -299,9 +302,19 @@ describe("source discovery", () => {
     const ashbyEntries = getDefaultSourceRegistryEntries(["ashby"]);
     const workdayEntries = getDefaultSourceRegistryEntries(["workday"]);
 
-    expect(leverEntries.length).toBeGreaterThan(10);
-    expect(ashbyEntries.length).toBeGreaterThan(10);
-    expect(workdayEntries.length).toBeGreaterThan(10);
+    expect(leverEntries.length).toBeGreaterThan(25);
+    expect(ashbyEntries.length).toBeGreaterThan(35);
+    expect(workdayEntries.length).toBeGreaterThan(15);
+    expect(leverEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          platform: "lever",
+          token: "employ",
+          company: "Employ",
+          coverageTags: expect.arrayContaining(["united_states"]),
+        }),
+      ]),
+    );
     expect(leverEntries).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -309,6 +322,16 @@ describe("source discovery", () => {
           token: "wealthsimple",
           company: "Wealthsimple",
           coverageTags: expect.arrayContaining(["canada"]),
+        }),
+      ]),
+    );
+    expect(ashbyEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          platform: "ashby",
+          token: "ClickHouse",
+          company: "ClickHouse",
+          coverageTags: expect.arrayContaining(["global"]),
         }),
       ]),
     );
@@ -328,6 +351,7 @@ describe("source discovery", () => {
           platform: "workday",
           company: "RBC",
           tenant: "rbc",
+          host: "rbc.wd3.myworkdayjobs.com",
           careerSitePath: "RBCGLOBAL1",
           coverageTags: expect.arrayContaining(["canada"]),
         }),
@@ -346,9 +370,25 @@ describe("source discovery", () => {
     const counts = countInventoryByPlatform(seeds);
 
     expect(counts.greenhouse).toBeGreaterThanOrEqual(20);
-    expect(counts.lever).toBeGreaterThan(10);
-    expect(counts.ashby).toBeGreaterThan(10);
-    expect(counts.workday).toBeGreaterThan(10);
+    expect(counts.lever).toBeGreaterThan(25);
+    expect(counts.ashby).toBeGreaterThan(35);
+    expect(counts.workday).toBeGreaterThan(15);
+    expect(seeds.find((record) => record._id === "lever:employ")).toMatchObject({
+      platform: "lever",
+      inventoryOrigin: "platform_registry",
+      sourceMetadata: expect.objectContaining({
+        unitedStatesRelevant: true,
+        company: "Employ",
+      }),
+    });
+    expect(seeds.find((record) => record._id === "ashby:clickhouse")).toMatchObject({
+      platform: "ashby",
+      inventoryOrigin: "platform_registry",
+      sourceMetadata: expect.objectContaining({
+        unitedStatesRelevant: true,
+        company: "ClickHouse",
+      }),
+    });
     expect(seeds.find((record) => record._id === "lever:wealthsimple")).toMatchObject({
       platform: "lever",
       inventoryOrigin: "platform_registry",
@@ -376,7 +416,37 @@ describe("source discovery", () => {
       sourceMetadata: expect.objectContaining({
         canadaRelevant: true,
         company: "RBC",
+        workdayHost: "rbc.wd3.myworkdayjobs.com",
       }),
+    });
+  });
+
+  it("parses durable Workday source config without requiring a prebuilt URL", () => {
+    const [entry] = parseWorkdaySourceRegistryConfig(
+      JSON.stringify([
+        {
+          tenant: "customtenant",
+          host: "customtenant.wd5.myworkdayjobs.com",
+          sitePath: "en-US/External",
+          careerSitePath: "External",
+          company: "Custom Workday",
+          coverageTags: ["united_states"],
+          health: "healthy",
+        },
+      ]),
+    );
+
+    expect(entry).toMatchObject({
+      platform: "workday",
+      tenant: "customtenant",
+      host: "customtenant.wd5.myworkdayjobs.com",
+      sitePath: "en-US/External",
+      careerSitePath: "External",
+      token: "customtenant:external",
+      canonicalListUrl: "https://customtenant.wd5.myworkdayjobs.com/en-US/External",
+      apiUrl: "https://customtenant.wd5.myworkdayjobs.com/wday/cxs/customtenant/External/jobs",
+      company: "Custom Workday",
+      health: "healthy",
     });
   });
 
@@ -2711,9 +2781,9 @@ describe("source capping with platform diversity", () => {
       workday: expect.any(Number),
     });
     expect(platformCounts.greenhouse).toBeGreaterThanOrEqual(20);
-    expect(platformCounts.lever).toBeGreaterThan(10);
-    expect(platformCounts.ashby).toBeGreaterThan(10);
-    expect(platformCounts.workday).toBeGreaterThan(10);
+    expect(platformCounts.lever).toBeGreaterThan(25);
+    expect(platformCounts.ashby).toBeGreaterThan(35);
+    expect(platformCounts.workday).toBeGreaterThan(15);
     expect(inventory.some((record) => record.platform === "lever" && record.token === "figma")).toBe(
       true,
     );
@@ -2727,6 +2797,7 @@ describe("source capping with platform diversity", () => {
       apiUrl: "https://rbc.wd3.myworkdayjobs.com/wday/cxs/rbc/RBCGLOBAL1/jobs",
       sourceMetadata: expect.objectContaining({
         canadaRelevant: true,
+        workdayHost: "rbc.wd3.myworkdayjobs.com",
       }),
     });
   });
@@ -2844,6 +2915,18 @@ describe("source capping with platform diversity", () => {
       lever: expect.any(Number),
       ashby: expect.any(Number),
       workday: expect.any(Number),
+    });
+    expect(plan.diagnostics.platformSelectionBudgets).toEqual({
+      greenhouse: 2,
+      lever: 2,
+      ashby: 2,
+      workday: 2,
+    });
+    expect(plan.diagnostics.selectedByPlatform).toEqual({
+      greenhouse: 2,
+      lever: 2,
+      ashby: 2,
+      workday: 2,
     });
     expect(Object.keys(plan.diagnostics.skippedByPlatformReason)).toEqual(
       expect.arrayContaining([

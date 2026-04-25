@@ -410,6 +410,7 @@ describe("recurring background ingestion", () => {
       repository,
       providers: [provider],
       intervalMs: 600_000,
+      maxProfiles: 1,
       now: new Date("2026-04-15T12:00:00.000Z"),
       refreshInventory: async () => [
         createInventoryRecord({
@@ -432,6 +433,197 @@ describe("recurring background ingestion", () => {
 
     await vi.advanceTimersByTimeAsync(600_000);
     expect(providerCalls).toBe(2);
+  });
+
+  it("queues multiple profile runs per cycle and divides the cycle source budget across them", async () => {
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const db = new MongoLikeNullDb();
+    const repository = new JobCrawlerRepository(db);
+    const now = new Date("2026-04-15T12:00:00.000Z");
+    const inventory = Array.from({ length: 9 }, (_, index) =>
+      createInventoryRecord({
+        token: `throughputco${index}`,
+        companyHint: `Throughput Co ${index}`,
+        inventoryRank: index,
+        nextEligibleAt: "2026-04-15T11:00:00.000Z",
+        health: "healthy",
+      }),
+    );
+
+    await repository.upsertSourceInventory(inventory);
+
+    const providerSourceCounts: number[] = [];
+    const provider = createStubProvider("greenhouse", async (context, sources) => {
+      providerSourceCounts.push(sources.length);
+      const titleSlug = String(context.filters.title ?? "profile").replace(/\s+/g, "-");
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: sources.length,
+        fetchedCount: sources.length * 2,
+        matchedCount: sources.length * 2,
+        warningCount: 0,
+        jobs: sources.flatMap((source) => [
+          createProviderJob({
+            title: "Software Engineer",
+            company: source.companyHint ?? "Throughput Co",
+            sourceJobId: `${source.token}-${titleSlug}-software-engineer`,
+          }),
+          createProviderJob({
+            title: "Data Analyst",
+            company: source.companyHint ?? "Throughput Co",
+            sourceJobId: `${source.token}-${titleSlug}-data-analyst`,
+          }),
+        ]),
+      };
+    });
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [provider],
+      now,
+      maxProfiles: 3,
+      maxSources: 9,
+      schedulingIntervalMs: 60_000,
+      providerTimeoutMs: 1_000,
+      runTimeoutMs: 5_000,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected recurring ingestion to start.");
+    }
+
+    expect(triggered.startedRuns).toHaveLength(3);
+    expect(triggered.selectedProfileIds).toHaveLength(3);
+    expect(triggered.sourceBudgetPerCycle).toBe(9);
+    expect(triggered.sourceBudgetPerProfile).toBe(3);
+
+    const completedRuns = await Promise.all(
+      triggered.startedRuns.map((run) => waitForRunCompletion(repository, run.crawlRunId)),
+    );
+
+    expect(providerSourceCounts).toEqual([3, 3, 3]);
+    expect(db.snapshot(collectionNames.jobs)).toHaveLength(18);
+    expect(infoSpy).toHaveBeenCalledWith(
+      "[background-ingestion:profiles-selected]",
+      expect.objectContaining({
+        selectedProfiles: 3,
+        selectedProfileIds: triggered.selectedProfileIds,
+        sourceBudgetPerCycle: 9,
+        sourceBudgetPerProfile: 3,
+        providerTimeoutMs: 1_000,
+      }),
+    );
+
+    for (const crawlRun of completedRuns) {
+      expect(crawlRun.diagnostics.backgroundCycle).toMatchObject({
+        selectedProfiles: 3,
+        selectedProfileIds: triggered.selectedProfileIds,
+        startedRuns: 1,
+        sourceBudgetPerCycle: 9,
+        sourceBudgetPerProfile: 3,
+        providerTimeoutMs: 1_000,
+      });
+      expect(crawlRun.diagnostics.inventoryScheduling).toMatchObject({
+        selectedSources: 3,
+      });
+      expect(crawlRun.diagnostics.backgroundPersistence).toMatchObject({
+        jobsInserted: 6,
+        jobsLinkedToRun: 6,
+        providerStats: [
+          expect.objectContaining({
+            provider: "greenhouse",
+            sourceCount: 3,
+            fetchedCount: 6,
+            matchedCount: 6,
+            seedCount: 6,
+            insertedCount: 6,
+            linkedToRunCount: 6,
+          }),
+        ],
+      });
+    }
+  });
+
+  it("fails slow providers fast and records throughput diagnostics without consuming the whole run timeout", async () => {
+    const repository = new JobCrawlerRepository(new MongoLikeNullDb());
+    const now = new Date("2026-04-15T12:00:00.000Z");
+
+    await repository.upsertSourceInventory([
+      createInventoryRecord({
+        token: "slowproviderco",
+        companyHint: "Slow Provider Co",
+        nextEligibleAt: "2026-04-15T11:00:00.000Z",
+      }),
+    ]);
+
+    const provider = createStubProvider(
+      "greenhouse",
+      async () =>
+        new Promise((resolve) => {
+          setTimeout(() => {
+            resolve({
+              provider: "greenhouse",
+              status: "success",
+              sourceCount: 1,
+              fetchedCount: 1,
+              matchedCount: 1,
+              warningCount: 0,
+              jobs: [
+                createProviderJob({
+                  title: "Software Engineer",
+                  company: "Slow Provider Co",
+                  sourceJobId: "slow-provider-job",
+                }),
+              ],
+            });
+          }, 1_000);
+        }),
+    );
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [provider],
+      now,
+      maxSources: 1,
+      schedulingIntervalMs: 60_000,
+      providerTimeoutMs: 10,
+      runTimeoutMs: 2_000,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected recurring ingestion to start.");
+    }
+
+    const crawlRun = await waitForRunCompletion(repository, triggered.crawlRunId);
+
+    expect(crawlRun.status).toBe("failed");
+    expect(crawlRun.diagnostics.providerFailures).toBe(1);
+    expect(crawlRun.diagnostics.performance.providerTimingsMs).toEqual([
+      expect.objectContaining({
+        provider: "greenhouse",
+        sourceCount: 1,
+        timedOut: true,
+      }),
+    ]);
+    expect(crawlRun.diagnostics.backgroundPersistence).toMatchObject({
+      jobsInserted: 0,
+      jobsLinkedToRun: 0,
+      providerStats: [
+        expect.objectContaining({
+          provider: "greenhouse",
+          sourceCount: 1,
+          fetchedCount: 0,
+          matchedCount: 0,
+          seedCount: 0,
+          failedBatches: 1,
+        }),
+      ],
+    });
   });
 
   it("uses durable queue/control state and prevents duplicate recurring runs", async () => {
@@ -1061,6 +1253,12 @@ describe("recurring background ingestion", () => {
         workday: 1,
       },
       selectedByPlatform: {
+        greenhouse: 1,
+        lever: 1,
+        ashby: 1,
+        workday: 1,
+      },
+      platformSelectionBudgets: {
         greenhouse: 1,
         lever: 1,
         ashby: 1,

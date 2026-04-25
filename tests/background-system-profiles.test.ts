@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   listBackgroundSystemGeographies,
+  listBackgroundSystemGeographyTemplates,
   listBackgroundSystemRoleFamilies,
   listBackgroundSystemSearchProfiles,
   selectBackgroundSystemSearchProfiles,
@@ -54,6 +55,7 @@ describe("background system search profiles", () => {
 
   it("covers required role families, title variants, and reusable geographies", () => {
     const profiles = listBackgroundSystemSearchProfiles();
+    const geographyTemplates = listBackgroundSystemGeographyTemplates();
     const familyIds = new Set(profiles.map((profile) => profile.canonicalJobFamily));
     const requiredFamilies = [
       "software_engineer",
@@ -87,6 +89,39 @@ describe("background system search profiles", () => {
     for (const family of requiredFamilies) {
       expect(familyIds.has(family)).toBe(true);
     }
+
+    expect(geographyTemplates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "us_west_coast_cluster",
+          regions: expect.arrayContaining([
+            expect.objectContaining({ state: "CA" }),
+            expect.objectContaining({ state: "WA" }),
+            expect.objectContaining({ city: "Seattle" }),
+            expect.objectContaining({ city: "San Francisco" }),
+          ]),
+        }),
+        expect.objectContaining({
+          id: "us_northeast_cluster",
+          regions: expect.arrayContaining([
+            expect.objectContaining({ state: "NY" }),
+            expect.objectContaining({ city: "New York City" }),
+            expect.objectContaining({ city: "Boston" }),
+          ]),
+        }),
+        expect.objectContaining({
+          id: "canada_major_metros",
+          regions: expect.arrayContaining([
+            expect.objectContaining({ city: "Toronto" }),
+            expect.objectContaining({ city: "Vancouver" }),
+            expect.objectContaining({ city: "Montreal" }),
+            expect.objectContaining({ city: "Waterloo" }),
+            expect.objectContaining({ city: "Ottawa" }),
+            expect.objectContaining({ city: "Calgary" }),
+          ]),
+        }),
+      ]),
+    );
 
     for (const title of [
       "software development engineer",
@@ -130,7 +165,34 @@ describe("background system search profiles", () => {
     for (const city of ["Seattle", "Bellevue", "Redmond", "San Francisco", "San Jose", "New York City", "Austin", "Boston", "Toronto", "Waterloo", "Ottawa", "Vancouver", "Montreal", "Calgary"]) {
       expect(profiles).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ filters: expect.objectContaining({ city }) }),
+          expect.objectContaining({
+            geography: expect.objectContaining({ templateId: expect.any(String) }),
+            filters: expect.objectContaining({ city }),
+          }),
+        ]),
+      );
+    }
+  });
+
+  it("covers representative role and market scenarios from generated profiles", () => {
+    const profiles = listBackgroundSystemSearchProfiles();
+    const scenarios = [
+      { title: "software engineer", country: "United States" },
+      { title: "data analyst", country: "United States" },
+      { title: "product manager", country: "Canada" },
+      { title: "machine learning engineer", country: "Canada", state: "ON", city: "Toronto" },
+      { title: "ai engineer", country: "Canada", state: "BC", city: "Vancouver" },
+    ];
+
+    for (const scenario of scenarios) {
+      expect(profiles).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            filters: expect.objectContaining(scenario),
+            enabled: true,
+            cooldownMs: expect.any(Number),
+            cadenceMs: expect.any(Number),
+          }),
         ]),
       );
     }

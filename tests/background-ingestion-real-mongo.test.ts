@@ -6,6 +6,7 @@ import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import { toSourceInventoryRecord } from "@/lib/server/discovery/inventory";
 import { runSearchFromFilters } from "@/lib/server/search/service";
+import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import type { CrawlProvider } from "@/lib/server/providers/types";
 
 const runRealMongo = process.env.RUN_REAL_MONGO === "true";
@@ -38,7 +39,7 @@ describe("recurring background ingestion with real MongoDB", () => {
     await client.close();
   });
 
-  it.skipIf(!runRealMongo)("persists recurring ingestion output into MongoDB and serves indexed results from it", async () => {
+  it.skipIf(!runRealMongo)("persists multi-platform recurring ingestion output into MongoDB and serves indexed results from it", async () => {
     const now = new Date("2026-04-15T12:00:00.000Z");
 
     await repository.upsertSourceInventory([
@@ -56,14 +57,61 @@ describe("recurring background ingestion with real MongoDB", () => {
           inventoryRank: 0,
         },
       ),
+      toSourceInventoryRecord(
+        classifySourceCandidate({
+          url: "https://jobs.lever.co/plaid",
+          token: "plaid",
+          companyHint: "Plaid",
+          confidence: "high",
+          discoveryMethod: "platform_registry",
+        }),
+        {
+          now: now.toISOString(),
+          inventoryOrigin: "platform_registry",
+          inventoryRank: 10_000,
+        },
+      ),
+      toSourceInventoryRecord(
+        classifySourceCandidate({
+          url: "https://jobs.ashbyhq.com/notion",
+          token: "notion",
+          companyHint: "Notion",
+          confidence: "high",
+          discoveryMethod: "platform_registry",
+        }),
+        {
+          now: now.toISOString(),
+          inventoryOrigin: "platform_registry",
+          inventoryRank: 20_000,
+        },
+      ),
+      toSourceInventoryRecord(
+        classifySourceCandidate({
+          url: "https://workday.wd5.myworkdayjobs.com/Workday",
+          token: "workday:workday",
+          companyHint: "Workday",
+          confidence: "high",
+          discoveryMethod: "platform_registry",
+        }),
+        {
+          now: now.toISOString(),
+          inventoryOrigin: "platform_registry",
+          inventoryRank: 30_000,
+        },
+      ),
     ]);
 
-    const provider: CrawlProvider = {
-      provider: "greenhouse",
-      supportsSource(source) {
-        return source.platform === "greenhouse";
+    const providers: CrawlProvider[] = ([
+      ["greenhouse", "OpenAI"],
+      ["lever", "Plaid"],
+      ["ashby", "Notion"],
+      ["workday", "Workday"],
+    ] as const).map(([platform, company]) => ({
+      provider: platform,
+      supportsSource(source: DiscoveredSource): source is DiscoveredSource {
+        return source.platform === platform;
       },
-      async crawlSources() {
+      async crawlSources(_context, sources) {
         const jobs = [
           ["Software Engineer", "se-1"],
           ["Backend Engineer", "se-2"],
@@ -76,7 +124,7 @@ describe("recurring background ingestion with real MongoDB", () => {
           ["Business Analyst", "ba-1"],
         ].map(([title, sourceJobId]) => ({
           title,
-          company: "OpenAI",
+          company,
           country: "United States",
           locationText: "Remote - United States",
           resolvedLocation: {
@@ -91,36 +139,38 @@ describe("recurring background ingestion with real MongoDB", () => {
               },
             ],
           },
-          sourcePlatform: "greenhouse" as const,
-          sourceCompanySlug: "openai",
-          sourceJobId,
-          sourceUrl: `https://boards.greenhouse.io/openai/jobs/${sourceJobId}`,
-          applyUrl: `https://boards.greenhouse.io/openai/jobs/${sourceJobId}/apply`,
-          canonicalUrl: `https://boards.greenhouse.io/openai/jobs/${sourceJobId}`,
+          sourcePlatform: platform,
+          sourceCompanySlug: company.toLowerCase(),
+          sourceJobId: `${platform}-${sourceJobId}`,
+          sourceUrl: `https://example.com/${platform}/jobs/${sourceJobId}`,
+          applyUrl: `https://example.com/${platform}/jobs/${sourceJobId}/apply`,
+          canonicalUrl: `https://example.com/${platform}/jobs/${sourceJobId}`,
           discoveredAt: now.toISOString(),
           rawSourceMetadata: {
-            greenhouseBoardToken: "openai",
+            sourceCount: sources.length,
             source: "real-mongo-validation",
           },
         }));
 
         return {
-          provider: "greenhouse" as const,
+          provider: platform,
           status: "success" as const,
-          sourceCount: 1,
+          sourceCount: sources.length,
           fetchedCount: jobs.length,
           matchedCount: jobs.length,
           warningCount: 0,
           jobs,
         };
       },
-    };
+    }));
 
     const triggered = await triggerRecurringBackgroundIngestion({
       repository,
-      providers: [provider],
+      providers,
       now,
-      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+      maxSources: 4,
+      refreshInventory: () =>
+        repository.listSourceInventory(["greenhouse", "lever", "ashby", "workday"]),
       runTimeoutMs: 5000,
     });
 
@@ -140,8 +190,15 @@ describe("recurring background ingestion with real MongoDB", () => {
     }
 
     const crawlRun = await repository.getCrawlRun(triggered.crawlRunId);
-    const inventory = await repository.listSourceInventory(["greenhouse"]);
+    const inventory = await repository.listSourceInventory(["greenhouse", "lever", "ashby", "workday"]);
     const storedJobs = await client.db(databaseName).collection("jobs").countDocuments();
+    const platformCounts = await client
+      .db(databaseName)
+      .collection("jobs")
+      .aggregate<{ _id: string; count: number }>([
+        { $group: { _id: "$sourcePlatform", count: { $sum: 1 } } },
+      ])
+      .toArray();
     const productResult = await runSearchFromFilters(
       {
         title: "Product Manager",
@@ -163,9 +220,18 @@ describe("recurring background ingestion with real MongoDB", () => {
     );
 
     expect(crawlRun?.status).toBe("completed");
-    expect(storedJobs).toBe(9);
-    expect(inventory[0]?.lastCrawledAt).toBeTruthy();
-    expect(inventory[0]?.health).toBe("healthy");
+    expect(crawlRun?.diagnostics.inventoryScheduling?.selectedByPlatform).toEqual({
+      greenhouse: 1,
+      lever: 1,
+      ashby: 1,
+      workday: 1,
+    });
+    expect(storedJobs).toBe(36);
+    expect(new Set(platformCounts.map((entry) => entry._id))).toEqual(
+      new Set(["greenhouse", "lever", "ashby", "workday"]),
+    );
+    expect(inventory.every((record) => record.lastCrawledAt)).toBe(true);
+    expect(inventory.every((record) => record.health === "healthy")).toBe(true);
     expect(productResult.jobs.map((job) => job.title)).toContain("Product Manager");
   }, 15_000);
 });

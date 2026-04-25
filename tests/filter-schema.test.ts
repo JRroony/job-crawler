@@ -86,7 +86,7 @@ describe("searchFiltersSchema", () => {
     });
   });
 
-  it("accepts disabled platform values so saved searches stay compatible", () => {
+  it("accepts Workday as an active platform value", () => {
     const parsed = searchFiltersSchema.parse({
       title: "Software Engineer",
       platforms: ["workday"],
