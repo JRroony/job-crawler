@@ -149,18 +149,6 @@ function buildCanonicalJobKey(
     return `platform:${job.sourcePlatform}:${boardToken}:${normalizedSourceJobId}`;
   }
 
-  if (job.canonicalUrl) {
-    return `canonical_url:${normalizeComparableIdentityText(job.canonicalUrl)}`;
-  }
-
-  if (job.resolvedUrl) {
-    return `resolved_url:${normalizeComparableIdentityText(job.resolvedUrl)}`;
-  }
-
-  if (job.applyUrl) {
-    return `apply_url:${normalizeComparableIdentityText(job.applyUrl)}`;
-  }
-
   return `fallback:${fallbackFingerprint}`;
 }
 
@@ -202,16 +190,32 @@ function buildConservativeFallbackFingerprint(
     return normalizeComparableIdentityText(job.contentFingerprint);
   }
 
+  const urlHash = buildUrlHash(
+    job.canonicalUrl ?? job.resolvedUrl ?? job.applyUrl ?? job.sourceUrl,
+  );
+
   return [
-    normalizeComparableIdentityText(job.sourcePlatform),
-    normalized.boardToken,
     normalized.normalizedCompany,
     normalized.normalizedTitle,
     normalized.normalizedLocation,
-    normalizeComparableIdentityText(job.sourceUrl),
+    urlHash ? `url:${urlHash}` : undefined,
   ]
     .filter(Boolean)
     .join("|");
+}
+
+function buildUrlHash(value?: string) {
+  const normalized = normalizeComparableIdentityText(value);
+  if (!normalized) {
+    return undefined;
+  }
+
+  let hash = 5381;
+  for (let index = 0; index < normalized.length; index += 1) {
+    hash = ((hash << 5) + hash + normalized.charCodeAt(index)) >>> 0;
+  }
+
+  return hash.toString(36);
 }
 
 function resolveBoardCompanyToken(job: IdentityInput) {

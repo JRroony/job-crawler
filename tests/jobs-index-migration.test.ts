@@ -325,4 +325,125 @@ describe("jobs canonicalJobKey migration", () => {
     });
     expect(updatedJob.crawlRunIds).toEqual(expect.arrayContaining([crawlRun._id]));
   });
+
+  it("backfills legacy docs missing canonicalJobKey without collapsing distinct source jobs", async () => {
+    const db = new MongoLikeNullDb();
+
+    await db.collection(collectionNames.jobs).insertOne(
+      createLegacyJobDocument({
+        _id: "legacy-missing-a",
+        canonicalJobKey: null,
+        sourceJobId: "Role A",
+        sourceUrl: "https://example.com/jobs/role-a",
+        applyUrl: "https://example.com/jobs/role-a/apply",
+        sourceLookupKeys: ["greenhouse:acme:role a"],
+      }),
+    );
+    await db.collection(collectionNames.jobs).insertOne(
+      createLegacyJobDocument({
+        _id: "legacy-missing-b",
+        canonicalJobKey: undefined,
+        sourceJobId: "Role B",
+        sourceUrl: "https://example.com/jobs/role-b",
+        applyUrl: "https://example.com/jobs/role-b/apply",
+        sourceLookupKeys: ["greenhouse:acme:role b"],
+      }),
+    );
+
+    await expect(ensureDatabaseIndexes(db)).resolves.not.toThrow();
+
+    const repository = new JobCrawlerRepository(db);
+    const jobs = await repository.listJobs();
+
+    expect(jobs).toHaveLength(2);
+    expect(jobs.map((job) => job.canonicalJobKey)).toEqual(
+      expect.arrayContaining([
+        "platform:greenhouse:acme:role a",
+        "platform:greenhouse:acme:role b",
+      ]),
+    );
+    expect(db.collection(collectionNames.jobs).indexes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "jobs_canonical_job_key",
+          unique: true,
+          partialFilterExpression: {
+            canonicalJobKey: {
+              $type: "string",
+              $gt: "",
+            },
+          },
+        }),
+      ]),
+    );
+  });
+
+  it("repairs duplicate legacy canonicalJobKey values using stable source identity before creating the index", async () => {
+    const db = new MongoLikeNullDb();
+
+    await db.collection(collectionNames.jobs).insertOne(
+      createLegacyJobDocument({
+        _id: "legacy-duplicate-a",
+        canonicalJobKey: "legacy:duplicate",
+        sourceJobId: "Role A",
+        sourceUrl: "https://example.com/jobs/role-a",
+        applyUrl: "https://example.com/jobs/role-a/apply",
+        sourceLookupKeys: ["greenhouse:acme:role a"],
+      }),
+    );
+    await db.collection(collectionNames.jobs).insertOne(
+      createLegacyJobDocument({
+        _id: "legacy-duplicate-b",
+        canonicalJobKey: "legacy:duplicate",
+        sourceJobId: "Role B",
+        sourceUrl: "https://example.com/jobs/role-b",
+        applyUrl: "https://example.com/jobs/role-b/apply",
+        sourceLookupKeys: ["greenhouse:acme:role b"],
+      }),
+    );
+
+    const migration = await migrateLegacyJobsForCanonicalKey(db);
+    await expect(ensureDatabaseIndexes(db)).resolves.not.toThrow();
+
+    const storedJobs = db.snapshot<Record<string, unknown>>(collectionNames.jobs);
+
+    expect(migration.duplicateCanonicalKeyCount).toBe(1);
+    expect(storedJobs).toHaveLength(2);
+    expect(storedJobs.map((job) => job.canonicalJobKey)).toEqual(
+      expect.arrayContaining([
+        "platform:greenhouse:acme:role a",
+        "platform:greenhouse:acme:role b",
+      ]),
+    );
+  });
+
+  it("drops and recreates an existing incompatible canonicalJobKey index as a partial unique index", async () => {
+    const db = new MongoLikeNullDb();
+
+    await db.collection(collectionNames.jobs).createIndexes([
+      {
+        key: { canonicalJobKey: 1 },
+        name: "jobs_canonical_job_key",
+        unique: true,
+      },
+    ]);
+
+    await expect(ensureDatabaseIndexes(db)).resolves.not.toThrow();
+
+    const canonicalIndex = db
+      .collection(collectionNames.jobs)
+      .indexes.find((index) => index.name === "jobs_canonical_job_key");
+
+    expect(canonicalIndex).toMatchObject({
+      key: { canonicalJobKey: 1 },
+      name: "jobs_canonical_job_key",
+      unique: true,
+      partialFilterExpression: {
+        canonicalJobKey: {
+          $type: "string",
+          $gt: "",
+        },
+      },
+    });
+  });
 });

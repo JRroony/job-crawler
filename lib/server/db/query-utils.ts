@@ -43,8 +43,20 @@ function matchesFieldValue(actual: unknown, expected: unknown): boolean {
       }
     }
 
+    if ("$gt" in expected && expected.$gt != null) {
+      if (actual == null || actual <= expected.$gt) {
+        return false;
+      }
+    }
+
     if ("$lte" in expected && expected.$lte != null) {
       if (actual == null || actual > expected.$lte) {
+        return false;
+      }
+    }
+
+    if ("$lt" in expected && expected.$lt != null) {
+      if (actual == null || actual >= expected.$lt) {
         return false;
       }
     }
@@ -73,6 +85,20 @@ function matchesFieldValue(actual: unknown, expected: unknown): boolean {
       }
 
       return typeof actual === "string" && regex.test(actual);
+    }
+
+    if ("$type" in expected && typeof expected.$type === "string") {
+      const matchesType =
+        expected.$type === "string"
+          ? typeof actual === "string"
+          : expected.$type === "bool"
+            ? typeof actual === "boolean"
+            : expected.$type === "number"
+              ? typeof actual === "number"
+              : true;
+      if (!matchesType) {
+        return false;
+      }
     }
 
     return Object.keys(expected).every((key) => key.startsWith("$"));

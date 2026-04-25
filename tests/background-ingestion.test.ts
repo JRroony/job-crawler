@@ -12,7 +12,11 @@ import {
   stopRecurringBackgroundIngestionScheduler,
   triggerRecurringBackgroundIngestion,
 } from "@/lib/server/background/recurring-ingestion";
-import { collectionNames } from "@/lib/server/db/indexes";
+import {
+  collectionNames,
+  ensureDatabaseIndexes,
+  resetDatabaseIndexesForTests,
+} from "@/lib/server/db/indexes";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import { expandSourceInventory } from "@/lib/server/discovery/service";
 import {
@@ -28,6 +32,7 @@ import { MongoLikeNullDb } from "@/tests/helpers/mongo-like-null-db";
 afterEach(() => {
   stopRecurringBackgroundIngestionScheduler();
   resetBackgroundIngestionSchedulerForTests();
+  resetDatabaseIndexesForTests();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -745,6 +750,125 @@ describe("recurring background ingestion", () => {
         message: bootstrapError.message,
       }),
     );
+  });
+
+  it("repairs legacy canonicalJobKey data during bootstrap and then starts background ingestion", async () => {
+    const db = new MongoLikeNullDb();
+    const repository = new JobCrawlerRepository(db);
+    const now = new Date("2026-04-15T12:00:00.000Z");
+
+    await db.collection(collectionNames.jobs).insertOne({
+      _id: "legacy-bootstrap-a",
+      title: "Software Engineer",
+      company: "Acme",
+      country: "United States",
+      locationText: "Remote - United States",
+      sourcePlatform: "greenhouse",
+      sourceCompanySlug: "acme",
+      sourceJobId: "Role A",
+      sourceUrl: "https://example.com/jobs/role-a",
+      applyUrl: "https://example.com/jobs/role-a/apply",
+      discoveredAt: "2026-03-29T00:00:00.000Z",
+      companyNormalized: "acme",
+      titleNormalized: "software engineer",
+      locationNormalized: "remote united states",
+      contentFingerprint: "legacy-bootstrap-a",
+      canonicalJobKey: "legacy:duplicate",
+      sourceLookupKeys: ["greenhouse:acme:role a"],
+      crawlRunIds: ["run-bootstrap-a"],
+      sourceProvenance: [],
+      rawSourceMetadata: {},
+    });
+    await db.collection(collectionNames.jobs).insertOne({
+      _id: "legacy-bootstrap-b",
+      title: "Software Engineer",
+      company: "Acme",
+      country: "United States",
+      locationText: "Remote - United States",
+      sourcePlatform: "greenhouse",
+      sourceCompanySlug: "acme",
+      sourceJobId: "Role B",
+      sourceUrl: "https://example.com/jobs/role-b",
+      applyUrl: "https://example.com/jobs/role-b/apply",
+      discoveredAt: "2026-03-29T00:00:00.000Z",
+      companyNormalized: "acme",
+      titleNormalized: "software engineer",
+      locationNormalized: "remote united states",
+      contentFingerprint: "legacy-bootstrap-b",
+      canonicalJobKey: "legacy:duplicate",
+      sourceLookupKeys: ["greenhouse:acme:role b"],
+      crawlRunIds: ["run-bootstrap-b"],
+      sourceProvenance: [],
+      rawSourceMetadata: {},
+    });
+    await repository.upsertSourceInventory([
+      createInventoryRecord({
+        token: "acme",
+        companyHint: "Acme",
+        lastCrawledAt: undefined,
+      }),
+    ]);
+
+    const provider = createStubProvider("greenhouse", async () => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: 1,
+      fetchedCount: 1,
+      matchedCount: 1,
+      warningCount: 0,
+      jobs: [
+        createProviderJob({
+          title: "Software Engineer",
+          sourceJobId: "bootstrap-fresh-role",
+          company: "Acme",
+        }),
+      ],
+    }));
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      resolveRepository: async () => {
+        await ensureDatabaseIndexes(db);
+        return repository;
+      },
+      providers: [provider],
+      now,
+      maxSources: 1,
+      schedulingIntervalMs: 60_000,
+      runTimeoutMs: 2_000,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected background ingestion to start after bootstrap repair.");
+    }
+
+    const crawlRun = await waitForRunCompletion(repository, triggered.crawlRunId);
+    const canonicalKeys = db
+      .snapshot<Record<string, unknown>>(collectionNames.jobs)
+      .map((job) => job.canonicalJobKey);
+
+    expect(crawlRun.status).toBe("completed");
+    expect(canonicalKeys).toEqual(
+      expect.arrayContaining([
+        "platform:greenhouse:acme:role a",
+        "platform:greenhouse:acme:role b",
+        "platform:greenhouse:openai:bootstrap fresh role",
+      ]),
+    );
+    expect(
+      db.collection(collectionNames.jobs).indexes.find(
+        (index) => index.name === "jobs_canonical_job_key",
+      ),
+    ).toMatchObject({
+      unique: true,
+      partialFilterExpression: {
+        canonicalJobKey: {
+          $type: "string",
+          $gt: "",
+        },
+      },
+    });
   });
 
   it("selects stale inventory sources before fresh ones and reports freshness skips", async () => {

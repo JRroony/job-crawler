@@ -11,10 +11,13 @@ type IndexSpec = {
   name: string;
   unique?: boolean;
   sparse?: boolean;
+  partialFilterExpression?: Record<string, unknown>;
 };
 
 export type CollectionLike = {
   createIndexes(indexes: IndexSpec[]): Promise<unknown>;
+  listIndexes?(): { toArray(): Promise<IndexSpec[]> };
+  dropIndex?(name: string): Promise<unknown>;
 };
 
 export type DatabaseLike = {
@@ -69,7 +72,8 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
       migration.rewrittenCount > 0 ||
       migration.deletedCount > 0 ||
       migration.canonicalBackfillCount > 0 ||
-      migration.lifecycleBackfillCount > 0
+      migration.lifecycleBackfillCount > 0 ||
+      migration.duplicateCanonicalKeyCount > 0
     ) {
       console.info("[db:jobs-migration]", migration);
     }
@@ -88,12 +92,8 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
   }
 
   try {
+    await ensureCanonicalJobKeyIndex(db.collection(collectionNames.jobs));
     await db.collection(collectionNames.jobs).createIndexes([
-      {
-        key: { canonicalJobKey: 1 },
-        name: "jobs_canonical_job_key",
-        unique: true,
-      },
       {
         key: { crawlRunIds: 1, postedAt: -1, sourcePlatform: 1, title: 1 },
         name: "jobs_listing_by_run_and_sort",
@@ -154,31 +154,27 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
       {
         key: {
           "searchIndex.titleSearchKeys": 1,
-          "searchIndex.locationSearchKeys": 1,
           isActive: 1,
           sourcePlatform: 1,
           postingDate: -1,
         },
-        name: "jobs_search_ready_title_location_recent",
+        name: "jobs_search_ready_title_active_recent",
       },
       {
         key: {
           "searchIndex.locationSearchKeys": 1,
-          "searchIndex.titleSearchKeys": 1,
           isActive: 1,
           postingDate: -1,
         },
-        name: "jobs_search_ready_location_title_recent",
+        name: "jobs_search_ready_location_active_recent",
       },
       {
         key: {
           "searchIndex.experienceSearchKeys": 1,
-          "searchIndex.titleSearchKeys": 1,
-          "searchIndex.locationSearchKeys": 1,
           isActive: 1,
           postingDate: -1,
         },
-        name: "jobs_search_ready_experience_title_location_recent",
+        name: "jobs_search_ready_experience_active_recent",
       },
       {
         key: {
@@ -205,8 +201,12 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
       },
     ]);
   } catch (error) {
+    console.error("[db:jobs-index-error]", {
+      phase: "jobs_index_creation",
+      ...formatMongoErrorDiagnostics(error),
+    });
     throw new Error(
-      "MongoDB jobs index creation failed after legacy canonicalJobKey migration.",
+      `MongoDB jobs index creation failed after legacy canonicalJobKey migration. ${formatMongoErrorMessage(error)}`,
       { cause: error },
     );
   }
@@ -353,6 +353,98 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
   ]);
 
   indexesEnsured = true;
+}
+
+const canonicalJobKeyIndex: IndexSpec = {
+  key: { canonicalJobKey: 1 },
+  name: "jobs_canonical_job_key",
+  unique: true,
+  partialFilterExpression: {
+    canonicalJobKey: {
+      $type: "string",
+      $gt: "",
+    },
+  },
+};
+
+async function ensureCanonicalJobKeyIndex(collection: CollectionLike) {
+  const indexes = collection.listIndexes ? await collection.listIndexes().toArray() : [];
+  const incompatibleIndexes = indexes.filter(isIncompatibleCanonicalJobKeyIndex);
+
+  for (const index of incompatibleIndexes) {
+    if (!collection.dropIndex) {
+      console.warn("[db:jobs-index-repair-skipped]", {
+        indexName: index.name,
+        reason: "collection_adapter_missing_dropIndex",
+      });
+      continue;
+    }
+
+    console.warn("[db:jobs-index-repair]", {
+      action: "drop_incompatible_canonical_job_key_index",
+      indexName: index.name,
+      key: index.key,
+      unique: index.unique,
+      sparse: index.sparse,
+      partialFilterExpression: index.partialFilterExpression,
+    });
+    await collection.dropIndex(index.name);
+  }
+
+  await collection.createIndexes([canonicalJobKeyIndex]);
+}
+
+function isIncompatibleCanonicalJobKeyIndex(index: IndexSpec) {
+  if (!isCanonicalJobKeyIndex(index)) {
+    return false;
+  }
+
+  return !indexMatchesCanonicalJobKeyIndex(index);
+}
+
+function isCanonicalJobKeyIndex(index: IndexSpec) {
+  return index.name === canonicalJobKeyIndex.name || sameIndexKey(index.key, canonicalJobKeyIndex.key);
+}
+
+function indexMatchesCanonicalJobKeyIndex(index: IndexSpec) {
+  return (
+    index.name === canonicalJobKeyIndex.name &&
+    index.unique === true &&
+    sameIndexKey(index.key, canonicalJobKeyIndex.key) &&
+    JSON.stringify(index.partialFilterExpression ?? {}) ===
+      JSON.stringify(canonicalJobKeyIndex.partialFilterExpression)
+  );
+}
+
+function sameIndexKey(left: Record<string, 1 | -1>, right: Record<string, 1 | -1>) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function formatMongoErrorDiagnostics(error: unknown) {
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : {};
+  const cause = record.cause && typeof record.cause === "object"
+    ? record.cause as Record<string, unknown>
+    : undefined;
+
+  return {
+    code: record.code ?? cause?.code,
+    codeName: record.codeName ?? cause?.codeName,
+    message: error instanceof Error ? error.message : String(error),
+    keyValue: record.keyValue ?? cause?.keyValue,
+    keyPattern: record.keyPattern ?? cause?.keyPattern,
+  };
+}
+
+function formatMongoErrorMessage(error: unknown) {
+  const diagnostics = formatMongoErrorDiagnostics(error);
+  return [
+    diagnostics.code ? `code=${String(diagnostics.code)}` : undefined,
+    diagnostics.codeName ? `codeName=${String(diagnostics.codeName)}` : undefined,
+    diagnostics.message ? `message=${diagnostics.message}` : undefined,
+    diagnostics.keyValue ? `keyValue=${JSON.stringify(diagnostics.keyValue)}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 export function resetDatabaseIndexesForTests() {

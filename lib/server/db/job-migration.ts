@@ -1,6 +1,7 @@
 import "server-only";
 
 import { collectionNames } from "@/lib/server/db/collections";
+import { buildCanonicalJobIdentity } from "@/lib/job-identity";
 import type { CollectionAdapter, DatabaseAdapter } from "@/lib/server/db/repository";
 import { mergeStoredJobs, parseStoredJob } from "@/lib/server/db/repository";
 import type { JobListing } from "@/lib/types";
@@ -14,6 +15,7 @@ export type JobsCanonicalKeyMigrationResult = {
   rewrittenCount: number;
   mergedDocumentCount: number;
   duplicateGroupCount: number;
+  duplicateCanonicalKeyCount: number;
   deletedCount: number;
 };
 
@@ -40,6 +42,7 @@ export async function migrateLegacyJobsForCanonicalKey(
     rewrittenCount: 0,
     mergedDocumentCount: 0,
     duplicateGroupCount: 0,
+    duplicateCanonicalKeyCount: 0,
     deletedCount: 0,
   };
 
@@ -48,14 +51,20 @@ export async function migrateLegacyJobsForCanonicalKey(
   }
 
   try {
-    const groups = new Map<
-      string,
-      Array<{ raw: Record<string, unknown>; normalized: JobListing }>
-    >();
+    const rawCanonicalCounts = countCanonicalKeys(storedDocuments);
+    diagnostics.duplicateCanonicalKeyCount = Array.from(rawCanonicalCounts.values()).filter(
+      (count) => count > 1,
+    ).length;
+    const groups = new Map<string, Array<{ raw: Record<string, unknown>; normalized: JobListing }>>();
 
     for (const raw of storedDocuments) {
+      const rawCanonicalJobKey = normalizeString(raw.canonicalJobKey);
       const normalized = parseStoredJob(raw);
-      if (!normalizeString(raw.canonicalJobKey)) {
+      const repairedCanonicalJobKey = buildRepairCanonicalJobKey(normalized);
+      const shouldRepairCanonicalJobKey =
+        !rawCanonicalJobKey || (rawCanonicalCounts.get(rawCanonicalJobKey) ?? 0) > 1;
+
+      if (!rawCanonicalJobKey) {
         diagnostics.canonicalBackfillCount += 1;
       }
 
@@ -63,11 +72,17 @@ export async function migrateLegacyJobsForCanonicalKey(
         diagnostics.lifecycleBackfillCount += 1;
       }
 
-      const group = groups.get(normalized.canonicalJobKey);
+      const normalizedForMigration = shouldRepairCanonicalJobKey
+        ? { ...normalized, canonicalJobKey: repairedCanonicalJobKey }
+        : normalized;
+
+      const group = groups.get(normalizedForMigration.canonicalJobKey);
       if (group) {
-        group.push({ raw, normalized });
+        group.push({ raw, normalized: normalizedForMigration });
       } else {
-        groups.set(normalized.canonicalJobKey, [{ raw, normalized }]);
+        groups.set(normalizedForMigration.canonicalJobKey, [
+          { raw, normalized: normalizedForMigration },
+        ]);
       }
     }
 
@@ -133,6 +148,47 @@ export async function migrateLegacyJobsForCanonicalKey(
       { cause: error },
     );
   }
+}
+
+function countCanonicalKeys(documents: Record<string, unknown>[]) {
+  const counts = new Map<string, number>();
+
+  for (const document of documents) {
+    const canonicalJobKey = normalizeString(document.canonicalJobKey);
+    if (!canonicalJobKey) {
+      continue;
+    }
+
+    counts.set(canonicalJobKey, (counts.get(canonicalJobKey) ?? 0) + 1);
+  }
+
+  return counts;
+}
+
+function buildRepairCanonicalJobKey(job: JobListing) {
+  return buildCanonicalJobIdentity({
+    _id: job._id,
+    sourcePlatform: job.sourcePlatform,
+    sourceCompanySlug: job.sourceCompanySlug,
+    sourceJobId: job.sourceJobId,
+    sourceUrl: job.sourceUrl,
+    applyUrl: job.applyUrl,
+    resolvedUrl: job.resolvedUrl,
+    canonicalUrl: job.canonicalUrl,
+    sourceLookupKeys: job.sourceLookupKeys,
+    company: job.company,
+    title: job.title,
+    locationRaw: job.locationRaw,
+    locationText: job.locationText,
+    normalizedCompany: job.normalizedCompany,
+    normalizedTitle: job.normalizedTitle,
+    normalizedLocation: job.normalizedLocation,
+    companyNormalized: job.companyNormalized,
+    titleNormalized: job.titleNormalized,
+    locationNormalized: job.locationNormalized,
+    dedupeFingerprint: job.dedupeFingerprint,
+    contentFingerprint: job.contentFingerprint,
+  }).canonicalJobKey;
 }
 
 async function applyMigrationOperations(

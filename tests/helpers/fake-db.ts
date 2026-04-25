@@ -8,6 +8,7 @@ type IndexSpec = {
   name: string;
   unique?: boolean;
   sparse?: boolean;
+  partialFilterExpression?: Record<string, unknown>;
 };
 
 export class FakeCollection<TDocument extends Record<string, unknown>>
@@ -135,9 +136,35 @@ export class FakeCollection<TDocument extends Record<string, unknown>>
   }
 
   async createIndexes(indexes: IndexSpec[]) {
-    assertIndexesAllowDocuments([...this.indexes, ...indexes], this.documents);
-    this.indexes.push(...indexes);
+    const nextIndexes = [...this.indexes];
+    for (const index of indexes) {
+      const existing = nextIndexes.find((candidate) => candidate.name === index.name);
+      if (existing) {
+        if (JSON.stringify(existing) === JSON.stringify(index)) {
+          continue;
+        }
+        throw new Error(`Index with name ${index.name} already exists with different options.`);
+      }
+      nextIndexes.push(index);
+    }
+    assertIndexesAllowDocuments(nextIndexes, this.documents);
+    this.indexes = nextIndexes;
     return indexes.map((index) => index.name);
+  }
+
+  listIndexes() {
+    return {
+      toArray: async () => clone(this.indexes),
+    };
+  }
+
+  async dropIndex(name: string) {
+    const nextIndexes = this.indexes.filter((index) => index.name !== name);
+    if (nextIndexes.length === this.indexes.length) {
+      throw new Error(`index not found with name [${name}]`);
+    }
+    this.indexes = nextIndexes;
+    return { ok: 1 };
   }
 
   private filter(filter: Record<string, unknown>, sort?: SortSpec) {
@@ -181,6 +208,9 @@ function assertIndexesAllowDocuments<TDocument extends Record<string, unknown>>(
   for (const index of indexes.filter((candidate) => candidate.unique)) {
     const seen = new Set<string>();
     for (const document of documents) {
+      if (index.partialFilterExpression && !matches(document, index.partialFilterExpression)) {
+        continue;
+      }
       const key = buildUniqueIndexKey(document, index);
       if (!key) {
         continue;

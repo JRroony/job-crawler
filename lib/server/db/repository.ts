@@ -105,6 +105,8 @@ export type CollectionAdapter<TDocument extends Record<string, unknown>> = {
     filter?: Record<string, unknown>,
     options?: { sort?: SortSpec; limit?: number },
   ): { toArray(): Promise<TDocument[]> };
+  listIndexes?(): { toArray(): Promise<Array<Record<string, unknown>>> };
+  dropIndex?(name: string): Promise<unknown>;
 };
 
 export type DatabaseAdapter = {
