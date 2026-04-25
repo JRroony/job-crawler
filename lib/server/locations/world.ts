@@ -6,6 +6,7 @@ import { normalizeLocationText } from "@/lib/server/locations/us";
 export type SupportedCountryConcept =
   | "canada"
   | "germany"
+  | "israel"
   | "united kingdom";
 
 type SupportedCountryRegion = {
@@ -187,6 +188,54 @@ const supportedCountryDefinitions: SupportedCountryDefinition[] = [
         regionCode: "BY",
         aliases: ["munich", "munich bavaria", "munich germany", "munchen"],
         priority: 2,
+      },
+    ],
+  },
+  {
+    concept: "israel",
+    canonicalName: "Israel",
+    aliases: ["israel", "il israel"],
+    regions: [
+      {
+        countryConcept: "israel",
+        name: "Tel Aviv District",
+        aliases: ["tel aviv district", "tel aviv israel"],
+        priority: 1,
+      },
+      {
+        countryConcept: "israel",
+        name: "Jerusalem District",
+        aliases: ["jerusalem district", "jerusalem israel"],
+        priority: 2,
+      },
+      {
+        countryConcept: "israel",
+        name: "Haifa District",
+        aliases: ["haifa district", "haifa israel"],
+        priority: 3,
+      },
+    ],
+    metros: [
+      {
+        countryConcept: "israel",
+        city: "Tel Aviv",
+        regionName: "Tel Aviv District",
+        aliases: ["tel aviv", "tel aviv yafo", "tel aviv israel"],
+        priority: 1,
+      },
+      {
+        countryConcept: "israel",
+        city: "Jerusalem",
+        regionName: "Jerusalem District",
+        aliases: ["jerusalem", "jerusalem israel"],
+        priority: 2,
+      },
+      {
+        countryConcept: "israel",
+        city: "Haifa",
+        regionName: "Haifa District",
+        aliases: ["haifa", "haifa israel"],
+        priority: 3,
       },
     ],
   },

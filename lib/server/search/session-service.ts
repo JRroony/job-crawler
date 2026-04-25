@@ -599,6 +599,11 @@ function attachSessionDiagnostics(
       supplementalResultsCount,
       totalVisibleResultsCount: safeTotalVisibleResultsCount,
       indexedCandidateCount: baseDiagnostics.session?.indexedCandidateCount ?? indexedResultsCount,
+      indexedRequestTimeEvaluationCount:
+        baseDiagnostics.session?.indexedRequestTimeEvaluationCount ?? indexedResultsCount,
+      indexedRequestTimeExcludedCount:
+        baseDiagnostics.session?.indexedRequestTimeExcludedCount ?? 0,
+      indexedSearchTimingsMs: baseDiagnostics.session?.indexedSearchTimingsMs,
       minimumIndexedCoverage: baseDiagnostics.session?.minimumIndexedCoverage ?? 0,
       targetJobCount: baseDiagnostics.session?.targetJobCount ?? 0,
       supplementalQueued:

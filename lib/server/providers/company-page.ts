@@ -161,10 +161,12 @@ async function crawlJsonFeed(
     throw new Error(formatCompanyPageFetchError("JSON feed", source.company, result));
   }
 
-  const records = extractFeedRecords(result.data);
+  const records = extractFeedRecords(result.data, source.url);
 
   return records
-    .map((record, index) => normalizeCompanyFeedJob(source.company, discoveredAt, record, index))
+    .map((record, index) =>
+      normalizeCompanyFeedJob(source.company, source.url, discoveredAt, record, index),
+    )
     .filter(isDefined);
 }
 
@@ -386,9 +388,11 @@ function normalizeAnchorJob(input: {
   });
 }
 
-function extractFeedRecords(payload: unknown): Record<string, unknown>[] {
+function extractFeedRecords(payload: unknown, sourceUrl: string): Record<string, unknown>[] {
   if (Array.isArray(payload)) {
-    return payload.filter(isRecord);
+    return payload.filter((value): value is Record<string, unknown> =>
+      isRecord(value) && looksLikeStructuredJobRecord(value, sourceUrl),
+    );
   }
 
   if (!payload || typeof payload !== "object") {
@@ -396,9 +400,21 @@ function extractFeedRecords(payload: unknown): Record<string, unknown>[] {
   }
 
   const record = payload as Record<string, unknown>;
+  const deepRecords = deepCollect(record, (candidate) =>
+    looksLikeStructuredJobRecord(candidate, sourceUrl),
+  );
+  if (deepRecords.length > 0) {
+    return dedupeRecords(deepRecords);
+  }
+
   for (const value of Object.values(record)) {
-    if (Array.isArray(value) && value.every(isRecord)) {
-      return value;
+    if (Array.isArray(value)) {
+      const records = value.filter((candidate): candidate is Record<string, unknown> =>
+        isRecord(candidate) && looksLikeStructuredJobRecord(candidate, sourceUrl),
+      );
+      if (records.length > 0) {
+        return records;
+      }
     }
   }
 
@@ -407,12 +423,13 @@ function extractFeedRecords(payload: unknown): Record<string, unknown>[] {
 
 function normalizeCompanyFeedJob(
   company: string,
+  sourcePageUrl: string,
   discoveredAt: string,
   record: Record<string, unknown>,
   index: number,
 ) {
-  const title = firstString(record, ["title", "name", "jobTitle"]);
-  const sourceUrl = firstString(record, ["url", "applyUrl", "absolute_url", "hostedUrl"]);
+  const title = firstString(record, ["title", "name", "jobTitle", "postingTitle", "positionTitle"]);
+  const sourceUrl = resolveStructuredJobUrl(record, sourcePageUrl);
 
   if (!title || !sourceUrl) {
     return undefined;
@@ -423,18 +440,20 @@ function normalizeCompanyFeedJob(
     companyToken: company,
     company,
     locationText:
-      firstString(record, ["location", "locationText", "jobLocationText"]) ??
+      resolveStructuredLocationText(record) ??
       "Location unavailable",
     sourcePlatform: "company_page",
-    sourceJobId: firstString(record, ["id", "jobId", "slug"]) ?? `${company}-${index}`,
+    sourceJobId: resolveStructuredJobId(record) ?? `${company}-${index}`,
     sourceUrl,
-    applyUrl: firstString(record, ["applyUrl", "url"]) ?? sourceUrl,
+    applyUrl: resolveStructuredApplyUrl(record, sourcePageUrl) ?? sourceUrl,
     canonicalUrl: sourceUrl,
     postedAt: coercePostedAt(
       firstString(record, ["postedAt", "datePosted", "createdAt", "publishedAt"]),
     ),
     rawSourceMetadata: {
       companyFeedJob: record,
+      companyPageSourceUrl: sourcePageUrl,
+      companyPageExtraction: "json_feed",
     },
     discoveredAt,
     explicitExperienceLevel: resolveStructuredExplicitExperienceLevel(record),
@@ -479,6 +498,7 @@ function normalizeJsonLdJob(
     rawSourceMetadata: {
       jsonLdJob: record,
       companyPageExtraction: "json_ld",
+      companyPageSourceUrl: sourceUrl,
     },
     discoveredAt,
     explicitExperienceLevel: resolveStructuredExplicitExperienceLevel(record),
@@ -583,6 +603,14 @@ function resolveStructuredLocationText(record: Record<string, unknown>) {
     return locationFromJsonLd(record);
   }
 
+  const nestedLocation = normalizeNestedLocation(record.location) ??
+    normalizeNestedLocation(record.locations) ??
+    normalizeNestedLocation(record.office) ??
+    normalizeNestedLocation(record.offices);
+  if (nestedLocation) {
+    return nestedLocation;
+  }
+
   const location = buildLocationText([
     firstString(record, ["city", "addressLocality"]),
     firstString(record, ["state", "region", "addressRegion"]),
@@ -590,6 +618,38 @@ function resolveStructuredLocationText(record: Record<string, unknown>) {
   ]);
 
   return location || "Location unavailable";
+}
+
+function normalizeNestedLocation(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+
+  if (Array.isArray(value)) {
+    const locations = value
+      .map(normalizeNestedLocation)
+      .filter((location): location is string => Boolean(location));
+
+    return locations.length > 0 ? locations.slice(0, 3).join("; ") : undefined;
+  }
+
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const direct = firstString(value, ["name", "displayName", "title", "location", "locationText"]);
+  if (direct) {
+    return direct;
+  }
+
+  const address = isRecord(value.address) ? value.address : value;
+  const location = buildLocationText([
+    firstString(address, ["city", "addressLocality", "locality"]),
+    firstString(address, ["state", "region", "addressRegion", "administrativeArea"]),
+    firstString(address, ["country", "addressCountry", "countryCode"]),
+  ]);
+
+  return location || undefined;
 }
 
 function resolveStructuredJobId(record: Record<string, unknown>) {
@@ -774,4 +834,24 @@ function firstValue(record: Record<string, unknown>, keys: string[]) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function dedupeRecords(records: Record<string, unknown>[]) {
+  const seen = new Set<string>();
+  const deduped: Record<string, unknown>[] = [];
+
+  for (const record of records) {
+    const key =
+      resolveStructuredJobId(record) ??
+      firstString(record, ["url", "jobUrl", "absoluteUrl", "applyUrl", "hostedUrl"]) ??
+      firstString(record, ["title", "name", "jobTitle", "postingTitle", "positionTitle"]);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(record);
+  }
+
+  return deduped;
 }

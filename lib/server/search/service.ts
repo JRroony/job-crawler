@@ -209,6 +209,9 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     previousVisibleJobCount: session.searchReuse.previousVisibleJobCount,
     previousRunStatus: session.searchReuse.previousRunStatus ?? "unknown",
     latestIndexedJobAgeMs: supplementalDecision.latestIndexedJobAgeMs,
+    indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
+    indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+    indexedSearchTimingsMs: indexedSearch.timingsMs,
   });
 
   if (!supplementalDecision.shouldQueue) {
@@ -268,6 +271,9 @@ type SupplementalDecision = {
   minimumIndexedCoverage: number;
   targetJobCount: number;
   indexedCandidateCount: number;
+  indexedRequestTimeEvaluationCount: number;
+  indexedRequestTimeExcludedCount: number;
+  indexedSearchTimingsMs: Awaited<ReturnType<typeof getIndexedJobsForSearch>>["timingsMs"];
   indexedJobCount: number;
   reusedExistingSearch: boolean;
   previousVisibleJobCount: number;
@@ -318,6 +324,9 @@ function resolveSupplementalCrawlDecision(
       minimumIndexedCoverage,
       targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
       indexedCandidateCount: indexedSearch.candidateCount,
+      indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
+      indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedSearchTimingsMs: indexedSearch.timingsMs,
       indexedJobCount,
       reusedExistingSearch: previousCoverage.reusedExistingSearch,
       previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
@@ -336,6 +345,9 @@ function resolveSupplementalCrawlDecision(
       minimumIndexedCoverage,
       targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
       indexedCandidateCount: indexedSearch.candidateCount,
+      indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
+      indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedSearchTimingsMs: indexedSearch.timingsMs,
       indexedJobCount,
       reusedExistingSearch: previousCoverage.reusedExistingSearch,
       previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
@@ -354,6 +366,9 @@ function resolveSupplementalCrawlDecision(
       minimumIndexedCoverage,
       targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
       indexedCandidateCount: indexedSearch.candidateCount,
+      indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
+      indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedSearchTimingsMs: indexedSearch.timingsMs,
       indexedJobCount,
       reusedExistingSearch: previousCoverage.reusedExistingSearch,
       previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
@@ -377,6 +392,9 @@ function resolveSupplementalCrawlDecision(
       minimumIndexedCoverage,
       targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
       indexedCandidateCount: indexedSearch.candidateCount,
+      indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
+      indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedSearchTimingsMs: indexedSearch.timingsMs,
       indexedJobCount,
       reusedExistingSearch: previousCoverage.reusedExistingSearch,
       previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
@@ -402,6 +420,9 @@ function resolveSupplementalCrawlDecision(
         minimumIndexedCoverage,
         targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
         indexedCandidateCount: indexedSearch.candidateCount,
+        indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
+        indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+        indexedSearchTimingsMs: indexedSearch.timingsMs,
         indexedJobCount,
         reusedExistingSearch: previousCoverage.reusedExistingSearch,
         previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
@@ -419,6 +440,9 @@ function resolveSupplementalCrawlDecision(
       minimumIndexedCoverage,
       targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
       indexedCandidateCount: indexedSearch.candidateCount,
+      indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
+      indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedSearchTimingsMs: indexedSearch.timingsMs,
       indexedJobCount,
       reusedExistingSearch: previousCoverage.reusedExistingSearch,
       previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
@@ -441,6 +465,9 @@ function resolveSupplementalCrawlDecision(
       minimumIndexedCoverage,
       targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
       indexedCandidateCount: indexedSearch.candidateCount,
+      indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
+      indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+      indexedSearchTimingsMs: indexedSearch.timingsMs,
       indexedJobCount,
       reusedExistingSearch: previousCoverage.reusedExistingSearch,
       previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
@@ -458,6 +485,9 @@ function resolveSupplementalCrawlDecision(
     minimumIndexedCoverage,
     targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
     indexedCandidateCount: indexedSearch.candidateCount,
+    indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
+    indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+    indexedSearchTimingsMs: indexedSearch.timingsMs,
     indexedJobCount,
     reusedExistingSearch: previousCoverage.reusedExistingSearch,
     previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
@@ -491,6 +521,9 @@ function buildPrimedSessionDiagnostics(
       supplementalResultsCount: 0,
       totalVisibleResultsCount: indexedJobCount,
       indexedCandidateCount: decision.indexedCandidateCount,
+      indexedRequestTimeEvaluationCount: decision.indexedRequestTimeEvaluationCount,
+      indexedRequestTimeExcludedCount: decision.indexedRequestTimeExcludedCount,
+      indexedSearchTimingsMs: decision.indexedSearchTimingsMs,
       minimumIndexedCoverage: decision.minimumIndexedCoverage,
       targetJobCount: decision.targetJobCount,
       supplementalQueued: decision.shouldQueue,

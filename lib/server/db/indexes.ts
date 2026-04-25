@@ -153,6 +153,35 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
       },
       {
         key: {
+          "searchIndex.titleSearchKeys": 1,
+          "searchIndex.locationSearchKeys": 1,
+          isActive: 1,
+          sourcePlatform: 1,
+          postingDate: -1,
+        },
+        name: "jobs_search_ready_title_location_recent",
+      },
+      {
+        key: {
+          "searchIndex.locationSearchKeys": 1,
+          "searchIndex.titleSearchKeys": 1,
+          isActive: 1,
+          postingDate: -1,
+        },
+        name: "jobs_search_ready_location_title_recent",
+      },
+      {
+        key: {
+          "searchIndex.experienceSearchKeys": 1,
+          "searchIndex.titleSearchKeys": 1,
+          "searchIndex.locationSearchKeys": 1,
+          isActive: 1,
+          postingDate: -1,
+        },
+        name: "jobs_search_ready_experience_title_location_recent",
+      },
+      {
+        key: {
           "resolvedLocation.isUnitedStates": 1,
           "resolvedLocation.state": 1,
           city: 1,

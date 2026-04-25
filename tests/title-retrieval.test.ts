@@ -597,6 +597,63 @@ describe("title retrieval scoring", () => {
       tier: "none",
     });
   });
+
+  it.each([
+    {
+      query: "Software Engineer",
+      relatedTitles: ["Backend Developer", "Platform Engineer", "Member of Technical Staff"],
+    },
+    {
+      query: "Data Analyst",
+      relatedTitles: ["Business Analyst", "Reporting Analyst", "Product Analyst"],
+    },
+    {
+      query: "Data Engineer",
+      relatedTitles: ["Analytics Engineer", "Data Platform Engineer", "Database Engineer"],
+    },
+    {
+      query: "Machine Learning Engineer",
+      relatedTitles: ["AI Engineer", "Applied Scientist", "Data Scientist", "MLOps Engineer"],
+    },
+    {
+      query: "Product Manager",
+      relatedTitles: ["Technical Product Manager", "Product Owner", "Growth Product Manager"],
+    },
+    {
+      query: "DevOps Engineer",
+      relatedTitles: ["Site Reliability Engineer", "Cloud Engineer", "Security Engineer"],
+    },
+    {
+      query: "QA Engineer",
+      relatedTitles: ["Test Engineer", "SDET", "Quality Assurance Engineer"],
+    },
+    {
+      query: "Solutions Architect",
+      relatedTitles: ["Cloud Architect", "Solutions Engineer", "Enterprise Architect"],
+    },
+  ])("retrieves related roles for the $query family without exact title dependence", ({ query, relatedTitles }) => {
+    for (const relatedTitle of relatedTitles) {
+      expect(getTitleMatchResult(relatedTitle, query)).toMatchObject({
+        matches: true,
+        tier: expect.stringMatching(/^(canonical_variant|synonym|abbreviation|adjacent_concept|same_family_related)$/),
+      });
+    }
+  });
+
+  it.each([
+    "Recruiter",
+    "Finance Manager",
+    "Product Manager",
+  ])("does not leak unrelated people, finance, or product roles into engineering retrieval: %s", (title) => {
+    expect(getTitleMatchResult(title, "DevOps Engineer")).toMatchObject({
+      matches: false,
+      tier: "none",
+    });
+    expect(getTitleMatchResult(title, "Software Engineer")).toMatchObject({
+      matches: false,
+      tier: "none",
+    });
+  });
 });
 
 describe("semantic title expansion", () => {

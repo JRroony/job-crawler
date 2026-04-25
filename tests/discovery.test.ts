@@ -119,6 +119,33 @@ describe("source discovery", () => {
     });
   });
 
+  it("classifies public search company-page candidates only when URLs are career-like", () => {
+    const careerCandidate = classifyPublicSearchCandidate(
+      "https://acme.example/careers/open-roles",
+      "future_search",
+    );
+    const noisyCandidate = classifyPublicSearchCandidate(
+      "https://acme.example/blog/software-engineering-culture",
+      "future_search",
+    );
+
+    expect(careerCandidate).toMatchObject({
+      platform: "company_page",
+      kind: "source",
+      recoveryKind: "source_classification",
+      recoveredSource: expect.objectContaining({
+        platform: "company_page",
+        pageType: "html_page",
+      }),
+    });
+    expect(noisyCandidate).toMatchObject({
+      platform: "company_page",
+      kind: "other",
+      recoveryKind: "none",
+    });
+    expect(noisyCandidate.recoveredSource).toBeUndefined();
+  });
+
   it("classifies embedded Greenhouse board URLs into the real board token", () => {
     const embeddedBoard = classifySourceCandidate({
       url: "https://boards.greenhouse.io/embed/job_board?for=Benchling",
@@ -3002,6 +3029,109 @@ describe("source capping with platform diversity", () => {
       inventoryOrigin: "public_search",
       lastSeenAt: "2026-04-15T00:00:00.000Z",
     });
+  });
+
+  it("refreshes inventory from company-hosted career pages, feeds, and sitemaps", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    await repository.upsertSourceInventory([
+      toSourceInventoryRecord(
+        classifySourceCandidate({
+          url: "https://careers.globex.example/jobs",
+          companyHint: "Globex",
+          pageType: "html_page",
+          confidence: "medium",
+          discoveryMethod: "manual_config",
+        }),
+        {
+          now: "2026-04-10T00:00:00.000Z",
+          inventoryOrigin: "manual_config",
+          inventoryRank: 0,
+        },
+      ),
+    ]);
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://careers.globex.example/jobs") {
+        return new Response(
+          `
+            <html>
+              <body>
+                <a href="/jobs/software-engineer">Software Engineer - Berlin, Germany</a>
+                <a href="/careers/api/jobs.json">Jobs API</a>
+                <a href="/blog/jobs-to-be-done">Noisy blog</a>
+              </body>
+            </html>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "text/html",
+            },
+          },
+        );
+      }
+
+      if (url === "https://careers.globex.example/sitemap.xml") {
+        return new Response(
+          `
+            <urlset>
+              <url><loc>https://careers.globex.example/careers/product-manager</loc></url>
+              <url><loc>https://careers.globex.example/news/company-update</loc></url>
+            </urlset>
+          `,
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/xml",
+            },
+          },
+        );
+      }
+
+      if (url === "https://careers.globex.example/sitemap_index.xml") {
+        return new Response("", { status: 404 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const inventory = await refreshSourceInventory({
+      repository,
+      now: new Date("2026-04-15T00:00:00.000Z"),
+      fetchImpl,
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        companyPageSources: [],
+      },
+    });
+
+    expect(inventory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          platform: "company_page",
+          url: "https://careers.globex.example/jobs/software-engineer",
+          pageType: "html_page",
+          sourceType: "company_page",
+        }),
+        expect.objectContaining({
+          platform: "company_page",
+          url: "https://careers.globex.example/careers/api/jobs.json",
+          pageType: "json_feed",
+          sourceType: "feed",
+        }),
+        expect.objectContaining({
+          platform: "company_page",
+          url: "https://careers.globex.example/careers/product-manager",
+          pageType: "html_page",
+          sourceType: "company_page",
+        }),
+      ]),
+    );
+    expect(inventory.some((record) => record.url.includes("/blog/"))).toBe(false);
   });
 
   it("expands persistent source inventory from a bounded background public-search portfolio", async () => {

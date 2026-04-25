@@ -66,6 +66,10 @@ describe("location resolution", () => {
       locationText: "London, UK",
       expected: { country: "United Kingdom", city: "London", state: "England" },
     },
+    {
+      locationText: "Tel Aviv, Israel",
+      expected: { country: "Israel", city: "Tel Aviv", state: "Tel Aviv District" },
+    },
   ])("resolves $locationText as a non-US location using country and regional evidence", ({
     locationText,
     expected,
@@ -76,6 +80,7 @@ describe("location resolution", () => {
       }),
     ).toMatchObject({
       isUnitedStates: false,
+      physicalLocations: expect.arrayContaining([expect.objectContaining(expected)]),
       ...expected,
     });
   });
@@ -111,7 +116,7 @@ describe("location resolution", () => {
         normalized: expect.stringContaining("austin"),
         isUnitedStates: true,
       },
-      explanation: expect.stringContaining("resolved to the United States"),
+      explanation: expect.stringContaining("physical job location in United States"),
     });
   });
 
@@ -143,7 +148,181 @@ describe("location resolution", () => {
         city: "Toronto",
         isUnitedStates: false,
       },
-      explanation: expect.stringContaining('resolved country "Canada"'),
+      explanation: expect.stringContaining("physical job location in Canada"),
+    });
+  });
+
+  it("passes country filters for multiple locations within the same supported non-US country", () => {
+    for (const locationText of ["Toronto, ON", "Vancouver, BC", "Montreal, Quebec"]) {
+      const evaluation = evaluateSearchFilters(
+        {
+          title: "Software Engineer",
+          company: "Acme",
+          country: undefined,
+          state: undefined,
+          city: undefined,
+          locationText,
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Software Engineer",
+          country: "Canada",
+        },
+        {
+          includeExperience: false,
+        },
+      );
+
+      expect(evaluation.matches).toBe(true);
+      expect(evaluation.locationMatch?.explanation).toContain("physical job location in Canada");
+    }
+  });
+
+  it("matches Israel country filters and prevents wrong-country leakage", () => {
+    const israelMatch = evaluateSearchFilters(
+      {
+        title: "Machine Learning Engineer",
+        company: "Acme",
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Tel Aviv, Israel",
+        rawSourceMetadata: {},
+      },
+      {
+        title: "Machine Learning Engineer",
+        country: "Israel",
+      },
+      {
+        includeExperience: false,
+      },
+    );
+    const canadaMiss = evaluateSearchFilters(
+      {
+        title: "Machine Learning Engineer",
+        company: "Acme",
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Toronto, ON",
+        rawSourceMetadata: {},
+      },
+      {
+        title: "Machine Learning Engineer",
+        country: "Israel",
+      },
+      {
+        includeExperience: false,
+      },
+    );
+
+    expect(israelMatch.matches).toBe(true);
+    expect(canadaMiss).toMatchObject({
+      matches: false,
+      reason: "location",
+    });
+  });
+
+  it("matches United Kingdom country filters without leaking other countries", () => {
+    const ukMatch = evaluateSearchFilters(
+      {
+        title: "Data Analyst",
+        company: "Acme",
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Manchester, UK",
+        rawSourceMetadata: {},
+      },
+      {
+        title: "Data Analyst",
+        country: "United Kingdom",
+      },
+      {
+        includeExperience: false,
+      },
+    );
+    const germanyMiss = evaluateSearchFilters(
+      {
+        title: "Data Analyst",
+        company: "Acme",
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Berlin, Germany",
+        rawSourceMetadata: {},
+      },
+      {
+        title: "Data Analyst",
+        country: "United Kingdom",
+      },
+      {
+        includeExperience: false,
+      },
+    );
+
+    expect(ukMatch.matches).toBe(true);
+    expect(germanyMiss).toMatchObject({
+      matches: false,
+      reason: "location",
+    });
+  });
+
+  it.each([
+    {
+      title: "Software Engineer",
+      country: "United States",
+      locationText: "Seattle, WA",
+    },
+    {
+      title: "Software Engineer",
+      country: "Canada",
+      locationText: "Vancouver, BC",
+    },
+    {
+      title: "Machine Learning Engineer",
+      country: "Israel",
+      locationText: "Tel Aviv, Israel",
+    },
+    {
+      title: "Product Manager",
+      country: "Canada",
+      locationText: "Toronto, ON",
+    },
+    {
+      title: "Data Analyst",
+      country: "United Kingdom",
+      locationText: "London, UK",
+    },
+  ])("validates runtime country scenario $title + $country", ({
+    title,
+    country,
+    locationText,
+  }) => {
+    const evaluation = evaluateSearchFilters(
+      {
+        title,
+        company: "Acme",
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText,
+        rawSourceMetadata: {},
+      },
+      {
+        title,
+        country,
+      },
+      {
+        includeExperience: false,
+      },
+    );
+
+    expect(evaluation).toMatchObject({
+      matches: true,
+      locationMatch: expect.objectContaining({
+        explanation: expect.stringContaining(`physical job location in ${country}`),
+      }),
     });
   });
 
@@ -215,6 +394,7 @@ describe("location resolution", () => {
       country: "United States",
       isRemote: true,
       isUnitedStates: true,
+      eligibilityCountries: ["United States"],
       evidence: expect.arrayContaining([
         { source: "location_text", value: "Remote - United States" },
       ]),
@@ -229,6 +409,7 @@ describe("location resolution", () => {
       country: "Canada",
       isRemote: true,
       isUnitedStates: false,
+      eligibilityCountries: ["Canada"],
       evidence: expect.arrayContaining([
         { source: "location_text", value: "Remote - Canada" },
       ]),
@@ -301,6 +482,109 @@ describe("location resolution", () => {
     ).toMatchObject({
       country: "Canada",
       isUnitedStates: false,
+    });
+  });
+
+  it("keeps physical locations separate from conflicting remote eligibility", () => {
+    const resolved = resolveJobLocation({
+      locationText: "Toronto, ON",
+      rawSourceMetadata: {
+        description: "This role may be performed remotely by candidates eligible to work within the United States.",
+      },
+    });
+
+    expect(resolved).toMatchObject({
+      country: "Canada",
+      physicalLocations: [
+        expect.objectContaining({
+          country: "Canada",
+          city: "Toronto",
+          state: "Ontario",
+        }),
+      ],
+      eligibilityCountries: ["United States"],
+      conflicts: [
+        expect.objectContaining({
+          kind: "physical_remote_conflict",
+          countries: expect.arrayContaining(["Canada", "United States"]),
+        }),
+      ],
+    });
+
+    const canadaEvaluation = evaluateSearchFilters(
+      {
+        title: "Software Engineer",
+        company: "Acme",
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Toronto, ON",
+        rawSourceMetadata: {
+          description: "This role may be performed remotely by candidates eligible to work within the United States.",
+        },
+      },
+      {
+        title: "Software Engineer",
+        country: "Canada",
+      },
+      {
+        includeExperience: false,
+      },
+    );
+    const usEvaluation = evaluateSearchFilters(
+      {
+        title: "Software Engineer",
+        company: "Acme",
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Toronto, ON",
+        rawSourceMetadata: {
+          description: "This role may be performed remotely by candidates eligible to work within the United States.",
+        },
+      },
+      {
+        title: "Software Engineer",
+        country: "United States",
+      },
+      {
+        includeExperience: false,
+      },
+    );
+    const remoteUsEvaluation = evaluateSearchFilters(
+      {
+        title: "Software Engineer",
+        company: "Acme",
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Toronto, ON",
+        rawSourceMetadata: {
+          description: "This role may be performed remotely by candidates eligible to work within the United States.",
+        },
+      },
+      {
+        title: "Software Engineer",
+        country: "Remote US",
+      },
+      {
+        includeExperience: false,
+      },
+    );
+
+    expect(canadaEvaluation.matches).toBe(true);
+    expect(usEvaluation).toMatchObject({
+      matches: false,
+      reason: "location",
+      locationMatch: expect.objectContaining({
+        explanation: expect.stringContaining("requires an explicit remote country filter"),
+      }),
+    });
+    expect(remoteUsEvaluation).toMatchObject({
+      matches: true,
+      locationMatch: expect.objectContaining({
+        explanation: expect.stringContaining("remote eligibility for United States"),
+      }),
     });
   });
 });

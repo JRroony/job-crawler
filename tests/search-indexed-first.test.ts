@@ -7,11 +7,13 @@ import {
   runSearchIngestionFromFilters,
   startSearchFromFilters,
 } from "@/lib/server/crawler/service";
+import { collectionNames } from "@/lib/server/db/collections";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
 import type { CrawlProvider } from "@/lib/server/providers/types";
 import { getIndexedJobsForSearch } from "@/lib/server/search/indexed-jobs";
+import { buildIndexedJobCandidateQuery } from "@/lib/server/search/job-search-index";
 import type { JobListing } from "@/lib/types";
 
 import { FakeDb } from "@/tests/helpers/fake-db";
@@ -547,6 +549,100 @@ describe("jobs-first indexed search", () => {
 
     expect(listJobsSpy).not.toHaveBeenCalled();
     expect(started.result.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
+  });
+
+  it("lets the indexed candidate prefilter reach generic same-family software titles for semantic evaluation", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    await seedIndexedJobs(repository, [
+      createPersistableJob({
+        title: "Developer",
+        normalizedTitle: "developer",
+        titleNormalized: "developer",
+        sourceJobId: "generic-developer",
+        canonicalUrl: "https://example.com/jobs/generic-developer",
+        applyUrl: "https://example.com/jobs/generic-developer/apply",
+        sourceUrl: "https://example.com/jobs/generic-developer",
+        locationText: "Remote - United States",
+      }),
+      createPersistableJob({
+        title: "Product Manager",
+        normalizedTitle: "product manager",
+        titleNormalized: "product manager",
+        sourceJobId: "product-noise",
+        canonicalUrl: "https://example.com/jobs/product-noise",
+        applyUrl: "https://example.com/jobs/product-noise/apply",
+        sourceUrl: "https://example.com/jobs/product-noise",
+        locationText: "Remote - United States",
+      }),
+    ]);
+
+    const result = await getIndexedJobsForSearch(repository, {
+      title: "Software Engineer",
+      country: "United States",
+    });
+
+    expect(result.candidateQuery).toMatchObject({
+      usedFamilyRoleFallback: true,
+      usedLocationTextFallback: true,
+    });
+    expect(result.matches.map(({ job }) => job.sourceJobId)).toEqual([
+      "generic-developer",
+    ]);
+    expect(result.matches[0]?.evaluation.titleMatch).toMatchObject({
+      tier: "same_family_related",
+      matches: true,
+    });
+  });
+
+  it("recovers legacy indexed US jobs whose persisted document lacks resolvedLocation and country fields", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+
+    await db.collection(collectionNames.jobs).insertOne({
+      _id: "legacy-austin",
+      title: "Software Engineer",
+      company: "Acme",
+      locationText: "Austin, TX",
+      sourcePlatform: "greenhouse",
+      sourceJobId: "legacy-austin",
+      sourceUrl: "https://example.com/jobs/legacy-austin",
+      applyUrl: "https://example.com/jobs/legacy-austin/apply",
+      discoveredAt: "2026-04-15T12:00:00.000Z",
+      crawledAt: "2026-04-15T12:00:00.000Z",
+      companyNormalized: "acme",
+      titleNormalized: "software engineer",
+      normalizedTitle: "software engineer",
+      locationNormalized: "austin tx",
+      normalizedLocation: "austin tx",
+      contentFingerprint: "legacy-austin",
+      canonicalJobKey: "platform:greenhouse:acme:legacy-austin",
+      firstSeenAt: "2026-04-15T12:00:00.000Z",
+      lastSeenAt: "2026-04-15T12:00:00.000Z",
+      indexedAt: "2026-04-15T12:00:00.000Z",
+      isActive: true,
+      sourceLookupKeys: ["greenhouse:legacy-austin"],
+      sourceProvenance: [],
+      crawlRunIds: ["run-legacy-austin"],
+      linkStatus: "unknown",
+      rawSourceMetadata: {},
+    });
+
+    const result = await getIndexedJobsForSearch(repository, {
+      title: "Software Engineer",
+      country: "United States",
+    });
+
+    expect(result.candidateQuery.usedLocationTextFallback).toBe(true);
+    expect(result.matches.map(({ job }) => job.sourceJobId)).toEqual([
+      "legacy-austin",
+    ]);
+    expect(result.matches[0]?.evaluation.locationMatch).toMatchObject({
+      matches: true,
+      jobDiagnostics: {
+        raw: "Austin, TX",
+        isUnitedStates: true,
+      },
+    });
   });
 
   it("returns matching background-indexed jobs in delta responses for an active search session", async () => {
@@ -1408,6 +1504,399 @@ describe("jobs-first indexed search", () => {
     expect(crawlSources).not.toHaveBeenCalled();
   });
 
+  it("serves broad family-aware indexed retrieval scenarios while preserving title precision", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    await seedIndexedJobs(repository, [
+      createPersistableJob({
+        title: "Backend Developer",
+        sourceJobId: "family-software-backend",
+        canonicalUrl: "https://example.com/jobs/family-software-backend",
+        applyUrl: "https://example.com/jobs/family-software-backend/apply",
+        sourceUrl: "https://example.com/jobs/family-software-backend",
+        locationText: "Austin, TX",
+        state: "Texas",
+        city: "Austin",
+      }),
+      createPersistableJob({
+        title: "Platform Engineer",
+        sourceJobId: "family-software-platform",
+        canonicalUrl: "https://example.com/jobs/family-software-platform",
+        applyUrl: "https://example.com/jobs/family-software-platform/apply",
+        sourceUrl: "https://example.com/jobs/family-software-platform",
+        locationText: "Seattle, WA",
+        state: "Washington",
+        city: "Seattle",
+      }),
+      createPersistableJob({
+        title: "Business Intelligence Analyst",
+        sourceJobId: "family-data-analytics-bi",
+        canonicalUrl: "https://example.com/jobs/family-data-analytics-bi",
+        applyUrl: "https://example.com/jobs/family-data-analytics-bi/apply",
+        sourceUrl: "https://example.com/jobs/family-data-analytics-bi",
+        country: "Canada",
+        locationText: "Toronto, ON",
+        state: "Ontario",
+        city: "Toronto",
+      }),
+      createPersistableJob({
+        title: "Product Analyst",
+        sourceJobId: "family-data-analytics-product",
+        canonicalUrl: "https://example.com/jobs/family-data-analytics-product",
+        applyUrl: "https://example.com/jobs/family-data-analytics-product/apply",
+        sourceUrl: "https://example.com/jobs/family-data-analytics-product",
+        country: "Canada",
+        locationText: "Vancouver, BC",
+        state: "British Columbia",
+        city: "Vancouver",
+      }),
+      createPersistableJob({
+        title: "AI Engineer",
+        sourceJobId: "family-ml-ai",
+        canonicalUrl: "https://example.com/jobs/family-ml-ai",
+        applyUrl: "https://example.com/jobs/family-ml-ai/apply",
+        sourceUrl: "https://example.com/jobs/family-ml-ai",
+        locationText: "Remote - United States",
+      }),
+      createPersistableJob({
+        title: "Applied Scientist",
+        sourceJobId: "family-ml-applied",
+        canonicalUrl: "https://example.com/jobs/family-ml-applied",
+        applyUrl: "https://example.com/jobs/family-ml-applied/apply",
+        sourceUrl: "https://example.com/jobs/family-ml-applied",
+        locationText: "Cambridge, MA",
+        state: "Massachusetts",
+        city: "Cambridge",
+      }),
+      createPersistableJob({
+        title: "Technical Product Manager",
+        sourceJobId: "family-product-technical",
+        canonicalUrl: "https://example.com/jobs/family-product-technical",
+        applyUrl: "https://example.com/jobs/family-product-technical/apply",
+        sourceUrl: "https://example.com/jobs/family-product-technical",
+        country: "Canada",
+        locationText: "Remote - Canada",
+      }),
+      createPersistableJob({
+        title: "Product Owner",
+        sourceJobId: "family-product-owner",
+        canonicalUrl: "https://example.com/jobs/family-product-owner",
+        applyUrl: "https://example.com/jobs/family-product-owner/apply",
+        sourceUrl: "https://example.com/jobs/family-product-owner",
+        country: "Canada",
+        locationText: "Toronto, ON",
+        state: "Ontario",
+        city: "Toronto",
+      }),
+      createPersistableJob({
+        title: "Cloud Engineer",
+        sourceJobId: "family-devops-cloud",
+        canonicalUrl: "https://example.com/jobs/family-devops-cloud",
+        applyUrl: "https://example.com/jobs/family-devops-cloud/apply",
+        sourceUrl: "https://example.com/jobs/family-devops-cloud",
+        country: "Germany",
+        locationText: "Berlin, Germany",
+      }),
+      createPersistableJob({
+        title: "Security Engineer",
+        sourceJobId: "family-devops-security",
+        canonicalUrl: "https://example.com/jobs/family-devops-security",
+        applyUrl: "https://example.com/jobs/family-devops-security/apply",
+        sourceUrl: "https://example.com/jobs/family-devops-security",
+        country: "Germany",
+        locationText: "Munich, Germany",
+      }),
+      createPersistableJob({
+        title: "Recruiter",
+        sourceJobId: "family-noise-recruiter",
+        canonicalUrl: "https://example.com/jobs/family-noise-recruiter",
+        applyUrl: "https://example.com/jobs/family-noise-recruiter/apply",
+        sourceUrl: "https://example.com/jobs/family-noise-recruiter",
+        country: "Germany",
+        locationText: "Berlin, Germany",
+      }),
+      createPersistableJob({
+        title: "Finance Manager",
+        sourceJobId: "family-noise-finance",
+        canonicalUrl: "https://example.com/jobs/family-noise-finance",
+        applyUrl: "https://example.com/jobs/family-noise-finance/apply",
+        sourceUrl: "https://example.com/jobs/family-noise-finance",
+        country: "United States",
+        locationText: "Remote - United States",
+      }),
+    ]);
+
+    const scenarios = [
+      {
+        title: "software engineer",
+        country: "United States",
+        expectedIds: ["family-software-backend", "family-software-platform"],
+      },
+      {
+        title: "data analyst",
+        country: "Canada",
+        expectedIds: ["family-data-analytics-bi", "family-data-analytics-product"],
+      },
+      {
+        title: "machine learning engineer",
+        country: "United States",
+        expectedIds: ["family-ml-ai", "family-ml-applied"],
+      },
+      {
+        title: "product manager",
+        country: "Canada",
+        expectedIds: ["family-product-technical", "family-product-owner"],
+      },
+      {
+        title: "devops engineer",
+        country: "Germany",
+        expectedIds: ["family-devops-cloud", "family-devops-security"],
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const result = await getIndexedJobsForSearch(repository, {
+        title: scenario.title,
+        country: scenario.country,
+      });
+      const ids = result.matches.map(({ job }) => job.sourceJobId);
+
+      expect(ids).toEqual(expect.arrayContaining(scenario.expectedIds));
+      expect(ids).not.toEqual(expect.arrayContaining([
+        "family-noise-recruiter",
+        "family-noise-finance",
+      ]));
+      expect(result.matches.every(({ evaluation }) => evaluation.titleMatch.matches)).toBe(true);
+      expect(result.matches.every(({ job }) => job.rawSourceMetadata.indexedSearch)).toBe(true);
+      expect(result.candidateQuery).toMatchObject({
+        strategy: "coarse_prefilter",
+        usedFamilyRoleFallback: true,
+        usedLocationPrefilter: true,
+      });
+    }
+  });
+
+  it("validates final indexed retrieval scenarios across countries, titles, and company-page sources", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    await seedIndexedJobs(repository, [
+      createPersistableJob({
+        title: "Software Engineer",
+        sourceJobId: "final-se-us-exact",
+        canonicalUrl: "https://example.com/jobs/final-se-us-exact",
+        applyUrl: "https://example.com/jobs/final-se-us-exact/apply",
+        sourceUrl: "https://example.com/jobs/final-se-us-exact",
+        locationText: "Remote - United States",
+      }),
+      createPersistableJob({
+        title: "Backend Developer",
+        sourceJobId: "final-se-us-related",
+        canonicalUrl: "https://example.com/jobs/final-se-us-related",
+        applyUrl: "https://example.com/jobs/final-se-us-related/apply",
+        sourceUrl: "https://example.com/jobs/final-se-us-related",
+        locationText: "Austin, TX",
+        state: "Texas",
+        city: "Austin",
+        sourcePlatform: "company_page",
+      }),
+      createPersistableJob({
+        title: "Software Engineer",
+        sourceJobId: "final-se-ca-exact",
+        canonicalUrl: "https://example.com/jobs/final-se-ca-exact",
+        applyUrl: "https://example.com/jobs/final-se-ca-exact/apply",
+        sourceUrl: "https://example.com/jobs/final-se-ca-exact",
+        country: "Canada",
+        locationText: "Toronto, ON",
+        state: "Ontario",
+        city: "Toronto",
+      }),
+      createPersistableJob({
+        title: "Platform Engineer",
+        sourceJobId: "final-se-ca-related",
+        canonicalUrl: "https://example.com/jobs/final-se-ca-related",
+        applyUrl: "https://example.com/jobs/final-se-ca-related/apply",
+        sourceUrl: "https://example.com/jobs/final-se-ca-related",
+        country: "Canada",
+        locationText: "Vancouver, BC",
+        state: "British Columbia",
+        city: "Vancouver",
+        sourcePlatform: "company_page",
+      }),
+      createPersistableJob({
+        title: "Data Analyst",
+        sourceJobId: "final-da-il-exact",
+        canonicalUrl: "https://example.com/jobs/final-da-il-exact",
+        applyUrl: "https://example.com/jobs/final-da-il-exact/apply",
+        sourceUrl: "https://example.com/jobs/final-da-il-exact",
+        country: "Israel",
+        locationText: "Tel Aviv, Israel",
+        state: "Tel Aviv District",
+        city: "Tel Aviv",
+        sourcePlatform: "company_page",
+      }),
+      createPersistableJob({
+        title: "Business Intelligence Analyst",
+        sourceJobId: "final-da-il-related",
+        canonicalUrl: "https://example.com/jobs/final-da-il-related",
+        applyUrl: "https://example.com/jobs/final-da-il-related/apply",
+        sourceUrl: "https://example.com/jobs/final-da-il-related",
+        country: "Israel",
+        locationText: "Jerusalem, Israel",
+        state: "Jerusalem District",
+        city: "Jerusalem",
+      }),
+      createPersistableJob({
+        title: "Machine Learning Engineer",
+        sourceJobId: "final-mle-us-exact",
+        canonicalUrl: "https://example.com/jobs/final-mle-us-exact",
+        applyUrl: "https://example.com/jobs/final-mle-us-exact/apply",
+        sourceUrl: "https://example.com/jobs/final-mle-us-exact",
+        locationText: "Seattle, WA",
+        state: "Washington",
+        city: "Seattle",
+      }),
+      createPersistableJob({
+        title: "Applied Scientist",
+        sourceJobId: "final-mle-us-related",
+        canonicalUrl: "https://example.com/jobs/final-mle-us-related",
+        applyUrl: "https://example.com/jobs/final-mle-us-related/apply",
+        sourceUrl: "https://example.com/jobs/final-mle-us-related",
+        locationText: "Cambridge, MA",
+        state: "Massachusetts",
+        city: "Cambridge",
+        sourcePlatform: "company_page",
+      }),
+      createPersistableJob({
+        title: "Product Manager",
+        sourceJobId: "final-pm-ca-exact",
+        canonicalUrl: "https://example.com/jobs/final-pm-ca-exact",
+        applyUrl: "https://example.com/jobs/final-pm-ca-exact/apply",
+        sourceUrl: "https://example.com/jobs/final-pm-ca-exact",
+        country: "Canada",
+        locationText: "Remote - Canada",
+      }),
+      createPersistableJob({
+        title: "Product Owner",
+        sourceJobId: "final-pm-ca-related",
+        canonicalUrl: "https://example.com/jobs/final-pm-ca-related",
+        applyUrl: "https://example.com/jobs/final-pm-ca-related/apply",
+        sourceUrl: "https://example.com/jobs/final-pm-ca-related",
+        country: "Canada",
+        locationText: "Montreal, Quebec",
+        state: "Quebec",
+        city: "Montreal",
+        sourcePlatform: "company_page",
+      }),
+      createPersistableJob({
+        title: "DevOps Engineer",
+        sourceJobId: "final-devops-de-exact",
+        canonicalUrl: "https://example.com/jobs/final-devops-de-exact",
+        applyUrl: "https://example.com/jobs/final-devops-de-exact/apply",
+        sourceUrl: "https://example.com/jobs/final-devops-de-exact",
+        country: "Germany",
+        locationText: "Berlin, Germany",
+        state: "Berlin",
+        city: "Berlin",
+      }),
+      createPersistableJob({
+        title: "Cloud Engineer",
+        sourceJobId: "final-devops-de-related",
+        canonicalUrl: "https://example.com/jobs/final-devops-de-related",
+        applyUrl: "https://example.com/jobs/final-devops-de-related/apply",
+        sourceUrl: "https://example.com/jobs/final-devops-de-related",
+        country: "Germany",
+        locationText: "Munich, Germany",
+        state: "Bavaria",
+        city: "Munich",
+        sourcePlatform: "company_page",
+      }),
+      createPersistableJob({
+        title: "Software Engineer",
+        sourceJobId: "final-noise-wrong-country",
+        canonicalUrl: "https://example.com/jobs/final-noise-wrong-country",
+        applyUrl: "https://example.com/jobs/final-noise-wrong-country/apply",
+        sourceUrl: "https://example.com/jobs/final-noise-wrong-country",
+        country: "Germany",
+        locationText: "Berlin, Germany",
+      }),
+      createPersistableJob({
+        title: "Recruiter",
+        sourceJobId: "final-noise-wrong-title",
+        canonicalUrl: "https://example.com/jobs/final-noise-wrong-title",
+        applyUrl: "https://example.com/jobs/final-noise-wrong-title/apply",
+        sourceUrl: "https://example.com/jobs/final-noise-wrong-title",
+        country: "Canada",
+        locationText: "Toronto, ON",
+      }),
+    ]);
+
+    const scenarios = [
+      {
+        title: "software engineer",
+        country: "United States",
+        expectedIds: ["final-se-us-exact", "final-se-us-related"],
+        relatedId: "final-se-us-related",
+      },
+      {
+        title: "software engineer",
+        country: "Canada",
+        expectedIds: ["final-se-ca-exact", "final-se-ca-related"],
+        relatedId: "final-se-ca-related",
+      },
+      {
+        title: "data analyst",
+        country: "Israel",
+        expectedIds: ["final-da-il-exact", "final-da-il-related"],
+        relatedId: "final-da-il-related",
+      },
+      {
+        title: "machine learning engineer",
+        country: "United States",
+        expectedIds: ["final-mle-us-exact", "final-mle-us-related"],
+        relatedId: "final-mle-us-related",
+      },
+      {
+        title: "product manager",
+        country: "Canada",
+        expectedIds: ["final-pm-ca-exact", "final-pm-ca-related"],
+        relatedId: "final-pm-ca-related",
+      },
+      {
+        title: "devops engineer",
+        country: "Germany",
+        expectedIds: ["final-devops-de-exact", "final-devops-de-related"],
+        relatedId: "final-devops-de-related",
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const result = await getIndexedJobsForSearch(repository, {
+        title: scenario.title,
+        country: scenario.country,
+      });
+      const ids = result.matches.map(({ job }) => job.sourceJobId);
+
+      expect(ids).toEqual(expect.arrayContaining(scenario.expectedIds));
+      expect(ids).toContain(scenario.relatedId);
+      expect(ids).not.toContain("final-noise-wrong-country");
+      expect(ids).not.toContain("final-noise-wrong-title");
+      expect(result.matches.every(({ evaluation }) => evaluation.titleMatch.matches)).toBe(true);
+      expect(
+        result.matches.every(
+          ({ evaluation }) => evaluation.locationMatch?.jobDiagnostics.country === scenario.country,
+        ),
+      ).toBe(true);
+      expect(result.matches.some(({ job }) => job.sourcePlatform === "company_page")).toBe(true);
+      expect(result.candidateCount).toBeLessThan(12);
+      expect(result.requestTimeEvaluationCount).toBe(result.candidateCount);
+      expect(result.candidateQuery).toMatchObject({
+        strategy: "coarse_prefilter",
+        usedSearchReadyTitleKeys: true,
+        usedSearchReadyLocationKeys: true,
+        usedLocationPrefilter: true,
+      });
+      expect(result.timingsMs.total).toBeGreaterThanOrEqual(0);
+    }
+  });
+
   it("keeps semantic title, US location, experience filters, and ranking on indexed jobs", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     await seedIndexedJobs(repository, [
@@ -1729,6 +2218,174 @@ describe("jobs-first indexed search", () => {
         strategy: "coarse_prefilter",
       }),
     });
+  });
+
+  it("builds DB-friendly search-ready candidate queries instead of regex-first full-list scans", () => {
+    const query = buildIndexedJobCandidateQuery({
+      title: "Machine Learning Engineer",
+      country: "Canada",
+      experienceLevels: ["senior"],
+      platforms: ["greenhouse"],
+    });
+
+    expect(JSON.stringify(query.filter)).toContain("searchIndex.titleSearchKeys");
+    expect(JSON.stringify(query.filter)).toContain("searchIndex.locationSearchKeys");
+    expect(JSON.stringify(query.filter)).toContain("searchIndex.experienceSearchKeys");
+    expect(query.diagnostics).toMatchObject({
+      usedSearchReadyTitleKeys: true,
+      usedSearchReadyLocationKeys: true,
+      usedSearchReadyExperienceKeys: true,
+      usedLocationPrefilter: true,
+      usedExperiencePrefilter: true,
+    });
+  });
+
+  it("keeps candidate counts and request-time refinement bounded across countries and role families", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const scenarios = [
+      {
+        title: "software engineer",
+        country: "United States",
+        match: createPersistableJob({
+          title: "Software Engineer",
+          locationText: "Remote - United States",
+          sourceJobId: "bounded-se-us",
+          canonicalUrl: "https://example.com/jobs/bounded-se-us",
+          applyUrl: "https://example.com/jobs/bounded-se-us/apply",
+          sourceUrl: "https://example.com/jobs/bounded-se-us",
+        }),
+      },
+      {
+        title: "software engineer",
+        country: "Canada",
+        match: createPersistableJob({
+          title: "Backend Developer",
+          locationText: "Toronto, ON",
+          state: "Ontario",
+          city: "Toronto",
+          country: "Canada",
+          resolvedLocation: {
+            country: "Canada",
+            state: "Ontario",
+            stateCode: "ON",
+            city: "Toronto",
+            isRemote: false,
+            isUnitedStates: false,
+            confidence: "high",
+            evidence: [{ source: "location_text", value: "Toronto, ON" }],
+          },
+          sourceJobId: "bounded-se-ca",
+          canonicalUrl: "https://example.com/jobs/bounded-se-ca",
+          applyUrl: "https://example.com/jobs/bounded-se-ca/apply",
+          sourceUrl: "https://example.com/jobs/bounded-se-ca",
+        }),
+      },
+      {
+        title: "data analyst",
+        country: "Israel",
+        match: createPersistableJob({
+          title: "Data Analyst",
+          locationText: "Tel Aviv, Israel",
+          state: "Tel Aviv District",
+          city: "Tel Aviv",
+          country: "Israel",
+          resolvedLocation: {
+            country: "Israel",
+            state: "Tel Aviv District",
+            city: "Tel Aviv",
+            isRemote: false,
+            isUnitedStates: false,
+            confidence: "high",
+            evidence: [{ source: "location_text", value: "Tel Aviv, Israel" }],
+          },
+          sourceJobId: "bounded-da-il",
+          canonicalUrl: "https://example.com/jobs/bounded-da-il",
+          applyUrl: "https://example.com/jobs/bounded-da-il/apply",
+          sourceUrl: "https://example.com/jobs/bounded-da-il",
+        }),
+      },
+      {
+        title: "machine learning engineer",
+        country: "United States",
+        match: createPersistableJob({
+          title: "Machine Learning Engineer",
+          locationText: "New York, NY",
+          state: "New York",
+          city: "New York",
+          sourceJobId: "bounded-mle-us",
+          canonicalUrl: "https://example.com/jobs/bounded-mle-us",
+          applyUrl: "https://example.com/jobs/bounded-mle-us/apply",
+          sourceUrl: "https://example.com/jobs/bounded-mle-us",
+        }),
+      },
+      {
+        title: "product manager",
+        country: "Canada",
+        match: createPersistableJob({
+          title: "Product Manager",
+          locationText: "Remote - Canada",
+          country: "Canada",
+          resolvedLocation: {
+            country: "Canada",
+            isRemote: true,
+            isUnitedStates: false,
+            confidence: "high",
+            evidence: [{ source: "location_text", value: "Remote - Canada" }],
+          },
+          sourceJobId: "bounded-pm-ca",
+          canonicalUrl: "https://example.com/jobs/bounded-pm-ca",
+          applyUrl: "https://example.com/jobs/bounded-pm-ca/apply",
+          sourceUrl: "https://example.com/jobs/bounded-pm-ca",
+        }),
+      },
+    ];
+    const noise = Array.from({ length: 40 }, (_, index) =>
+      createPersistableJob({
+        title: index % 2 === 0 ? "Recruiter" : "Account Executive",
+        locationText: index % 3 === 0 ? "Berlin, Germany" : "Remote - United States",
+        country: index % 3 === 0 ? "Germany" : "United States",
+        resolvedLocation:
+          index % 3 === 0
+            ? {
+                country: "Germany",
+                city: "Berlin",
+                state: "Berlin",
+                isRemote: false,
+                isUnitedStates: false,
+                confidence: "high",
+                evidence: [{ source: "location_text", value: "Berlin, Germany" }],
+              }
+            : undefined,
+        sourceJobId: `bounded-noise-${index}`,
+        canonicalUrl: `https://example.com/jobs/bounded-noise-${index}`,
+        applyUrl: `https://example.com/jobs/bounded-noise-${index}/apply`,
+        sourceUrl: `https://example.com/jobs/bounded-noise-${index}`,
+      }),
+    );
+
+    await seedIndexedJobs(repository, [
+      ...scenarios.map((scenario) => scenario.match),
+      ...noise,
+    ]);
+
+    for (const scenario of scenarios) {
+      const result = await getIndexedJobsForSearch(repository, {
+        title: scenario.title,
+        country: scenario.country,
+      });
+
+      expect(result.matches.map(({ job }) => job.sourceJobId)).toContain(
+        scenario.match.sourceJobId,
+      );
+      expect(result.candidateCount).toBeLessThan(10);
+      expect(result.requestTimeEvaluationCount).toBe(result.candidateCount);
+      expect(result.requestTimeExcludedCount).toBeLessThan(5);
+      expect(result.candidateQuery).toMatchObject({
+        usedSearchReadyTitleKeys: true,
+        usedSearchReadyLocationKeys: true,
+      });
+      expect(result.timingsMs.total).toBeGreaterThanOrEqual(0);
+    }
   });
 });
 

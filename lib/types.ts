@@ -608,6 +608,15 @@ export const crawlDiagnosticsSchema = z.object({
       supplementalResultsCount: z.number().int().nonnegative().default(0),
       totalVisibleResultsCount: z.number().int().nonnegative().default(0),
       indexedCandidateCount: z.number().int().nonnegative().default(0),
+      indexedRequestTimeEvaluationCount: z.number().int().nonnegative().default(0),
+      indexedRequestTimeExcludedCount: z.number().int().nonnegative().default(0),
+      indexedSearchTimingsMs: z
+        .object({
+          candidateQuery: z.number().nonnegative().default(0),
+          requestTimeRefinement: z.number().nonnegative().default(0),
+          total: z.number().nonnegative().default(0),
+        })
+        .optional(),
       minimumIndexedCoverage: z.number().int().nonnegative().default(0),
       targetJobCount: z.number().int().nonnegative().default(0),
       supplementalQueued: z.boolean().default(false),
@@ -904,6 +913,21 @@ export const resolvedLocationEvidenceSchema = z.object({
   value: z.string().min(1),
 });
 
+export const resolvedLocationPointSchema = z.object({
+  country: z.string().min(1),
+  state: z.string().min(1).optional(),
+  stateCode: z.string().min(1).optional(),
+  city: z.string().min(1).optional(),
+  confidence: resolvedLocationConfidenceSchema,
+  evidence: z.array(resolvedLocationEvidenceSchema).default([]),
+});
+
+export const resolvedLocationConflictSchema = z.object({
+  kind: z.enum(["country_conflict", "physical_remote_conflict"]),
+  countries: z.array(z.string().min(1)).default([]),
+  evidence: z.array(resolvedLocationEvidenceSchema).default([]),
+});
+
 export const resolvedLocationSchema = z.object({
   country: z.string().optional(),
   state: z.string().optional(),
@@ -913,6 +937,9 @@ export const resolvedLocationSchema = z.object({
   isUnitedStates: z.boolean(),
   confidence: resolvedLocationConfidenceSchema,
   evidence: z.array(resolvedLocationEvidenceSchema).default([]),
+  physicalLocations: z.array(resolvedLocationPointSchema).optional(),
+  eligibilityCountries: z.array(z.string().min(1)).optional(),
+  conflicts: z.array(resolvedLocationConflictSchema).optional(),
 });
 
 export const jobSearchIndexSchema = z.object({
@@ -922,6 +949,12 @@ export const jobSearchIndexSchema = z.object({
   titleRoleGroup: z.string().min(1).optional(),
   titleConceptIds: z.array(z.string().min(1)).default([]),
   titleSearchTerms: z.array(z.string().min(1)).default([]),
+  titleSearchKeys: z.array(z.string().min(1)).default([]),
+  locationCountryKeys: z.array(z.string().min(1)).default([]),
+  locationRegionKeys: z.array(z.string().min(1)).default([]),
+  locationCityKeys: z.array(z.string().min(1)).default([]),
+  locationSearchKeys: z.array(z.string().min(1)).default([]),
+  experienceSearchKeys: z.array(z.string().min(1)).default([]),
 });
 
 // Canonical job-search entity. Keep this aligned with docs/normalized-job-model.md.

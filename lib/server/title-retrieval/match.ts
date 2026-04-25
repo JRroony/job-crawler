@@ -184,14 +184,20 @@ function computeSameFamilyScore(query: TitleAnalysis, job: TitleAnalysis) {
   const compatibleRoleGroup = Boolean(
     query.roleGroup && job.roleGroup && query.roleGroup === job.roleGroup,
   );
-  const softwareHeadCompatibility = computeSoftwareFamilyHeadCompatibilityScore(
+  const familyHeadCompatibility = computeFamilyHeadCompatibilityScore(
+    query,
+    job,
+    compatibleRoleGroup,
+    sharedMeaningful.length,
+  );
+  const catalogRelatedness = computeCatalogFamilyRelatednessScore(
     query,
     job,
     compatibleRoleGroup,
     sharedMeaningful.length,
   );
   if (sharedMeaningful.length === 0) {
-    return softwareHeadCompatibility;
+    return Math.max(familyHeadCompatibility, catalogRelatedness);
   }
 
   const queryCovered =
@@ -204,36 +210,101 @@ function computeSameFamilyScore(query: TitleAnalysis, job: TitleAnalysis) {
       sharedMeaningful.length * 55 +
       (compatibleRoleGroup ? 40 : 0) +
       (queryCovered ? 35 : 0) +
-      softwareHeadCompatibility,
+      Math.max(familyHeadCompatibility, catalogRelatedness),
   );
 }
 
-function computeSoftwareFamilyHeadCompatibilityScore(
+function computeCatalogFamilyRelatednessScore(
   query: TitleAnalysis,
   job: TitleAnalysis,
   compatibleRoleGroup: boolean,
   sharedMeaningfulCount: number,
 ) {
+  if (!query.primaryConceptId || !job.primaryConceptId) {
+    return 0;
+  }
+
+  const queryConcept = getTitleConcept(query.primaryConceptId);
+  const jobConcept = getTitleConcept(job.primaryConceptId);
+  if (!queryConcept || !jobConcept || queryConcept.family !== jobConcept.family) {
+    return 0;
+  }
+
+  if (!allowsBroadSameRoleFamily(queryConcept.family)) {
+    return 0;
+  }
+
+  const sharedAdjacentConcept = (queryConcept.adjacentConceptIds ?? []).some(
+    (queryAdjacentConceptId) =>
+      (jobConcept.adjacentConceptIds ?? []).includes(queryAdjacentConceptId),
+  );
+  const conceptAppearsInQueryExpansion =
+    query.candidateConceptIds.includes(jobConcept.id) ||
+    query.matchedConceptIds.includes(jobConcept.id);
+  const conceptAppearsInJobExpansion =
+    job.candidateConceptIds.includes(queryConcept.id) ||
+    job.matchedConceptIds.includes(queryConcept.id);
+  const sameRoleGroup =
+    compatibleRoleGroup ||
+    Boolean(queryConcept.roleGroup && queryConcept.roleGroup === jobConcept.roleGroup);
+
   if (
-    !compatibleRoleGroup ||
-    query.family !== "software_engineering" ||
-    job.family !== "software_engineering"
+    !sameRoleGroup &&
+    !conceptAppearsInQueryExpansion &&
+    !conceptAppearsInJobExpansion
   ) {
     return 0;
   }
 
-  const softwareFamilyHeads = new Set(["engineer", "developer", "architect", "staff"]);
-  const queryHead = query.headWord;
-  const jobHead = job.headWord;
-  if (!queryHead || !jobHead || !softwareFamilyHeads.has(queryHead) || !softwareFamilyHeads.has(jobHead)) {
+  return Math.min(
+    560,
+    430 +
+      (sameRoleGroup ? 45 : 0) +
+      (sharedAdjacentConcept ? 35 : 0) +
+      (conceptAppearsInQueryExpansion || conceptAppearsInJobExpansion ? 30 : 0) +
+      sharedMeaningfulCount * 25,
+  );
+}
+
+function allowsBroadSameRoleFamily(family: string) {
+  return (
+    family === "software_engineering" ||
+    family === "data_platform" ||
+    family === "ai_ml_science" ||
+    family === "product" ||
+    family === "cloud_devops_security" ||
+    family === "architecture_solutions"
+  );
+}
+
+function computeFamilyHeadCompatibilityScore(
+  query: TitleAnalysis,
+  job: TitleAnalysis,
+  compatibleRoleGroup: boolean,
+  sharedMeaningfulCount: number,
+) {
+  if (!compatibleRoleGroup || !query.family || query.family !== job.family) {
     return 0;
   }
 
-  const queryHasSpecificSpecialization = query.meaningfulTokens.some((token) =>
-    ["backend", "frontend", "full stack", "platform"].includes(token),
-  );
+  const compatibleHeads = getFamilyCompatibleHeadWords(query.family);
+  const queryHead = query.headWord;
+  const jobHead = job.headWord;
+  if (
+    !queryHead ||
+    !jobHead ||
+    !compatibleHeads.has(queryHead) ||
+    !compatibleHeads.has(jobHead)
+  ) {
+    return 0;
+  }
+
+  const queryHasSpecificSpecialization =
+    !query.primaryConceptId &&
+    query.meaningfulTokens.length > 0 &&
+    !isBroadAnchorQuery(query);
   const jobHasSpecificSpecialization = job.meaningfulTokens.some((token) =>
-    ["backend", "frontend", "full stack", "platform"].includes(token),
+    !query.meaningfulTokens.includes(token),
   );
 
   if (queryHasSpecificSpecialization) {
@@ -245,6 +316,38 @@ function computeSoftwareFamilyHeadCompatibilityScore(
   }
 
   return jobHasSpecificSpecialization ? 0 : 20;
+}
+
+function getFamilyCompatibleHeadWords(family: string) {
+  switch (family) {
+    case "software_engineering":
+      return new Set(["engineer", "developer", "architect", "staff"]);
+    case "data_platform":
+      return new Set(["engineer", "developer", "architect", "administrator"]);
+    case "data_analytics":
+      return new Set(["analyst", "scientist", "specialist"]);
+    case "ai_ml_science":
+      return new Set(["engineer", "scientist", "researcher", "developer"]);
+    case "product":
+      return new Set(["manager", "owner"]);
+    case "cloud_devops_security":
+      return new Set(["engineer", "architect", "administrator"]);
+    case "qa_support_it":
+      return new Set(["engineer", "analyst", "administrator", "specialist", "tester"]);
+    case "architecture_solutions":
+      return new Set(["architect", "engineer", "consultant"]);
+    default:
+      return new Set<string>();
+  }
+}
+
+function isBroadAnchorQuery(analysis: TitleAnalysis) {
+  const concept = getTitleConcept(analysis.primaryConceptId);
+  if (!concept) {
+    return false;
+  }
+
+  return analysis.canonicalTitle === concept.canonicalTitle;
 }
 
 function computeGenericTokenOverlapScore(query: TitleAnalysis, job: TitleAnalysis) {

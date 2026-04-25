@@ -37,7 +37,10 @@ type ResolvedCandidate = {
   candidate: LocationCandidate;
   location: ResolvedLocation;
   score: number;
+  role: "physical" | "eligibility";
 };
+type ResolvedLocationPoint = NonNullable<ResolvedLocation["physicalLocations"]>[number];
+type ResolvedLocationConflict = NonNullable<ResolvedLocation["conflicts"]>[number];
 
 const directLocationKeys = [
   "location",
@@ -72,18 +75,26 @@ export function resolveJobLocation(input: ResolveJobLocationInput): ResolvedLoca
   const bestCandidate = resolvedCandidates[0];
 
   if (bestCandidate) {
-    const supportingCandidates = resolvedCandidates.filter(
-      (candidate) =>
-        candidate.location.country === bestCandidate.location.country &&
-        (!bestCandidate.location.state ||
-          !candidate.location.state ||
-          candidate.location.state === bestCandidate.location.state),
+    const physicalLocations = collectResolvedLocationPoints(
+      resolvedCandidates.filter((candidate) => candidate.role === "physical"),
     );
+    const eligibilityCountries = collectEligibilityCountries(resolvedCandidates);
+    const primaryPoint = physicalLocations[0] ?? locationToPoint(bestCandidate.location);
+    const conflicts = collectLocationConflicts(physicalLocations, eligibilityCountries);
 
     return compactResolvedLocation({
       ...bestCandidate.location,
-      isRemote: supportingCandidates.some((candidate) => candidate.location.isRemote),
-      evidence: collectSupportingEvidence(supportingCandidates),
+      country: primaryPoint?.country ?? bestCandidate.location.country,
+      state: primaryPoint?.state ?? bestCandidate.location.state,
+      stateCode: primaryPoint?.stateCode ?? bestCandidate.location.stateCode,
+      city: primaryPoint?.city ?? bestCandidate.location.city,
+      isRemote: resolvedCandidates.some((candidate) => candidate.location.isRemote),
+      isUnitedStates: primaryPoint?.country === "United States",
+      confidence: primaryPoint?.confidence ?? bestCandidate.location.confidence,
+      evidence: collectSupportingEvidence(resolvedCandidates),
+      physicalLocations,
+      eligibilityCountries,
+      conflicts,
     });
   }
 
@@ -104,6 +115,22 @@ export function resolveJobLocation(input: ResolveJobLocationInput): ResolvedLoca
     isUnitedStates: normalizedCountry === "United States",
     confidence: normalizedCountry || normalizedState || normalizedCity ? "low" : "none",
     evidence: fallbackEvidence,
+    physicalLocations: normalizedCountry
+      ? [
+          {
+            country: normalizedCountry,
+            ...(normalizedState ? { state: normalizedState } : {}),
+            ...(normalizedState && resolveUsStateCode(normalizedState)
+              ? { stateCode: resolveUsStateCode(normalizedState) }
+              : {}),
+            ...(normalizedCity ? { city: normalizedCity } : {}),
+            confidence: "low",
+            evidence: fallbackEvidence,
+          },
+        ]
+      : [],
+    eligibilityCountries: [],
+    conflicts: [],
   });
 }
 
@@ -228,7 +255,10 @@ function buildStructuredLocationFromRecord(record: Record<string, unknown>) {
 function resolveCandidate(candidate: LocationCandidate): ResolvedCandidate | undefined {
   const analysis = analyzeUsLocation(candidate.value);
   const internationalAnalysis = analyzeSupportedCountryLocation(candidate.value);
-  const structuredParts = inferStructuredUsParts(candidate.value, analysis.isRemote);
+  const eligibilityHint = isEligibilityCandidate(candidate);
+  const structuredParts = eligibilityHint
+    ? { city: undefined, state: undefined, stateCode: undefined }
+    : inferStructuredUsParts(candidate.value, analysis.isRemote);
   const state = structuredParts.state ?? analysis.stateName;
   const stateCode =
     structuredParts.stateCode ??
@@ -254,18 +284,21 @@ function resolveCandidate(candidate: LocationCandidate): ResolvedCandidate | und
       explicitUsAlias: false,
     });
 
+    const location = compactResolvedLocation({
+      country: normalizedCountry,
+      state: internationalAnalysis.state,
+      stateCode: internationalAnalysis.stateCode,
+      city: internationalAnalysis.city,
+      isRemote: internationalAnalysis.isRemote,
+      isUnitedStates: false,
+      confidence,
+      evidence: [{ source: candidate.source, value: candidate.value }],
+    });
+
     return {
       candidate,
-      location: compactResolvedLocation({
-        country: normalizedCountry,
-        state: internationalAnalysis.state,
-        stateCode: internationalAnalysis.stateCode,
-        city: internationalAnalysis.city,
-        isRemote: internationalAnalysis.isRemote,
-        isUnitedStates: false,
-        confidence,
-        evidence: [{ source: candidate.source, value: candidate.value }],
-      }),
+      location,
+      role: eligibilityHint || internationalAnalysis.isRemote ? "eligibility" : "physical",
       score:
         candidate.priority +
         confidenceScore(confidence) +
@@ -281,20 +314,129 @@ function resolveCandidate(candidate: LocationCandidate): ResolvedCandidate | und
     explicitUsAlias: isUnitedStatesValue(candidate.value),
   });
 
+  const location = compactResolvedLocation({
+    country: "United States",
+    state,
+    stateCode,
+    city,
+    isRemote: analysis.isRemote,
+    isUnitedStates: true,
+    confidence,
+    evidence: [{ source: candidate.source, value: candidate.value }],
+  });
+
   return {
     candidate,
-    location: compactResolvedLocation({
-      country: "United States",
-      state,
-      stateCode,
-      city,
-      isRemote: analysis.isRemote,
-      isUnitedStates: true,
-      confidence,
-      evidence: [{ source: candidate.source, value: candidate.value }],
-    }),
+    location,
+    role: eligibilityHint || analysis.isRemote ? "eligibility" : "physical",
     score: candidate.priority + confidenceScore(confidence) + (city ? 12 : 0) + (state ? 14 : 0),
   };
+}
+
+function isEligibilityCandidate(candidate: LocationCandidate) {
+  return (
+    candidate.source === "remote_hint" ||
+    (candidate.source === "description" &&
+      /\b(remote|remotely|eligible|eligibility|work within|within)\b/i.test(candidate.value))
+  );
+}
+
+function collectResolvedLocationPoints(resolvedCandidates: ResolvedCandidate[]) {
+  const points: ResolvedLocationPoint[] = [];
+  const seen = new Set<string>();
+
+  resolvedCandidates.forEach((candidate) => {
+    const point = locationToPoint(candidate.location);
+    if (!point) {
+      return;
+    }
+
+    const key = [
+      normalizeLocationText(point.country),
+      normalizeLocationText(point.state),
+      normalizeLocationText(point.stateCode),
+      normalizeLocationText(point.city),
+    ].join("|");
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    points.push(point);
+  });
+
+  return points;
+}
+
+function locationToPoint(location: ResolvedLocation) {
+  if (!location.country) {
+    return undefined;
+  }
+
+  return {
+    country: location.country,
+    ...(location.state ? { state: location.state } : {}),
+    ...(location.stateCode ? { stateCode: location.stateCode } : {}),
+    ...(location.city ? { city: location.city } : {}),
+    confidence: location.confidence,
+    evidence: location.evidence,
+  } satisfies ResolvedLocationPoint;
+}
+
+function collectEligibilityCountries(resolvedCandidates: ResolvedCandidate[]) {
+  const countries = resolvedCandidates
+    .filter((candidate) => candidate.role === "eligibility")
+    .map((candidate) => candidate.location.country)
+    .filter((country): country is string => Boolean(country));
+
+  return dedupeCountries(countries);
+}
+
+function collectLocationConflicts(
+  physicalLocations: ResolvedLocationPoint[],
+  eligibilityCountries: string[],
+) {
+  const physicalCountries = dedupeCountries(physicalLocations.map((location) => location.country));
+  const allCountries = dedupeCountries([...physicalCountries, ...eligibilityCountries]);
+  const conflicts: ResolvedLocationConflict[] = [];
+
+  if (physicalCountries.length > 1) {
+    conflicts.push({
+      kind: "country_conflict",
+      countries: physicalCountries,
+      evidence: physicalLocations.flatMap((location) => location.evidence).slice(0, 6),
+    });
+  }
+
+  const remoteOnlyCountries = eligibilityCountries.filter(
+    (country) => !physicalCountries.includes(country),
+  );
+  if (physicalCountries.length > 0 && remoteOnlyCountries.length > 0) {
+    conflicts.push({
+      kind: "physical_remote_conflict",
+      countries: allCountries,
+      evidence: physicalLocations.flatMap((location) => location.evidence).slice(0, 4),
+    });
+  }
+
+  return conflicts;
+}
+
+function dedupeCountries(values: string[]) {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+
+  values.forEach((value) => {
+    const key = normalizeLocationText(value);
+    if (!key || seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    deduped.push(value);
+  });
+
+  return deduped;
 }
 
 function inferStructuredUsParts(value: string, isRemote: boolean) {
@@ -481,7 +623,10 @@ function firstString(
   return undefined;
 }
 
-function compactResolvedLocation(location: ResolvedLocation): ResolvedLocation {
+function compactResolvedLocation(
+  location: Omit<ResolvedLocation, "physicalLocations" | "eligibilityCountries" | "conflicts"> &
+    Partial<Pick<ResolvedLocation, "physicalLocations" | "eligibilityCountries" | "conflicts">>,
+): ResolvedLocation {
   return {
     ...(location.country ? { country: location.country } : {}),
     ...(location.state ? { state: location.state } : {}),
@@ -491,5 +636,8 @@ function compactResolvedLocation(location: ResolvedLocation): ResolvedLocation {
     isUnitedStates: location.isUnitedStates,
     confidence: location.confidence,
     evidence: location.evidence,
+    physicalLocations: location.physicalLocations ?? [],
+    eligibilityCountries: location.eligibilityCountries ?? [],
+    conflicts: location.conflicts ?? [],
   };
 }

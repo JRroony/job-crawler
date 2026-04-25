@@ -21,6 +21,8 @@ import type { JobListing, ResolvedLocation, SearchFilters } from "@/lib/types";
 
 type LocationWorkplaceMode = "any" | "remote" | "hybrid";
 type JobWorkplaceMode = "remote" | "hybrid" | "onsite" | "unknown";
+type ResolvedLocationPoint = NonNullable<ResolvedLocation["physicalLocations"]>[number];
+type ResolvedLocationConflict = NonNullable<ResolvedLocation["conflicts"]>[number];
 
 export type LocationMatchDiagnostics = {
   original: string;
@@ -43,6 +45,9 @@ export type JobLocationDiagnostics = {
   workplaceMode: JobWorkplaceMode;
   isRemote: boolean;
   isUnitedStates: boolean;
+  physicalLocations: ResolvedLocationPoint[];
+  eligibilityCountries: string[];
+  conflicts: ResolvedLocationConflict[];
   aliasesUsed: string[];
 };
 
@@ -152,31 +157,45 @@ function matchQueryScope(
   }
 
   if (query.scope === "country") {
-    if (query.canonicalCountry === "United States") {
-      if (!jobDiagnostics.isUnitedStates) {
+    if (query.canonicalCountry) {
+      const physicalMatch = findCountryPoint(
+        jobDiagnostics.physicalLocations,
+        query.canonicalCountry,
+      );
+      const eligibilityMatches = countryListIncludes(
+        jobDiagnostics.eligibilityCountries,
+        query.canonicalCountry,
+      );
+      const hasPhysicalLocations = jobDiagnostics.physicalLocations.length > 0;
+
+      if (physicalMatch) {
         return {
-          matches: false,
-          explanation: `Country filter "${query.raw}" requires a United States location, but the job did not resolve to the United States.`,
-          matchedTerms: [],
+          matches: true,
+          explanation: `Country filter "${query.raw}" matched a physical job location in ${query.canonicalCountry}${physicalMatch.state ? ` via ${physicalMatch.state}` : ""}${physicalMatch.city ? ` and ${physicalMatch.city}` : ""}.`,
+          matchedTerms: matchedAliasTerms(jobDiagnostics.normalized, query.expandedTerms),
+        };
+      }
+
+      if (query.workplaceMode === "remote" && eligibilityMatches) {
+        return {
+          matches: true,
+          explanation: `Country filter "${query.raw}" matched remote eligibility for ${query.canonicalCountry}; no physical location was treated as ${query.canonicalCountry}.`,
+          matchedTerms: matchedAliasTerms(jobDiagnostics.normalized, query.expandedTerms),
+        };
+      }
+
+      if (!hasPhysicalLocations && eligibilityMatches) {
+        return {
+          matches: true,
+          explanation: `Country filter "${query.raw}" matched because the job only provides remote eligibility for ${query.canonicalCountry}; no physical office location was available.`,
+          matchedTerms: matchedAliasTerms(jobDiagnostics.normalized, query.expandedTerms),
         };
       }
 
       return {
-        matches: true,
-        explanation: `Country filter "${query.raw}" matched because the job resolved to the United States${jobDiagnostics.state ? ` via ${jobDiagnostics.state}` : ""}${jobDiagnostics.city ? ` and ${jobDiagnostics.city}` : ""}.`,
-        matchedTerms: matchedAliasTerms(jobDiagnostics.normalized, query.expandedTerms),
-      };
-    }
-
-    if (
-      query.canonicalCountry &&
-      (normalizeLocationText(jobDiagnostics.country) === normalizeLocationText(query.canonicalCountry) ||
-        matchedAliasTerms(jobDiagnostics.normalized, query.expandedTerms).length > 0)
-    ) {
-      return {
-        matches: true,
-        explanation: `Country filter "${query.raw}" matched the resolved country "${jobDiagnostics.country}"${jobDiagnostics.state ? ` via ${jobDiagnostics.state}` : ""}${jobDiagnostics.city ? ` and ${jobDiagnostics.city}` : ""}.`,
-        matchedTerms: matchedAliasTerms(jobDiagnostics.normalized, query.expandedTerms),
+        matches: false,
+        explanation: `Country filter "${query.raw}" did not match any physical job location in ${query.canonicalCountry}${eligibilityMatches ? "; matching remote eligibility requires an explicit remote country filter when physical evidence points elsewhere." : ""}.`,
+        matchedTerms: [],
       };
     }
 
@@ -246,12 +265,21 @@ function buildJobLocationDiagnostics(
   resolvedLocation: ResolvedLocation,
 ): JobLocationDiagnostics {
   const raw = job.locationText?.trim() || "Location unavailable";
+  const physicalLocations = getPhysicalLocations(job, resolvedLocation);
+  const eligibilityCountries = getEligibilityCountries(resolvedLocation);
   const normalized = normalizeLocationText(
     [
       resolvedLocation.city,
       resolvedLocation.state,
       resolvedLocation.stateCode,
       resolvedLocation.country,
+      ...physicalLocations.flatMap((location) => [
+        location.city,
+        location.state,
+        location.stateCode,
+        location.country,
+      ]),
+      ...eligibilityCountries,
       job.city,
       job.state,
       job.country,
@@ -271,6 +299,9 @@ function buildJobLocationDiagnostics(
     workplaceMode: inferJobWorkplaceMode(raw, resolvedLocation),
     isRemote: resolvedLocation.isRemote,
     isUnitedStates: resolvedLocation.isUnitedStates,
+    physicalLocations,
+    eligibilityCountries,
+    conflicts: resolvedLocation.conflicts ?? [],
     aliasesUsed: dedupeTerms([
       ...(resolvedLocation.country && isUnitedStatesValue(resolvedLocation.country)
         ? unitedStatesQueryAliases
@@ -284,6 +315,58 @@ function buildJobLocationDiagnostics(
       ...matchedAliasTerms(normalized, buildLocationQueryAliasesFromJob(raw, resolvedLocation)),
     ]),
   };
+}
+
+function getPhysicalLocations(
+  job: LocationFilterableJob,
+  resolvedLocation: ResolvedLocation,
+) {
+  if (resolvedLocation.physicalLocations) {
+    return resolvedLocation.physicalLocations;
+  }
+
+  const country = resolvedLocation.country ?? job.country;
+  if (!country) {
+    return [];
+  }
+
+  return [
+    {
+      country,
+      ...(resolvedLocation.state ?? job.state
+        ? { state: resolvedLocation.state ?? job.state }
+        : {}),
+      ...(resolvedLocation.stateCode ? { stateCode: resolvedLocation.stateCode } : {}),
+      ...(resolvedLocation.city ?? job.city ? { city: resolvedLocation.city ?? job.city } : {}),
+      confidence: resolvedLocation.confidence,
+      evidence: resolvedLocation.evidence,
+    },
+  ];
+}
+
+function getEligibilityCountries(resolvedLocation: ResolvedLocation) {
+  if (resolvedLocation.eligibilityCountries?.length) {
+    return resolvedLocation.eligibilityCountries;
+  }
+
+  return resolvedLocation.isRemote && resolvedLocation.country
+    ? [resolvedLocation.country]
+    : [];
+}
+
+function findCountryPoint(
+  points: ResolvedLocationPoint[],
+  country: string,
+) {
+  return points.find(
+    (point) => normalizeLocationText(point.country) === normalizeLocationText(country),
+  );
+}
+
+function countryListIncludes(countries: string[], country: string) {
+  return countries.some(
+    (candidate) => normalizeLocationText(candidate) === normalizeLocationText(country),
+  );
 }
 
 function buildLocationQueryTermSet(scope: LocationScope, raw: string): LocationQueryTermSet {
@@ -445,6 +528,13 @@ function buildLocationQueryAliasesFromJob(raw: string, resolvedLocation: Resolve
     resolvedLocation.state ? normalizeLocationText(resolvedLocation.state) : "",
     resolvedLocation.stateCode ? normalizeLocationText(resolvedLocation.stateCode) : "",
     resolvedLocation.country ? normalizeLocationText(resolvedLocation.country) : "",
+    ...(resolvedLocation.physicalLocations ?? []).flatMap((location) => [
+      normalizeLocationText(location.city),
+      normalizeLocationText(location.state),
+      normalizeLocationText(location.stateCode),
+      normalizeLocationText(location.country),
+    ]),
+    ...(resolvedLocation.eligibilityCountries ?? []).map(normalizeLocationText),
   ];
 
   if (resolvedLocation.city && resolvedLocation.stateCode) {
@@ -491,7 +581,11 @@ function inferJobWorkplaceMode(
 ): JobWorkplaceMode {
   const normalized = normalizeLocationText(rawLocation);
 
-  if (resolvedLocation.isRemote || remoteMarkers.some((marker) => containsNormalizedTerm(normalized, normalizeLocationText(marker)))) {
+  if (
+    resolvedLocation.isRemote ||
+    (resolvedLocation.eligibilityCountries?.length ?? 0) > 0 ||
+    remoteMarkers.some((marker) => containsNormalizedTerm(normalized, normalizeLocationText(marker)))
+  ) {
     return "remote";
   }
 

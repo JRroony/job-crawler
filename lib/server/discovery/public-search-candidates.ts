@@ -127,14 +127,37 @@ export function classifyPublicSearchCandidate(
     url,
     discoveryMethod,
   });
+  const isCompanyCareerSource =
+    recoveredSource.platform === "company_page" && isLikelyCompanyCareerUrl(url);
 
   return {
     url,
     platform: recoveredSource.platform,
-    kind: recoveredSource.platform === "company_page" ? "source" : "other",
-    recoveredSource,
-    recoveryKind: recoveredSource.platform === "company_page"
+    kind: isCompanyCareerSource ? "source" : "other",
+    recoveredSource: isCompanyCareerSource ? recoveredSource : undefined,
+    recoveryKind: isCompanyCareerSource
       ? "source_classification"
       : "none",
   };
+}
+
+function isLikelyCompanyCareerUrl(value: string) {
+  try {
+    const url = new URL(value);
+    const searchable = `${url.hostname} ${url.pathname} ${url.search}`.toLowerCase();
+
+    if (
+      /\b(blog|press|news|investors?|privacy|terms|support|docs?|developer|events?)\b/.test(
+        searchable,
+      )
+    ) {
+      return false;
+    }
+
+    return /\b(careers?|jobs?|join-us|join-our-team|open-roles?|opportunities|vacancies|positions)\b/.test(
+      searchable,
+    );
+  } catch {
+    return false;
+  }
 }

@@ -748,6 +748,130 @@ describe("provider crawl status and live parsing", () => {
     });
   });
 
+  it("parses configured company page JSON feeds with nested API records and relative URLs", async () => {
+    const provider = createCompanyPageProvider();
+    const source = {
+      type: "json_feed",
+      company: "Globex",
+      url: "https://globex.example/careers/api/jobs",
+    } satisfies CompanyPageSourceConfig;
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          data: {
+            postings: [
+              {
+                requisitionId: "de-berlin",
+                postingTitle: "Data Engineer",
+                jobPath: "/careers/jobs/de-berlin",
+                locations: [
+                  {
+                    city: "Berlin",
+                    country: "Germany",
+                  },
+                ],
+                employmentType: "Full-time",
+              },
+            ],
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      )) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Data Engineer",
+        country: "Germany",
+      },
+      sources: [companyPageSource(source)],
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.fetchedCount).toBe(1);
+    expect(result.jobs[0]).toMatchObject({
+      title: "Data Engineer",
+      company: "Globex",
+      locationText: "Berlin, Germany",
+      sourcePlatform: "company_page",
+      sourceUrl: "https://globex.example/careers/jobs/de-berlin",
+      sourceJobId: "de-berlin",
+      rawSourceMetadata: expect.objectContaining({
+        companyPageExtraction: "json_feed",
+        companyPageSourceUrl: "https://globex.example/careers/api/jobs",
+      }),
+    });
+  });
+
+  it("parses JSON-LD company career pages", async () => {
+    const provider = createCompanyPageProvider();
+    const source = {
+      type: "json_ld_page",
+      company: "Example Labs",
+      url: "https://examplelabs.test/careers/software-engineer",
+    } satisfies CompanyPageSourceConfig;
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        `
+          <html>
+            <head>
+              <script type="application/ld+json">
+                {
+                  "@context": "https://schema.org",
+                  "@type": "JobPosting",
+                  "title": "Software Engineer",
+                  "url": "https://examplelabs.test/careers/software-engineer",
+                  "hiringOrganization": { "name": "Example Labs" },
+                  "jobLocation": {
+                    "@type": "Place",
+                    "address": {
+                      "addressLocality": "Toronto",
+                      "addressRegion": "ON",
+                      "addressCountry": "Canada"
+                    }
+                  }
+                }
+              </script>
+            </head>
+          </html>
+        `,
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        },
+      )) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Software Engineer",
+        country: "Canada",
+      },
+      sources: [companyPageSource(source)],
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0]).toMatchObject({
+      title: "Software Engineer",
+      company: "Example Labs",
+      locationText: "Toronto, ON, Canada",
+      sourcePlatform: "company_page",
+      rawSourceMetadata: expect.objectContaining({
+        companyPageExtraction: "json_ld",
+      }),
+    });
+  });
+
   it("parses configured html_page sources from anchor listings and reports partial failures", async () => {
     const provider = createCompanyPageProvider();
     const sources = [
@@ -820,6 +944,47 @@ describe("provider crawl status and live parsing", () => {
       sourceUrl: "https://careers.acme.com/open-roles/senior-security-engineer",
     });
     expect(result.errorMessage).toContain("BrokenCo returned 503");
+  });
+
+  it("does not flood noisy company pages with false positive anchor jobs", async () => {
+    const provider = createCompanyPageProvider();
+    const source = {
+      type: "html_page",
+      company: "Noise Co",
+      url: "https://noise.example/careers",
+    } satisfies CompanyPageSourceConfig;
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        `
+          <html>
+            <body>
+              <a href="/careers">View all jobs</a>
+              <a href="/careers/benefits">Benefits</a>
+              <a href="/blog/engineering-culture">Engineering culture</a>
+              <a href="/privacy">Candidate privacy</a>
+            </body>
+          </html>
+        `,
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        },
+      )) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Software Engineer",
+      },
+      sources: [companyPageSource(source)],
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.fetchedCount).toBe(0);
+    expect(result.jobs).toHaveLength(0);
   });
 
   it("returns provider seeds for the pipeline to filter centrally", async () => {

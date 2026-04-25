@@ -22,6 +22,13 @@ type IndexedJobDelta = {
 
 export type IndexedJobSearchResult = {
   candidateCount: number;
+  requestTimeEvaluationCount: number;
+  requestTimeExcludedCount: number;
+  timingsMs: {
+    candidateQuery: number;
+    requestTimeRefinement: number;
+    total: number;
+  };
   candidateQuery: IndexedJobCandidateQuery["diagnostics"];
   matches: IndexedJobSearchMatch[];
 };
@@ -30,15 +37,26 @@ export async function getIndexedJobsForSearch(
   repository: JobCrawlerRepository,
   filters: SearchFilters,
 ): Promise<IndexedJobSearchResult> {
+  const startedAt = Date.now();
   const candidateResult = await repository.getIndexedJobCandidatesForSearch(filters);
+  const candidateLoadedAt = Date.now();
+  const matches = matchIndexedJobsForSearch(candidateResult.jobs, filters, {
+    candidateCount: candidateResult.jobs.length,
+    candidateQuery: candidateResult.query.diagnostics,
+  });
+  const finishedAt = Date.now();
 
   return {
     candidateCount: candidateResult.jobs.length,
     candidateQuery: candidateResult.query.diagnostics,
-    matches: matchIndexedJobsForSearch(candidateResult.jobs, filters, {
-      candidateCount: candidateResult.jobs.length,
-      candidateQuery: candidateResult.query.diagnostics,
-    }),
+    requestTimeEvaluationCount: candidateResult.jobs.length,
+    requestTimeExcludedCount: Math.max(0, candidateResult.jobs.length - matches.length),
+    timingsMs: {
+      candidateQuery: candidateLoadedAt - startedAt,
+      requestTimeRefinement: finishedAt - candidateLoadedAt,
+      total: finishedAt - startedAt,
+    },
+    matches,
   };
 }
 

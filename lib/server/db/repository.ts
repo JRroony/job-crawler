@@ -2555,6 +2555,15 @@ function normalizeStoredJobFields(document: Record<string, unknown>) {
   const searchIndex = buildJobSearchIndex({
     title,
     normalizedTitle,
+    country: normalizeOptionalDocumentString(document.country),
+    state: normalizeOptionalDocumentString(document.state),
+    city: normalizeOptionalDocumentString(document.city),
+    locationText: normalizeOptionalDocumentString(document.locationText) ?? locationRaw,
+    normalizedLocation,
+    locationNormalized: normalizedLocation,
+    resolvedLocation,
+    experienceLevel: normalizeOptionalExperienceLevel(document.experienceLevel),
+    experienceClassification: normalizeExperienceClassification(document.experienceClassification),
   });
 
   return {
@@ -2750,6 +2759,13 @@ function normalizeResolvedLocation(value: unknown) {
               }))
               .filter((entry) => typeof entry.source === "string" && entry.value)
           : [],
+        ...(Array.isArray(value.physicalLocations)
+          ? { physicalLocations: value.physicalLocations }
+          : {}),
+        ...(Array.isArray(value.eligibilityCountries)
+          ? { eligibilityCountries: value.eligibilityCountries }
+          : {}),
+        ...(Array.isArray(value.conflicts) ? { conflicts: value.conflicts } : {}),
       }
     : value;
 

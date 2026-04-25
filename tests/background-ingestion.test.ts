@@ -22,6 +22,7 @@ import {
 import type { DiscoveryService, DiscoveredSource } from "@/lib/server/discovery/types";
 import { runSearchFromFilters } from "@/lib/server/search/service";
 import type { CrawlProvider } from "@/lib/server/providers/types";
+import { createCompanyPageProvider } from "@/lib/server/providers/company-page";
 import { MongoLikeNullDb } from "@/tests/helpers/mongo-like-null-db";
 
 afterEach(() => {
@@ -1267,6 +1268,127 @@ describe("recurring background ingestion", () => {
     });
     expect(storedPlatforms).toEqual(new Set(["greenhouse", "lever", "ashby", "workday"]));
     expect(storedJobs.every((job) => job.country === "Canada")).toBe(true);
+  });
+
+  it("persists company-hosted career page jobs from recurring inventory selection", async () => {
+    const db = new MongoLikeNullDb();
+    const repository = new JobCrawlerRepository(db);
+    const now = new Date("2026-04-15T12:00:00.000Z");
+
+    await repository.upsertSourceInventory([
+      toSourceInventoryRecord(
+        classifySourceCandidate({
+          url: "https://careers.globex.example/jobs",
+          companyHint: "Globex",
+          pageType: "html_page",
+          confidence: "medium",
+          discoveryMethod: "manual_config",
+        }),
+        {
+          now: now.toISOString(),
+          inventoryOrigin: "manual_config",
+          inventoryRank: 0,
+        },
+      ),
+    ]);
+
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        `
+          <html>
+            <body>
+              <script id="__NEXT_DATA__" type="application/json">
+                {
+                  "props": {
+                    "pageProps": {
+                      "jobs": [
+                        {
+                          "id": "pm-berlin",
+                          "title": "Product Manager",
+                          "url": "/jobs/product-manager-berlin",
+                          "location": { "city": "Berlin", "country": "Germany" },
+                          "description": "Own product discovery and delivery."
+                        },
+                        {
+                          "id": "se-toronto",
+                          "title": "Software Engineer",
+                          "url": "/jobs/software-engineer-toronto",
+                          "location": { "city": "Toronto", "region": "ON", "country": "Canada" },
+                          "description": "Build distributed systems."
+                        }
+                      ]
+                    }
+                  }
+                }
+              </script>
+            </body>
+          </html>
+        `,
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+          },
+        },
+      )) as unknown as typeof fetch;
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [createCompanyPageProvider()],
+      now,
+      maxSources: 1,
+      schedulingIntervalMs: 60_000,
+      runTimeoutMs: 2_000,
+      refreshInventory: () => repository.listSourceInventory(["company_page"]),
+      fetchImpl,
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected recurring ingestion to start.");
+    }
+
+    const crawlRun = await waitForRunCompletion(repository, triggered.crawlRunId);
+    const storedJobs = db.snapshot<Record<string, unknown>>(collectionNames.jobs);
+    const inventory = await repository.listSourceInventory(["company_page"]);
+
+    expect(crawlRun.diagnostics.backgroundPersistence).toMatchObject({
+      jobsInserted: 2,
+      jobsLinkedToRun: 2,
+      indexedEventsEmitted: 2,
+    });
+    expect(storedJobs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "Product Manager",
+          sourcePlatform: "company_page",
+          sourceUrl: "https://careers.globex.example/jobs/product-manager-berlin",
+          country: "Germany",
+          rawSourceMetadata: expect.objectContaining({
+            companyPageExtraction: "embedded_json",
+          }),
+        }),
+        expect.objectContaining({
+          title: "Software Engineer",
+          sourcePlatform: "company_page",
+          sourceUrl: "https://careers.globex.example/jobs/software-engineer-toronto",
+          country: "Canada",
+        }),
+      ]),
+    );
+    expect(storedJobs[0]?.sourceProvenance).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourcePlatform: "company_page",
+          sourceUrl: expect.stringContaining("careers.globex.example/jobs/"),
+        }),
+      ]),
+    );
+    expect(inventory[0]).toMatchObject({
+      platform: "company_page",
+      health: "healthy",
+      lastCrawledAt: expect.any(String),
+    });
   });
 
   it("recovers stale recurring runs and starts a fresh crawl without losing durable control", async () => {
