@@ -31,7 +31,10 @@ const envSchema = z.object({
   PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: z.coerce.number().int().positive().default(4),
   GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: z.coerce.number().int().positive().default(32),
   CRAWL_MAX_SOURCES: z.coerce.number().int().positive().default(40),
+  CRAWL_MAX_SOURCES_PER_PROVIDER: z.coerce.number().int().positive().default(40),
   CRAWL_PROVIDER_TIMEOUT_MS: z.coerce.number().int().positive().default(9000),
+  CRAWL_SOURCE_TIMEOUT_MS: z.coerce.number().int().positive().default(7000),
+  CRAWL_PROVIDER_CONCURRENCY: z.coerce.number().int().positive().default(4),
   CRAWL_PROGRESS_UPDATE_INTERVAL_MS: z.coerce.number().int().positive().default(250),
   CRAWL_GLOBAL_TIMEOUT_MS: z.coerce.number().int().positive().default(60000),
   CRAWL_INITIAL_VISIBLE_WAIT_MS: z.coerce.number().int().nonnegative().default(400),
@@ -51,7 +54,10 @@ const envSchema = z.object({
   BACKGROUND_INGESTION_INTERVAL_MS: z.coerce.number().int().positive().default(120000),
   BACKGROUND_INGESTION_PROFILES_PER_CYCLE: z.coerce.number().int().positive().default(4),
   BACKGROUND_INGESTION_MAX_SOURCES_PER_CYCLE: z.coerce.number().int().positive().default(160),
+  BACKGROUND_INGESTION_MAX_SOURCES_PER_PROVIDER: z.coerce.number().int().positive().default(48),
   BACKGROUND_INGESTION_PROVIDER_TIMEOUT_MS: z.coerce.number().int().positive().default(120000),
+  BACKGROUND_INGESTION_SOURCE_TIMEOUT_MS: z.coerce.number().int().positive().default(45000),
+  BACKGROUND_INGESTION_PROVIDER_CONCURRENCY: z.coerce.number().int().positive().default(2),
   BACKGROUND_INGESTION_STALE_AFTER_MS: z.coerce.number().int().positive().default(1800000),
   BACKGROUND_INGESTION_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(900000),
 });
@@ -104,8 +110,14 @@ export function getEnv() {
         process.env.GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES ?? "32",
       CRAWL_MAX_SOURCES:
         process.env.CRAWL_MAX_SOURCES ?? "40",
+      CRAWL_MAX_SOURCES_PER_PROVIDER:
+        process.env.CRAWL_MAX_SOURCES_PER_PROVIDER ?? "40",
       CRAWL_PROVIDER_TIMEOUT_MS:
         process.env.CRAWL_PROVIDER_TIMEOUT_MS ?? "9000",
+      CRAWL_SOURCE_TIMEOUT_MS:
+        process.env.CRAWL_SOURCE_TIMEOUT_MS ?? "7000",
+      CRAWL_PROVIDER_CONCURRENCY:
+        process.env.CRAWL_PROVIDER_CONCURRENCY ?? "4",
       CRAWL_PROGRESS_UPDATE_INTERVAL_MS:
         process.env.CRAWL_PROGRESS_UPDATE_INTERVAL_MS ?? "250",
       CRAWL_GLOBAL_TIMEOUT_MS:
@@ -138,8 +150,14 @@ export function getEnv() {
         process.env.BACKGROUND_INGESTION_PROFILES_PER_CYCLE ?? "4",
       BACKGROUND_INGESTION_MAX_SOURCES_PER_CYCLE:
         process.env.BACKGROUND_INGESTION_MAX_SOURCES_PER_CYCLE ?? "160",
+      BACKGROUND_INGESTION_MAX_SOURCES_PER_PROVIDER:
+        process.env.BACKGROUND_INGESTION_MAX_SOURCES_PER_PROVIDER ?? "48",
       BACKGROUND_INGESTION_PROVIDER_TIMEOUT_MS:
         process.env.BACKGROUND_INGESTION_PROVIDER_TIMEOUT_MS ?? "120000",
+      BACKGROUND_INGESTION_SOURCE_TIMEOUT_MS:
+        process.env.BACKGROUND_INGESTION_SOURCE_TIMEOUT_MS ?? "45000",
+      BACKGROUND_INGESTION_PROVIDER_CONCURRENCY:
+        process.env.BACKGROUND_INGESTION_PROVIDER_CONCURRENCY ?? "2",
       BACKGROUND_INGESTION_STALE_AFTER_MS:
         process.env.BACKGROUND_INGESTION_STALE_AFTER_MS ?? "1800000",
       BACKGROUND_INGESTION_RUN_TIMEOUT_MS:

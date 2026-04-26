@@ -28,6 +28,7 @@ import { sortJobsForPersistence, sortJobsWithDiagnostics } from "@/lib/server/cr
 import { capSourcesWithPlatformDiversity } from "@/lib/server/crawler/source-capper";
 import { getEnv } from "@/lib/server/env";
 import { normalizeProviderJobSeed } from "@/lib/server/providers/shared";
+import { selectProvidersForTieredCrawl } from "@/lib/server/providers/tiers";
 import { normalizeJobGeoLocation } from "@/lib/server/geo/match";
 import type {
   CrawlRunControlState,
@@ -38,14 +39,10 @@ import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/
 import type { CrawlProvider, NormalizedJobSeed } from "@/lib/server/providers/types";
 import type { TitleMatchResult } from "@/lib/server/title-retrieval";
 import {
-  activeCrawlerPlatforms,
   crawlResponseSchema,
   crawlSourceResultSchema,
-  resolveOperationalCrawlerPlatforms,
   persistableJobSchema,
   searchFiltersSchema,
-  type ActiveCrawlerPlatform,
-  type CrawlerPlatform,
   type CrawlProviderSummary,
   type CrawlResponse,
   type CrawlDiagnostics,
@@ -223,10 +220,15 @@ export async function executeCrawlPipeline(
   throwIfAborted(input.signal);
   const crawlStartedMs = Date.now();
   const normalizedFilters = searchFiltersSchema.parse(input.search.filters);
-  const selectedProviders = selectProvidersForSearch(
-    input.providers,
-    normalizedFilters.platforms,
-  );
+  const crawlMode = normalizedFilters.crawlMode ?? "balanced";
+  const isDeepCrawl = crawlMode === "deep";
+  const providerSelection = selectProvidersForTieredCrawl({
+    providers: input.providers,
+    selectedPlatforms: normalizedFilters.platforms,
+    crawlMode,
+    includeSlowProviders: isDeepCrawl,
+  });
+  const selectedProviders = providerSelection.selectedProviders;
   const search = {
     ...input.search,
     filters: normalizedFilters,
@@ -239,8 +241,22 @@ export async function executeCrawlPipeline(
   );
   const env = getEnv();
   const providerTimeoutMs =
-    input.providerTimeoutMs ?? env.CRAWL_PROVIDER_TIMEOUT_MS;
-  const globalTimeoutMs = env.CRAWL_GLOBAL_TIMEOUT_MS;
+    input.providerTimeoutMs ??
+    (isDeepCrawl
+      ? env.BACKGROUND_INGESTION_PROVIDER_TIMEOUT_MS
+      : env.CRAWL_PROVIDER_TIMEOUT_MS);
+  const globalTimeoutMs = isDeepCrawl
+    ? env.BACKGROUND_INGESTION_RUN_TIMEOUT_MS
+    : env.CRAWL_GLOBAL_TIMEOUT_MS;
+  const sourceTimeoutMs = isDeepCrawl
+    ? env.BACKGROUND_INGESTION_SOURCE_TIMEOUT_MS
+    : env.CRAWL_SOURCE_TIMEOUT_MS;
+  const maxSourcesPerProvider = isDeepCrawl
+    ? env.BACKGROUND_INGESTION_MAX_SOURCES_PER_PROVIDER
+    : env.CRAWL_MAX_SOURCES_PER_PROVIDER;
+  const providerConcurrency = isDeepCrawl
+    ? env.BACKGROUND_INGESTION_PROVIDER_CONCURRENCY
+    : env.CRAWL_PROVIDER_CONCURRENCY;
   const targetJobCount = env.CRAWL_TARGET_JOB_COUNT;
   const progressUpdateIntervalMs =
     input.progressUpdateIntervalMs ?? env.CRAWL_PROGRESS_UPDATE_INTERVAL_MS;
@@ -252,6 +268,7 @@ export async function executeCrawlPipeline(
       new Error(`Crawl exceeded the global timeout of ${globalTimeoutMs}ms.`),
     );
   }, globalTimeoutMs);
+  globalTimeoutHandle.unref?.();
 
   const crawlRun =
     input.crawlRun ??
@@ -281,10 +298,31 @@ export async function executeCrawlPipeline(
     filters: normalizedFilters,
     selectedProviders: selectedProviders.map((provider) => provider.provider),
     providerCount: selectedProviders.length,
-    crawlMode: normalizedFilters.crawlMode ?? "balanced",
+    crawlMode,
     targetJobCount,
     providerTimeoutMs,
     globalTimeoutMs,
+  });
+  console.info("[provider-tiering:selection]", {
+    searchId: search._id,
+    crawlRunId: crawlRun._id,
+    crawlMode,
+    selectedFastProviders: providerSelection.selectedFastProviders,
+    selectedSlowProviders: providerSelection.selectedSlowProviders,
+    skippedSlowProviders: providerSelection.skippedSlowProviders,
+    reason: providerSelection.reason,
+  });
+  console.info("[crawl:timeout-policy]", {
+    searchId: search._id,
+    crawlRunId: crawlRun._id,
+    crawlMode,
+    globalTimeoutMs,
+    providerTimeoutMs,
+    sourceTimeoutMs,
+    maxSourcesPerProvider,
+    providerConcurrency,
+    isBackgroundRun: false,
+    isRequestTimeRun: true,
   });
 
   const persistentCancellation = await createPersistentCancellationController({
@@ -321,6 +359,7 @@ export async function executeCrawlPipeline(
   const diagnostics = createEmptyDiagnostics(input.crawlRun?.diagnostics);
   const sourceResultsByProvider = new Map<CrawlSourceResult["provider"], CrawlSourceResult>();
   const providerSavedJobIds = new Map<CrawlSourceResult["provider"], Set<string>>();
+  const providerSourcesByProvider = new Map<CrawlSourceResult["provider"], DiscoveredSource[]>();
   const savedJobIds = new Set<string>();
   const providerDurationsMs: Array<{
     provider: CrawlSourceResult["provider"];
@@ -659,6 +698,15 @@ export async function executeCrawlPipeline(
           indexedEventCount: persistence.indexedEventCount,
           newVisibleJobCount,
         });
+        console.info("[crawl:persistence-confirmed]", {
+          searchId: search._id,
+          crawlRunId: crawlRun._id,
+          provider: traceProvider,
+          insertedCount: persistence.insertedCount,
+          updatedCount: persistence.updatedCount,
+          linkedToRunCount: persistence.linkedToRunCount,
+          indexedEventCount: persistence.indexedEventCount,
+        });
 
         if (newVisibleJobCount > 0) {
           payload.onFirstVisibleSaved?.();
@@ -792,6 +840,10 @@ export async function executeCrawlPipeline(
       if (sourcesForProvider.length === 0) {
         return;
       }
+      providerSourcesByProvider.set(provider.provider, [
+        ...(providerSourcesByProvider.get(provider.provider) ?? []),
+        ...sourcesForProvider,
+      ]);
 
       const startedAt = new Date().toISOString();
       const startedMs = Date.now();
@@ -836,6 +888,7 @@ export async function executeCrawlPipeline(
                 now: input.now,
                 filters: normalizedFilters,
                 signal: providerSignal,
+                sourceTimeoutMs,
                 throwIfCanceled: async () => {
                   await persistentCancellation.throwIfCanceled({ heartbeat: true });
                   if (providerSignal.aborted) {
@@ -981,54 +1034,63 @@ export async function executeCrawlPipeline(
           await updateRunProgress("crawling", finishedAt);
         });
       } catch (reason) {
-        if (isAbortError(reason)) {
+        const timedOut = isTimeoutError(reason);
+        if (isAbortError(reason) && !timedOut) {
           throw toAbortError(reason);
         }
 
         const finishedAt = new Date().toISOString();
         const durationMs = Date.now() - startedMs;
-        const timedOut = isTimeoutError(reason);
+        const existing = sourceResultsByProvider.get(provider.provider);
+        const errorMessage =
+          reason instanceof Error
+            ? reason.message
+            : `Provider ${provider.provider} failed unexpectedly.`;
         providerDurationsMs.push({
           provider: provider.provider,
           duration: durationMs,
           sourceCount: sourcesForProvider.length,
           timedOut,
         });
+        if (timedOut) {
+          console.warn("[crawl:provider-timeout]", {
+            searchId: search._id,
+            crawlRunId: crawlRun._id,
+            provider: provider.provider,
+            sourceCount: sourcesForProvider.length,
+            timeoutMs: providerTimeoutMs,
+            fetchedCountBeforeTimeout: existing?.fetchedCount ?? 0,
+            jobsPersistedBeforeTimeout: existing?.savedCount ?? 0,
+          });
+        }
         logIngestionTrace("provider-result", {
           searchId: search._id,
           searchSessionId: searchSession._id,
           crawlRunId: crawlRun._id,
           provider: provider.provider,
-          status: "failed",
+          status: timedOut ? "timed_out" : "failed",
           sourceCount: sourcesForProvider.length,
-          fetchedCount: 0,
+          fetchedCount: existing?.fetchedCount ?? 0,
           returnedJobSeedCount: 0,
           warningCount: 1,
-          errorMessage:
-            reason instanceof Error
-              ? reason.message
-              : `Provider ${provider.provider} failed unexpectedly.`,
+          errorMessage,
           durationMs,
         }, "error");
 
         await queueMutation(async () => {
           diagnostics.providerFailures += 1;
-          const existing = sourceResultsByProvider.get(provider.provider);
           const failedResult = crawlSourceResultSchema.parse({
             _id: existing?._id ?? createId(),
             crawlRunId: crawlRun._id,
             searchId: search._id,
             provider: provider.provider,
-            status: "failed",
+            status: timedOut ? "timed_out" : "failed",
             sourceCount: existing?.sourceCount ?? sourcesForProvider.length,
             fetchedCount: existing?.fetchedCount ?? 0,
             matchedCount: existing?.matchedCount ?? 0,
             savedCount: existing?.savedCount ?? 0,
             warningCount: (existing?.warningCount ?? 0) + 1,
-            errorMessage:
-              reason instanceof Error
-                ? reason.message
-                : `Provider ${provider.provider} failed unexpectedly.`,
+            errorMessage,
             startedAt: existing?.startedAt ?? startedAt,
             finishedAt,
           });
@@ -1039,11 +1101,8 @@ export async function executeCrawlPipeline(
             buildSourceInventoryObservations(sourcesForProvider, {
               observedAt: finishedAt,
               status: "active",
-              health: "failing",
-              lastFailureReason:
-                reason instanceof Error
-                  ? reason.message
-                  : `Provider ${provider.provider} failed unexpectedly.`,
+              health: timedOut ? "degraded" : "failing",
+              lastFailureReason: errorMessage,
               succeeded: false,
             }),
           );
@@ -1115,7 +1174,16 @@ export async function executeCrawlPipeline(
       cappedSources.forEach((source) => acceptedDiscoveredSourceIds.add(source.id));
 
       const providerSources = selectedProviders.map((provider) =>
-        cappedSources.filter((source) => provider.supportsSource(source)),
+        capSourcesForProviderBudget(
+          provider.provider,
+          cappedSources.filter((source) => provider.supportsSource(source)),
+          {
+            searchId: search._id,
+            crawlRunId: crawlRun._id,
+            maxSourcesPerProvider,
+            diagnostics,
+          },
+        ),
       );
       logIngestionTrace("discovery-result", {
         searchId: search._id,
@@ -1204,12 +1272,20 @@ export async function executeCrawlPipeline(
 
       scheduleProgressUpdate("crawling", new Date().toISOString(), { immediate: true });
 
-      await Promise.all(
-        selectedProviders.map((provider, index) =>
-          runProviderStage(provider, providerSources[index], {
+      const providerPlans = selectedProviders
+        .map((provider, index) => ({
+          provider,
+          sources: providerSources[index] ?? [],
+        }))
+        .filter((plan) => plan.sources.length > 0);
+
+      await runWithConcurrency(
+        providerPlans,
+        async (plan) =>
+          runProviderStage(plan.provider, plan.sources, {
             onFirstVisibleSaved: payload.onFirstVisibleSaved,
           }),
-        ),
+        providerConcurrency,
       );
       await mutationQueue;
     };
@@ -1621,7 +1697,7 @@ export async function executeCrawlPipeline(
 
       return crawlSourceResultSchema.parse({
         ...sourceResult,
-        status: aborted ? "aborted" : "failed",
+        status: isTimeout ? "timed_out" : aborted ? "aborted" : "failed",
         errorMessage: aborted ? message : sourceResult.errorMessage ?? message,
         finishedAt,
       });
@@ -1630,6 +1706,22 @@ export async function executeCrawlPipeline(
     for (const sourceResult of sourceResults) {
       sourceResultsByProvider.set(sourceResult.provider, sourceResult);
       await input.repository.updateCrawlSourceResult(sourceResult);
+      if (sourceResult.status !== "timed_out" && sourceResult.status !== "failed") {
+        continue;
+      }
+
+      await input.repository.recordSourceInventoryObservations(
+        buildSourceInventoryObservations(
+          providerSourcesByProvider.get(sourceResult.provider) ?? [],
+          {
+            observedAt: finishedAt,
+            status: "active",
+            health: sourceResult.status === "timed_out" ? "degraded" : "failing",
+            lastFailureReason: sourceResult.errorMessage ?? message,
+            succeeded: false,
+          },
+        ),
+      );
     }
 
     // Handle timeout gracefully: finalize with partial results as "completed"
@@ -1642,7 +1734,7 @@ export async function executeCrawlPipeline(
         timeoutMs: globalTimeoutMs,
       });
       
-      const timeoutStatus: CrawlRunStatus = savedJobIds.size > 0 ? "completed" : "partial";
+      const timeoutStatus: CrawlRunStatus = savedJobIds.size > 0 ? "partial" : "failed";
       
       await input.repository.finalizeCrawlRun(crawlRun._id, {
         status: timeoutStatus,
@@ -1796,6 +1888,40 @@ function buildSourceInventoryObservations(
     lastFailureReason: input.lastFailureReason,
     succeeded: input.succeeded,
   }));
+}
+
+function capSourcesForProviderBudget(
+  provider: CrawlSourceResult["provider"],
+  sources: DiscoveredSource[],
+  input: {
+    searchId: string;
+    crawlRunId: string;
+    maxSourcesPerProvider: number;
+    diagnostics: CrawlDiagnostics;
+  },
+) {
+  const maxSourcesPerProvider = Math.max(1, Math.floor(input.maxSourcesPerProvider));
+  if (sources.length <= maxSourcesPerProvider) {
+    return sources;
+  }
+
+  const cappedSources = capSourcesWithPlatformDiversity(sources, maxSourcesPerProvider);
+  const truncatedCount = sources.length - cappedSources.length;
+  input.diagnostics.budgetExhausted = true;
+  input.diagnostics.dropReasonCounts.provider_source_budget =
+    (input.diagnostics.dropReasonCounts.provider_source_budget ?? 0) + truncatedCount;
+
+  console.info("[crawl:provider-source-budget]", {
+    searchId: input.searchId,
+    crawlRunId: input.crawlRunId,
+    provider,
+    discoveredSourceCount: sources.length,
+    maxSourcesPerProvider,
+    selectedSourceCount: cappedSources.length,
+    truncatedCount,
+  });
+
+  return cappedSources;
 }
 
 export async function refreshStaleJobs(
@@ -2875,7 +3001,9 @@ function deriveRunStatus(
   sourceResults: CrawlSourceResult[],
   savedJobCount: number,
 ): CrawlRunStatus {
-  const hasFailures = sourceResults.some((result) => result.status === "failed");
+  const hasFailures = sourceResults.some((result) =>
+    result.status === "failed" || result.status === "timed_out",
+  );
   const hasPartials = sourceResults.some((result) => result.status === "partial");
   const hasSupported = sourceResults.some(
     (result) =>
@@ -3156,26 +3284,4 @@ function buildProviderSummary(
     warningCount: sourceResult.warningCount,
     errorMessage: sourceResult.errorMessage,
   }));
-}
-
-function selectProvidersForSearch(
-  providers: CrawlProvider[],
-  selectedPlatforms: CrawlerPlatform[] | undefined,
-) {
-  const allowedPlatforms = new Set(
-    resolveOperationalCrawlerPlatforms(selectedPlatforms),
-  );
-
-  // Provider execution is limited to operational families that survived the
-  // requested platform scope, so limited/future-only providers never reach crawlSources.
-  return providers.filter(
-    (provider) =>
-      isOperationalProvider(provider.provider) && allowedPlatforms.has(provider.provider),
-  );
-}
-
-function isOperationalProvider(
-  provider: CrawlProvider["provider"],
-): provider is ActiveCrawlerPlatform {
-  return activeCrawlerPlatforms.includes(provider as ActiveCrawlerPlatform);
 }

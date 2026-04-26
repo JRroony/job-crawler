@@ -1462,7 +1462,7 @@ describe("pipeline title retrieval", () => {
     expect(
       result.sourceResults.find((sourceResult) => sourceResult.provider === "lever"),
     ).toMatchObject({
-      status: "failed",
+      status: "timed_out",
       errorMessage: expect.stringContaining("crawl budget"),
     });
     expect(result.diagnostics.performance.providerTimingsMs).toEqual(

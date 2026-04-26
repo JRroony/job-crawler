@@ -213,6 +213,10 @@ export function labelForProviderStatus(status: CrawlSourceResult["status"]) {
     return "Degraded";
   }
 
+  if (status === "timed_out") {
+    return "Timed out";
+  }
+
   if (status === "aborted") {
     return "Stopped";
   }
@@ -240,6 +244,13 @@ export function sourceStatusTone(status: CrawlSourceResult["status"]) {
   }
 
   if (status === "partial") {
+    return {
+      badge: "bg-amber-100 text-amber-900 border border-amber-200",
+      card: "border-amber-200 bg-[linear-gradient(180deg,rgba(251,191,36,0.10),rgba(255,255,255,0.95))]",
+    };
+  }
+
+  if (status === "timed_out") {
     return {
       badge: "bg-amber-100 text-amber-900 border border-amber-200",
       card: "border-amber-200 bg-[linear-gradient(180deg,rgba(251,191,36,0.10),rgba(255,255,255,0.95))]",

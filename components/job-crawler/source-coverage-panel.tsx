@@ -25,6 +25,7 @@ export function SourceCoveragePanel(props: SourceCoveragePanelProps) {
       running: 0,
       success: 0,
       partial: 0,
+      timed_out: 0,
       failed: 0,
       aborted: 0,
       unsupported: 0,
@@ -52,6 +53,9 @@ export function SourceCoveragePanel(props: SourceCoveragePanelProps) {
         <StatusSummaryPill label="Running" value={summary.running} tone="running" />
         <StatusSummaryPill label="Healthy" value={summary.success} tone="success" />
         <StatusSummaryPill label="Degraded" value={summary.partial} tone="partial" />
+        {summary.timed_out > 0 ? (
+          <StatusSummaryPill label="Timed out" value={summary.timed_out} tone="partial" />
+        ) : null}
         <StatusSummaryPill label="Failed" value={summary.failed} tone="failed" />
         {summary.aborted > 0 ? (
           <StatusSummaryPill label="Stopped" value={summary.aborted} tone="failed" />
@@ -177,16 +181,20 @@ function statusRank(status: SourceCoveragePanelProps["sourceResults"][number]["s
     return 1;
   }
 
-  if (status === "aborted") {
+  if (status === "timed_out") {
     return 2;
   }
 
-  if (status === "partial") {
+  if (status === "aborted") {
     return 3;
   }
 
-  if (status === "unsupported") {
+  if (status === "partial") {
     return 4;
+  }
+
+  if (status === "unsupported") {
+    return 5;
   }
 
   return 5;

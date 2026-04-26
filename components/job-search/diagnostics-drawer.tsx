@@ -214,6 +214,7 @@ export function DiagnosticsDrawer(props: DiagnosticsDrawerProps) {
                           sourceResult.status === "running" && "bg-tide/10 text-tide",
                           sourceResult.status === "success" && "bg-pine/10 text-pine",
                           sourceResult.status === "partial" && "bg-amber-100 text-amber-900",
+                          sourceResult.status === "timed_out" && "bg-amber-100 text-amber-900",
                           sourceResult.status === "failed" && "bg-red-100 text-red-700",
                           sourceResult.status === "unsupported" && "bg-tide/10 text-tide",
                         )}

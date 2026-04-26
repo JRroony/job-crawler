@@ -11,6 +11,10 @@ import {
   isCompanyPageSource,
 } from "@/lib/server/discovery/types";
 import {
+  createSignalAwareFetch,
+  runProviderSourceWithTimeout,
+} from "@/lib/server/providers/budget";
+import {
   safeFetchJson,
   safeFetchText,
   type SafeFetchResult,
@@ -79,31 +83,48 @@ export function createCompanyPageProvider() {
         async (source) => {
           try {
             await context.throwIfCanceled?.();
-            const config = toCompanyPageSourceConfig(source);
+            return await runProviderSourceWithTimeout({
+              provider: "company_page",
+              sourceId: source.id,
+              timeoutMs: context.sourceTimeoutMs,
+              parentSignal: context.signal,
+              task: async (sourceSignal) => {
+                const config = toCompanyPageSourceConfig(source);
+                const fetchImpl = createSignalAwareFetch(context.fetchImpl, sourceSignal);
+                const throwIfSourceCanceled = async () => {
+                  await context.throwIfCanceled?.();
+                  if (sourceSignal?.aborted) {
+                    throw sourceSignal.reason instanceof Error
+                      ? sourceSignal.reason
+                      : new Error("Company page source was aborted.");
+                  }
+                };
 
-            if (config.type === "json_feed") {
-              await context.throwIfCanceled?.();
-              const jobs = await crawlJsonFeed(
-                config,
-                context.fetchImpl,
-                context.now.toISOString(),
-              );
-              return {
-                fetchedCount: jobs.length,
-                jobs,
-              };
-            }
+                if (config.type === "json_feed") {
+                  await throwIfSourceCanceled();
+                  const jobs = await crawlJsonFeed(
+                    config,
+                    fetchImpl,
+                    context.now.toISOString(),
+                  );
+                  return {
+                    fetchedCount: jobs.length,
+                    jobs,
+                  };
+                }
 
-            await context.throwIfCanceled?.();
-            const jobs = await crawlHtmlPage(
-              config,
-              context.fetchImpl,
-              context.now.toISOString(),
-            );
-            return {
-              fetchedCount: jobs.length,
-              jobs,
-            };
+                await throwIfSourceCanceled();
+                const jobs = await crawlHtmlPage(
+                  config,
+                  fetchImpl,
+                  context.now.toISOString(),
+                );
+                return {
+                  fetchedCount: jobs.length,
+                  jobs,
+                };
+              },
+            });
           } catch (error) {
             warnings.push(
               error instanceof Error

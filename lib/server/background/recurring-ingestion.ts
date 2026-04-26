@@ -7,11 +7,12 @@ import {
 } from "@/lib/server/background/constants";
 import { queueSearchRun } from "@/lib/server/crawler/background-runs";
 import { CrawlAbortedError, seedToPersistableJob } from "@/lib/server/crawler/pipeline";
-import { createId } from "@/lib/server/crawler/helpers";
+import { createId, runWithConcurrency } from "@/lib/server/crawler/helpers";
 import {
   toDiscoveredSourceFromInventory,
   type SourceInventoryRecord,
 } from "@/lib/server/discovery/inventory";
+import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import { getEnv } from "@/lib/server/env";
 import {
   planPersistentInventoryRecurringCrawl,
@@ -21,6 +22,7 @@ import {
 } from "@/lib/server/inventory/service";
 import { resolveObservedSourceNextEligibleAt } from "@/lib/server/inventory/selection";
 import { createDefaultProviders } from "@/lib/server/providers";
+import { selectProvidersForTieredCrawl } from "@/lib/server/providers/tiers";
 import type { CrawlProvider, NormalizedJobSeed } from "@/lib/server/providers/types";
 import type {
   JobCrawlerRepository,
@@ -45,9 +47,12 @@ type BackgroundIngestionRuntime = {
   staleAfterMs?: number;
   runTimeoutMs?: number;
   maxSources?: number;
+  maxSourcesPerProvider?: number;
   maxProfiles?: number;
   initialDelayMs?: number;
   providerTimeoutMs?: number;
+  sourceTimeoutMs?: number;
+  providerConcurrency?: number;
   schedulingIntervalMs?: number;
   refreshInventory?: (runtime: {
     repository: JobCrawlerRepository;
@@ -171,8 +176,14 @@ export function startRecurringBackgroundIngestionScheduler(
         ...runtime,
         maxProfiles: runtime.maxProfiles ?? env.BACKGROUND_INGESTION_PROFILES_PER_CYCLE,
         maxSources: runtime.maxSources ?? env.BACKGROUND_INGESTION_MAX_SOURCES_PER_CYCLE,
+        maxSourcesPerProvider:
+          runtime.maxSourcesPerProvider ?? env.BACKGROUND_INGESTION_MAX_SOURCES_PER_PROVIDER,
         providerTimeoutMs:
           runtime.providerTimeoutMs ?? env.BACKGROUND_INGESTION_PROVIDER_TIMEOUT_MS,
+        sourceTimeoutMs:
+          runtime.sourceTimeoutMs ?? env.BACKGROUND_INGESTION_SOURCE_TIMEOUT_MS,
+        providerConcurrency:
+          runtime.providerConcurrency ?? env.BACKGROUND_INGESTION_PROVIDER_CONCURRENCY,
         schedulingIntervalMs: runtime.schedulingIntervalMs ?? intervalMs,
       }).catch((error) => {
         console.error("[background-ingestion:scheduler]", {
@@ -272,6 +283,20 @@ export async function triggerRecurringBackgroundIngestion(
     1,
     Math.floor(runtime.providerTimeoutMs ?? env.BACKGROUND_INGESTION_PROVIDER_TIMEOUT_MS),
   );
+  const sourceTimeoutMs = Math.max(
+    1,
+    Math.floor(runtime.sourceTimeoutMs ?? env.BACKGROUND_INGESTION_SOURCE_TIMEOUT_MS),
+  );
+  const maxSourcesPerProvider = Math.max(
+    1,
+    Math.floor(
+      runtime.maxSourcesPerProvider ?? env.BACKGROUND_INGESTION_MAX_SOURCES_PER_PROVIDER,
+    ),
+  );
+  const providerConcurrency = Math.max(
+    1,
+    Math.floor(runtime.providerConcurrency ?? env.BACKGROUND_INGESTION_PROVIDER_CONCURRENCY),
+  );
   const runTimeoutMs = Math.max(
     1,
     Math.floor(runtime.runTimeoutMs ?? env.BACKGROUND_INGESTION_RUN_TIMEOUT_MS),
@@ -285,6 +310,9 @@ export async function triggerRecurringBackgroundIngestion(
     sourceBudgetPerProfile,
     schedulingIntervalMs,
     providerTimeoutMs,
+    sourceTimeoutMs,
+    maxSourcesPerProvider,
+    providerConcurrency,
     runTimeoutMs,
   });
 
@@ -304,7 +332,10 @@ export async function triggerRecurringBackgroundIngestion(
       ),
       runTimeoutMs,
       maxSources: sourceBudgetPerProfile,
+      maxSourcesPerProvider,
       providerTimeoutMs,
+      sourceTimeoutMs,
+      providerConcurrency,
       cycleDiagnostics: {
         selectedProfiles: systemProfiles.length,
         selectedProfileIds: systemProfiles.map((profile) => profile.id),
@@ -315,6 +346,9 @@ export async function triggerRecurringBackgroundIngestion(
         sourceBudgetPerProfile,
         schedulingIntervalMs,
         providerTimeoutMs,
+        sourceTimeoutMs,
+        maxSourcesPerProvider,
+        providerConcurrency,
         runTimeoutMs,
       },
     });
@@ -381,7 +415,10 @@ async function startRecurringBackgroundProfileIngestion(input: {
   staleAfterMs: number;
   runTimeoutMs: number;
   maxSources: number;
+  maxSourcesPerProvider: number;
   providerTimeoutMs: number;
+  sourceTimeoutMs: number;
+  providerConcurrency: number;
   cycleDiagnostics: NonNullable<CrawlDiagnostics["backgroundCycle"]>;
 }): Promise<
   | { status: "started"; searchId: string; crawlRunId: string; systemProfileId: string }
@@ -396,7 +433,10 @@ async function startRecurringBackgroundProfileIngestion(input: {
     staleAfterMs,
     runTimeoutMs,
     maxSources,
+    maxSourcesPerProvider,
     providerTimeoutMs,
+    sourceTimeoutMs,
+    providerConcurrency,
     cycleDiagnostics,
   } = input;
   const search = await ensureBackgroundSearch(repository, now, systemProfile);
@@ -462,7 +502,10 @@ async function startRecurringBackgroundProfileIngestion(input: {
           signal,
           runTimeoutMs,
           maxSources,
+          maxSourcesPerProvider,
           providerTimeoutMs,
+          sourceTimeoutMs,
+          providerConcurrency,
           schedulingIntervalMs,
           cycleDiagnostics: {
             ...cycleDiagnostics,
@@ -561,7 +604,10 @@ async function executeRecurringInventoryIngestion(
     signal?: AbortSignal;
     runTimeoutMs: number;
     maxSources: number;
+    maxSourcesPerProvider: number;
     providerTimeoutMs: number;
+    sourceTimeoutMs: number;
+    providerConcurrency: number;
     schedulingIntervalMs: number;
     cycleDiagnostics?: NonNullable<CrawlDiagnostics["backgroundCycle"]>;
     refreshInventory?: (runtime: {
@@ -580,7 +626,13 @@ async function executeRecurringInventoryIngestion(
   },
 ) {
   const repository = runtime.repository;
-  const providers = runtime.providers ?? createDefaultProviders();
+  const providerSelection = selectProvidersForTieredCrawl({
+    providers: runtime.providers ?? createDefaultProviders(),
+    selectedPlatforms: target.systemProfile.filters.platforms,
+    crawlMode: "deep",
+    includeSlowProviders: true,
+  });
+  const providers = providerSelection.selectedProviders;
   const diagnostics = createEmptyDiagnostics();
   const sourceResults: CrawlSourceResult[] = [];
   const providerTimings: CrawlDiagnostics["performance"]["providerTimingsMs"] = [];
@@ -613,6 +665,27 @@ async function executeRecurringInventoryIngestion(
   >();
   const backgroundPersistenceFailures: string[] = [];
   const runTimestamp = () => new Date(startedAtMs + Math.max(0, Date.now() - startMs)).toISOString();
+  console.info("[provider-tiering:selection]", {
+    searchId: target.search._id,
+    crawlRunId: target.crawlRunId,
+    crawlMode: "deep",
+    selectedFastProviders: providerSelection.selectedFastProviders,
+    selectedSlowProviders: providerSelection.selectedSlowProviders,
+    skippedSlowProviders: providerSelection.skippedSlowProviders,
+    reason: providerSelection.reason,
+  });
+  console.info("[crawl:timeout-policy]", {
+    searchId: target.search._id,
+    crawlRunId: target.crawlRunId,
+    crawlMode: "deep",
+    globalTimeoutMs: runtime.runTimeoutMs,
+    providerTimeoutMs: runtime.providerTimeoutMs,
+    sourceTimeoutMs: runtime.sourceTimeoutMs,
+    maxSourcesPerProvider: runtime.maxSourcesPerProvider,
+    providerConcurrency: runtime.providerConcurrency,
+    isBackgroundRun: true,
+    isRequestTimeRun: false,
+  });
 
   try {
     diagnostics.backgroundCycle = runtime.cycleDiagnostics;
@@ -780,12 +853,23 @@ async function executeRecurringInventoryIngestion(
       runTimestamp(),
     );
 
-    for (const provider of providers) {
+    await runWithConcurrency(
+      providers,
+      async (provider) => {
       await runController.throwIfCanceled();
 
-      const providerSources = inventorySources.filter((source) => provider.supportsSource(source));
+      const providerSources = capBackgroundProviderSources(
+        provider.provider,
+        inventorySources.filter((source) => provider.supportsSource(source)),
+        {
+          searchId: target.search._id,
+          crawlRunId: target.crawlRunId,
+          maxSourcesPerProvider: runtime.maxSourcesPerProvider,
+          diagnostics,
+        },
+      );
       if (providerSources.length === 0) {
-        continue;
+        return;
       }
 
       diagnostics.providersEnqueued += 1;
@@ -801,6 +885,7 @@ async function executeRecurringInventoryIngestion(
             now: runtime.now,
             filters: target.systemProfile.filters,
             signal: runController.signal,
+            sourceTimeoutMs: runtime.sourceTimeoutMs,
             throwIfCanceled: () => runController.throwIfCanceled(),
           },
           providerSources,
@@ -924,6 +1009,15 @@ async function executeRecurringInventoryIngestion(
           warningCount: result.warningCount ?? 0,
           errorMessage: result.errorMessage,
         });
+        console.info("[crawl:persistence-confirmed]", {
+          searchId: target.search._id,
+          crawlRunId: target.crawlRunId,
+          provider: provider.provider,
+          insertedCount: persistence.insertedCount,
+          updatedCount: persistence.updatedCount,
+          linkedToRunCount: persistence.linkedToRunCount,
+          indexedEventCount: persistence.indexedEventCount,
+        });
         await repository.recordSourceInventoryObservations(
           providerSources.map((source) => ({
             sourceId: source.id,
@@ -962,25 +1056,39 @@ async function executeRecurringInventoryIngestion(
           timedOut: false,
         });
       } catch (error) {
-        const abortLike = error instanceof Error && error.name === "AbortError";
-        const providerTimedOut =
-          error instanceof Error && error.name === "ProviderTimeoutError";
+        const providerTimedOut = isBackgroundProviderTimeout(error);
+        const abortLike =
+          error instanceof Error && error.name === "AbortError" && !providerTimedOut;
         if (!abortLike) {
           diagnostics.providerFailures += 1;
         }
 
         const finishedAt = runTimestamp();
+        const providerTotals = providerThroughputTotals.get(provider.provider);
+        const errorMessage =
+          error instanceof Error ? error.message : "Provider crawl failed unexpectedly.";
+        if (providerTimedOut) {
+          console.warn("[crawl:provider-timeout]", {
+            searchId: target.search._id,
+            crawlRunId: target.crawlRunId,
+            provider: provider.provider,
+            sourceCount: providerSources.length,
+            timeoutMs: runtime.providerTimeoutMs,
+            fetchedCountBeforeTimeout: providerTotals?.fetchedCount ?? 0,
+            jobsPersistedBeforeTimeout: providerTotals?.linkedToRunCount ?? 0,
+          });
+        }
         const sourceResult = createSourceResult({
           crawlRunId: target.crawlRunId,
           searchId: target.search._id,
           provider: provider.provider,
-          status: abortLike ? "aborted" : "failed",
+          status: providerTimedOut ? "timed_out" : abortLike ? "aborted" : "failed",
           sourceCount: providerSources.length,
           fetchedCount: 0,
           matchedCount: 0,
           savedCount: 0,
-          warningCount: 0,
-          errorMessage: error instanceof Error ? error.message : "Provider crawl failed unexpectedly.",
+          warningCount: 1,
+          errorMessage,
           startedAt: providerStartedAt,
           finishedAt,
         });
@@ -991,14 +1099,13 @@ async function executeRecurringInventoryIngestion(
             sourceId: source.id,
             observedAt: finishedAt,
             succeeded: false,
-            health: "failing",
-            lastFailureReason:
-              error instanceof Error ? error.message : "Provider crawl failed unexpectedly.",
+            health: providerTimedOut ? "degraded" : "failing",
+            lastFailureReason: errorMessage,
             nextEligibleAt: resolveObservedSourceNextEligibleAt({
               record: selectedRecordById.get(source.id) ?? inventory.find((record) => record._id === source.id)!,
               observedAt: finishedAt,
               intervalMs: runtime.schedulingIntervalMs,
-              health: "failing",
+              health: providerTimedOut ? "degraded" : "failing",
               consecutiveFailures: (selectedRecordById.get(source.id)?.consecutiveFailures ?? 0) + 1,
               succeeded: false,
             }),
@@ -1025,7 +1132,9 @@ async function executeRecurringInventoryIngestion(
           throw error;
         }
       }
-    }
+      },
+      runtime.providerConcurrency,
+    );
 
     diagnostics.performance.stageTimingsMs.providerExecution = Math.max(
       0,
@@ -1645,9 +1754,22 @@ async function crawlProviderSourcesWithTimeout(
       provider.crawlSources(timedContext, sources),
       timeoutPromise,
     ]);
+  } catch (error) {
+    if (timeoutController.signal.aborted && !context.signal?.aborted) {
+      throw timeoutController.signal.reason ?? timeoutError;
+    }
+
+    throw error;
   } finally {
     clearTimeout(timeoutHandle);
   }
+}
+
+function isBackgroundProviderTimeout(error: unknown) {
+  return (
+    error instanceof Error &&
+    (error.name === "ProviderTimeoutError" || error.message.includes("crawl budget"))
+  );
 }
 
 function createSourceResult(input: Omit<CrawlSourceResult, "_id">): CrawlSourceResult {
@@ -1661,6 +1783,40 @@ function resolveBackgroundRunOwnerKey(systemProfileId: string, selectedProfiles:
   return selectedProfiles > 1
     ? `${backgroundIngestionOwnerKey}:${systemProfileId}`
     : backgroundIngestionOwnerKey;
+}
+
+function capBackgroundProviderSources(
+  provider: CrawlSourceResult["provider"],
+  sources: DiscoveredSource[],
+  input: {
+    searchId: string;
+    crawlRunId: string;
+    maxSourcesPerProvider: number;
+    diagnostics: CrawlDiagnostics;
+  },
+) {
+  const maxSourcesPerProvider = Math.max(1, Math.floor(input.maxSourcesPerProvider));
+  if (sources.length <= maxSourcesPerProvider) {
+    return sources;
+  }
+
+  const selected = sources.slice(0, maxSourcesPerProvider);
+  const truncatedCount = sources.length - selected.length;
+  input.diagnostics.budgetExhausted = true;
+  input.diagnostics.dropReasonCounts.provider_source_budget =
+    (input.diagnostics.dropReasonCounts.provider_source_budget ?? 0) + truncatedCount;
+
+  console.info("[crawl:provider-source-budget]", {
+    searchId: input.searchId,
+    crawlRunId: input.crawlRunId,
+    provider,
+    discoveredSourceCount: sources.length,
+    maxSourcesPerProvider,
+    selectedSourceCount: selected.length,
+    truncatedCount,
+  });
+
+  return selected;
 }
 
 function createEmptyDiagnostics(): CrawlDiagnostics {
@@ -1740,7 +1896,9 @@ function createEmptyDiagnostics(): CrawlDiagnostics {
 }
 
 function resolveFinalStatus(sourceResults: CrawlSourceResult[], totalSavedJobs: number): CrawlRunStatus {
-  const failedCount = sourceResults.filter((result) => result.status === "failed").length;
+  const failedCount = sourceResults.filter((result) =>
+    result.status === "failed" || result.status === "timed_out",
+  ).length;
   const abortedCount = sourceResults.filter((result) => result.status === "aborted").length;
 
   if (abortedCount > 0) {

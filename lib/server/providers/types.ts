@@ -61,6 +61,7 @@ export type ProviderExecutionContext = {
   now: Date;
   filters: SearchFilters;
   signal?: AbortSignal;
+  sourceTimeoutMs?: number;
   throwIfCanceled?: () => Promise<void>;
   onBatch?: (batch: ProviderBatchProgress) => Promise<void> | void;
 };

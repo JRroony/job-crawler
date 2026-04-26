@@ -1375,6 +1375,14 @@ export class JobCrawlerRepository {
       });
       const { _id, ...updateFields } = merged;
       await this.sourceInventory().updateOne({ _id }, { $set: updateFields });
+      console.info("[inventory:observation]", {
+        sourceId: observation.sourceId,
+        provider: merged.platform,
+        status: merged.status,
+        health: merged.health,
+        lastFailureReason: merged.lastFailureReason,
+        nextEligibleAt: merged.nextEligibleAt,
+      });
     }
 
     return this.listSourceInventory();

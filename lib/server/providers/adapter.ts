@@ -3,6 +3,11 @@ import "server-only";
 import { runWithConcurrency } from "@/lib/server/crawler/helpers";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import {
+  createSignalAwareFetch,
+  isProviderSourceTimeoutError,
+  runProviderSourceWithTimeout,
+} from "@/lib/server/providers/budget";
+import {
   finalizeProviderResult,
   normalizeProviderJobSeed,
   unsupportedProviderResult,
@@ -71,24 +76,60 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
         adapterSources,
         async (source) => {
           await context.throwIfCanceled?.();
-          const run = await definition.crawlSource(
-            {
-              ...context,
-              onBatch: context.onBatch
-                ? (batch) =>
-                    context.onBatch?.({
-                      ...batch,
-                      jobs: batch.jobs.map(normalizeProviderJobSeed),
-                    })
-                : undefined,
-            },
-            source,
-          );
+          try {
+            const run = await runProviderSourceWithTimeout({
+              provider: definition.provider,
+              sourceId: source.id,
+              timeoutMs: context.sourceTimeoutMs,
+              parentSignal: context.signal,
+              task: async (sourceSignal) => {
+                const run = await definition.crawlSource(
+                  {
+                    ...context,
+                    fetchImpl: createSignalAwareFetch(context.fetchImpl, sourceSignal),
+                    signal: sourceSignal ?? context.signal,
+                    throwIfCanceled: async () => {
+                      await context.throwIfCanceled?.();
+                      if (sourceSignal?.aborted) {
+                        throw sourceSignal.reason instanceof Error
+                          ? sourceSignal.reason
+                          : new Error("Provider source was aborted.");
+                      }
+                    },
+                    onBatch: context.onBatch
+                      ? (batch) =>
+                          context.onBatch?.({
+                            ...batch,
+                            jobs: batch.jobs.map(normalizeProviderJobSeed),
+                          })
+                      : undefined,
+                  },
+                  source,
+                );
 
-          return {
-            ...run,
-            jobs: run.jobs.map(normalizeProviderJobSeed),
-          };
+                return run;
+              },
+            });
+
+            return {
+              ...run,
+              jobs: run.jobs.map(normalizeProviderJobSeed),
+            };
+          } catch (error) {
+            if (!isProviderSourceTimeoutError(error)) {
+              throw error;
+            }
+
+            return {
+              fetchedCount: 0,
+              fetchCount: 0,
+              jobs: [],
+              warnings: [error.message],
+              parseSuccessCount: 0,
+              parseFailureCount: 1,
+              dropReasons: ["source_timeout"],
+            };
+          }
         },
         concurrency,
       );

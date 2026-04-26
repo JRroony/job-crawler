@@ -349,6 +349,7 @@ export const crawlSourceStatuses = [
   "running",
   "success",
   "partial",
+  "timed_out",
   "failed",
   "aborted",
   "unsupported",
@@ -454,6 +455,9 @@ export const crawlDiagnosticsSchema = z.object({
       sourceBudgetPerProfile: z.number().int().nonnegative().default(0),
       schedulingIntervalMs: z.number().int().nonnegative().default(0),
       providerTimeoutMs: z.number().int().nonnegative().default(0),
+      sourceTimeoutMs: z.number().int().nonnegative().default(0),
+      maxSourcesPerProvider: z.number().int().nonnegative().default(0),
+      providerConcurrency: z.number().int().nonnegative().default(0),
       runTimeoutMs: z.number().int().nonnegative().default(0),
     })
     .optional(),
