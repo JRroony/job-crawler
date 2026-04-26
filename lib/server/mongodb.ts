@@ -2,13 +2,16 @@ import "server-only";
 
 import type { Db, MongoClient } from "mongodb";
 
-import { ensureDatabaseIndexes } from "@/lib/server/db/indexes";
 import { getEnv } from "@/lib/server/env";
 
 declare global {
   // eslint-disable-next-line no-var
   var __jobCrawlerMongoClientPromise: Promise<MongoClient> | undefined;
 }
+
+type MongoDbOptions = {
+  ensureIndexes?: boolean;
+};
 
 function databaseNameFromUri(uri: string) {
   try {
@@ -23,14 +26,21 @@ function databaseNameFromUri(uri: string) {
 const env = getEnv();
 let mongoUnavailableUntil = 0;
 
-export async function getMongoDb(): Promise<Db> {
+export async function getMongoDb(options: MongoDbOptions = {}): Promise<Db> {
   if (mongoUnavailableUntil > Date.now()) {
     throw new Error("MongoDB connection is in cooldown after a recent failure.");
   }
 
   const client = await getMongoClient();
   const db = client.db(databaseNameFromUri(env.MONGODB_URI));
+  const shouldEnsureIndexes = options.ensureIndexes ?? true;
+
+  if (!shouldEnsureIndexes) {
+    return db;
+  }
+
   try {
+    const { ensureDatabaseIndexes } = await import("@/lib/server/db/indexes");
     await ensureDatabaseIndexes(db);
   } catch (error) {
     throw new Error(

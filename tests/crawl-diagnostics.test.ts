@@ -494,6 +494,26 @@ describe("crawl diagnostics", () => {
         providerTimeoutMs: expect.any(Number),
         globalTimeoutMs: expect.any(Number),
       });
+      const proofCallIndex = infoSpy.mock.calls.findIndex(
+        ([actualLabel]) => actualLabel === "[ingestion:pipeline-start]",
+      );
+      const traceCallIndex = infoSpy.mock.calls.findIndex(
+        ([actualLabel]) => actualLabel === "[ingestion:trace:pipeline-start]",
+      );
+      const proofPayload = infoSpy.mock.calls[proofCallIndex]?.[1] as
+        | Record<string, unknown>
+        | undefined;
+
+      expect(proofCallIndex).toBeGreaterThanOrEqual(0);
+      expect(proofCallIndex).toBeLessThan(traceCallIndex);
+      expect(() => JSON.stringify(proofPayload)).not.toThrow();
+      expect(proofPayload).toMatchObject({
+        searchId: result.search._id,
+        searchSessionId: result.searchSession?._id,
+        crawlRunId: result.crawlRun._id,
+        title: "Software Engineer",
+        country: "United States",
+      });
       expect(tracePayload("[ingestion:trace:discovery-result]")).toMatchObject({
         discoveredSources: 1,
         publicSources: 0,

@@ -200,6 +200,25 @@ async function waitForQueueToSettle(repository: JobCrawlerRepository, searchId: 
   throw new Error(`Search queue did not settle for ${searchId}.`);
 }
 
+const expectedIngestionDecisionLogKeys = [
+  "searchId",
+  "searchSessionId",
+  "crawlRunId",
+  "title",
+  "country",
+  "indexedCandidateCount",
+  "indexedMatchedCount",
+  "minimumIndexedCoverage",
+  "targetJobCount",
+  "triggerReason",
+  "shouldQueue",
+  "requestBackgroundIngestion",
+  "backgroundIngestionStatus",
+  "allowRequestTimeSupplementalCrawl",
+  "allowRequestTimeFreshnessRecovery",
+  "latestIndexedJobAgeMs",
+];
+
 describe("jobs-first indexed search", () => {
   it("emits structured search trace logs and attaches the trace to response diagnostics", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
@@ -298,22 +317,30 @@ describe("jobs-first indexed search", () => {
         searchSessionId: result.searchSession?._id,
       });
       const ingestionDecisionCall = infoSpy.mock.calls.find(
-        ([actualLabel]) => actualLabel === "[ingestion:trace:decision]",
+        ([actualLabel]) => actualLabel === "[ingestion:decision]",
       ) as [string, Record<string, unknown>] | undefined;
       expect(ingestionDecisionCall).toBeDefined();
       expect(() => JSON.stringify(ingestionDecisionCall?.[1])).not.toThrow();
+      expect(Object.keys(ingestionDecisionCall?.[1] ?? {})).toEqual(
+        expectedIngestionDecisionLogKeys,
+      );
       expect(ingestionDecisionCall?.[1]).toMatchObject({
         searchId: result.search._id,
         searchSessionId: result.searchSession?._id,
         crawlRunId: result.crawlRun._id,
+        title: "Software Engineer",
+        country: "United States",
         indexedCandidateCount: 5,
         indexedMatchedCount: 5,
         minimumIndexedCoverage: 5,
+        targetJobCount: 30,
         triggerReason: "indexed_coverage_sufficient",
         shouldQueue: false,
         requestBackgroundIngestion: false,
         backgroundIngestionStatus: "not_requested",
-        crawlMode: "balanced",
+        allowRequestTimeSupplementalCrawl: false,
+        allowRequestTimeFreshnessRecovery: false,
+        latestIndexedJobAgeMs: expect.any(Number),
       });
       expect(result.diagnostics.searchTrace).toMatchObject({
         traceId,
@@ -376,7 +403,7 @@ describe("jobs-first indexed search", () => {
       await waitForQueueToSettle(repository, searchId);
 
       const decisionCall = infoSpy.mock.calls.find(
-        ([actualLabel]) => actualLabel === "[ingestion:trace:decision]",
+        ([actualLabel]) => actualLabel === "[ingestion:decision]",
       ) as [string, Record<string, unknown>] | undefined;
       const queueCall = infoSpy.mock.calls.find(
         ([actualLabel]) => actualLabel === "[ingestion:trace:queue-request]",
@@ -386,18 +413,26 @@ describe("jobs-first indexed search", () => {
       expect(queueCall).toBeDefined();
       expect(() => JSON.stringify(decisionCall?.[1])).not.toThrow();
       expect(() => JSON.stringify(queueCall?.[1])).not.toThrow();
+      expect(Object.keys(decisionCall?.[1] ?? {})).toEqual(
+        expectedIngestionDecisionLogKeys,
+      );
       expect(decisionCall?.[1]).toMatchObject({
         searchId,
         searchSessionId: started.result.searchSession?._id,
         crawlRunId: started.result.crawlRun._id,
+        title: "Software Engineer",
+        country: "United States",
         indexedCandidateCount: 0,
         indexedMatchedCount: 0,
         minimumIndexedCoverage: 5,
+        targetJobCount: 30,
         triggerReason: "explicit_request_time_recovery",
         shouldQueue: true,
         requestBackgroundIngestion: false,
         backgroundIngestionStatus: "not_requested",
-        crawlMode: "balanced",
+        allowRequestTimeSupplementalCrawl: true,
+        allowRequestTimeFreshnessRecovery: true,
+        latestIndexedJobAgeMs: null,
       });
       expect(queueCall?.[1]).toMatchObject({
         searchId,
@@ -822,7 +857,7 @@ describe("jobs-first indexed search", () => {
     } finally {
       infoSpy.mockRestore();
     }
-  });
+  }, 10_000);
 
   it("does not fall back to a full listJobs scan when priming indexed search results", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());

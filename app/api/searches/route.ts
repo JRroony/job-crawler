@@ -1,11 +1,6 @@
 import { NextResponse } from "next/server";
 
 import { sanitizeSearchFiltersInput } from "@/lib/types";
-import {
-  isInputValidationError,
-  listRecentSearches,
-  startSearchFromFilters,
-} from "@/lib/server/search/service";
 
 const searchRequestLogPrefix = "[searches:request]";
 const searchValidationLogPrefix = "[searches:validation]";
@@ -18,7 +13,8 @@ type FlattenedValidationErrors = {
 
 export async function GET() {
   try {
-    const searches = await listRecentSearches();
+    const { listRecentSearchesForApi } = await import("@/lib/server/search/recent-searches");
+    const searches = await listRecentSearchesForApi();
     return NextResponse.json({ searches });
   } catch (error) {
     return NextResponse.json(
@@ -31,12 +27,17 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  let isInputValidationError: ((error: unknown) => boolean) | undefined;
+
   try {
     const payload = sanitizeSearchFiltersInput(await request.json());
     const requestOwnerKey = request.headers.get("x-job-crawler-client-id")?.trim() || undefined;
     console.info(`${searchRequestLogPrefix} payload:`, payload);
 
-    const { result, queued } = await startSearchFromFilters(payload, {
+    const searchService = await import("@/lib/server/search/service");
+    isInputValidationError = searchService.isInputValidationError;
+
+    const { result, queued } = await searchService.startSearchFromFilters(payload, {
       requestOwnerKey,
       signal: request.signal,
     });
@@ -48,8 +49,8 @@ export async function POST(request: Request) {
       { status: 201 },
     );
   } catch (error) {
-    if (isInputValidationError(error)) {
-      const details = error.flatten();
+    if (isInputValidationError?.(error)) {
+      const details = (error as { flatten(): FlattenedValidationErrors }).flatten();
       const readableErrors = buildReadableErrors(details);
 
       console.error(searchValidationLogPrefix, details);

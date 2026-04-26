@@ -211,6 +211,13 @@ async function createPersistentCancellationController(input: {
 export async function executeCrawlPipeline(
   input: ExecuteCrawlPipelineInput,
 ): Promise<CrawlResponse> {
+  console.info("[ingestion:pipeline-start]", {
+    searchId: input.search._id,
+    searchSessionId: input.searchSession._id,
+    crawlRunId: input.crawlRun?._id ?? null,
+    title: input.search.filters.title,
+    country: input.search.filters.country ?? null,
+  });
   throwIfAborted(input.signal);
   const crawlStartedMs = Date.now();
   const normalizedFilters = searchFiltersSchema.parse(input.search.filters);

@@ -6,6 +6,7 @@ const {
   getSearchJobDeltasMock,
   isInputValidationErrorMock,
   listRecentSearchesMock,
+  listRecentSearchesForApiMock,
   resourceNotFoundErrorClass,
   startSearchFromFiltersMock,
   startSearchRerunMock,
@@ -15,9 +16,14 @@ const {
   getSearchJobDeltasMock: vi.fn(),
   isInputValidationErrorMock: vi.fn(() => false),
   listRecentSearchesMock: vi.fn(),
+  listRecentSearchesForApiMock: vi.fn(),
   resourceNotFoundErrorClass: class ResourceNotFoundError extends Error {},
   startSearchFromFiltersMock: vi.fn(),
   startSearchRerunMock: vi.fn(),
+}));
+
+vi.mock("@/lib/server/search/recent-searches", () => ({
+  listRecentSearchesForApi: listRecentSearchesForApiMock,
 }));
 
 vi.mock("@/lib/server/search/service", () => ({
@@ -49,8 +55,8 @@ vi.mock("@/lib/server/search/errors", () => ({
   ResourceNotFoundError: resourceNotFoundErrorClass,
 }));
 
-import { DELETE, GET } from "@/app/api/searches/[id]/route";
-import { POST } from "@/app/api/searches/route";
+import { DELETE, GET as GET_SEARCH } from "@/app/api/searches/[id]/route";
+import { GET as LIST_SEARCHES, POST } from "@/app/api/searches/route";
 
 describe("search API normalization", () => {
   beforeEach(() => {
@@ -59,8 +65,31 @@ describe("search API normalization", () => {
     getSearchJobDeltasMock.mockReset();
     isInputValidationErrorMock.mockReturnValue(false);
     listRecentSearchesMock.mockReset();
+    listRecentSearchesForApiMock.mockReset();
     startSearchFromFiltersMock.mockReset();
     startSearchRerunMock.mockReset();
+  });
+
+  it("loads recent searches from the lightweight recent-search service", async () => {
+    listRecentSearchesForApiMock.mockResolvedValue([
+      {
+        _id: "search-1",
+        filters: {
+          title: "Software Engineer",
+          country: "United States",
+        },
+        createdAt: "2026-04-15T12:00:00.000Z",
+        updatedAt: "2026-04-15T12:00:00.000Z",
+      },
+    ]);
+
+    const response = await LIST_SEARCHES();
+    const payload = (await response.json()) as { searches?: unknown[] };
+
+    expect(response.status).toBe(200);
+    expect(payload.searches).toHaveLength(1);
+    expect(listRecentSearchesForApiMock).toHaveBeenCalledTimes(1);
+    expect(listRecentSearchesMock).not.toHaveBeenCalled();
   });
 
   it("strips null optional filters and legacy experienceClassification before starting the crawl", async () => {
@@ -145,9 +174,12 @@ describe("search API normalization", () => {
       },
     });
 
-    const response = await GET(new Request("http://localhost/api/searches/search-1?mode=delta&after=3&indexedAfter=9"), {
-      params: Promise.resolve({ id: "search-1" }),
-    });
+    const response = await GET_SEARCH(
+      new Request("http://localhost/api/searches/search-1?mode=delta&after=3&indexedAfter=9"),
+      {
+        params: Promise.resolve({ id: "search-1" }),
+      },
+    );
 
     expect(response.status).toBe(200);
     expect(getSearchJobDeltasMock).toHaveBeenCalledWith("search-1", 3, {
@@ -173,7 +205,7 @@ describe("search API normalization", () => {
       diagnostics: {},
     });
 
-    const response = await GET(
+    const response = await GET_SEARCH(
       new Request(
         "http://localhost/api/searches/search-1?cursor=50&pageSize=50&searchSessionId=session-1",
       ),

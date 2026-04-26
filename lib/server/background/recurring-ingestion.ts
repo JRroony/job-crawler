@@ -46,6 +46,7 @@ type BackgroundIngestionRuntime = {
   runTimeoutMs?: number;
   maxSources?: number;
   maxProfiles?: number;
+  initialDelayMs?: number;
   providerTimeoutMs?: number;
   schedulingIntervalMs?: number;
   refreshInventory?: (runtime: {
@@ -103,6 +104,7 @@ type BackgroundIngestionSkippedRun = {
 type BackgroundSchedulerState = {
   startedAt: string;
   intervalMs: number;
+  initialDelayMs: number;
   timer: ReturnType<typeof setTimeout> | null;
 };
 
@@ -144,6 +146,7 @@ export function startRecurringBackgroundIngestionScheduler(
       started: true,
       reason: "already-started" as const,
       intervalMs: existing.intervalMs,
+      initialDelayMs: existing.initialDelayMs,
     };
     logBackgroundSchedulerStart(result);
     return result;
@@ -153,9 +156,11 @@ export function startRecurringBackgroundIngestionScheduler(
     1,
     Math.floor(runtime.intervalMs ?? env.BACKGROUND_INGESTION_INTERVAL_MS),
   );
+  const initialDelayMs = Math.max(0, Math.floor(runtime.initialDelayMs ?? 0));
   const state: BackgroundSchedulerState = {
     startedAt: new Date().toISOString(),
     intervalMs,
+    initialDelayMs,
     timer: null,
   };
 
@@ -182,12 +187,13 @@ export function startRecurringBackgroundIngestionScheduler(
   };
 
   globalThis.__jobCrawlerBackgroundSchedulerState = state;
-  scheduleNext(0);
+  scheduleNext(initialDelayMs);
 
   const result = {
     started: true,
     reason: "started" as const,
     intervalMs,
+    initialDelayMs,
   };
   logBackgroundSchedulerStart(result);
   return result;
@@ -496,11 +502,13 @@ function logBackgroundSchedulerStart(result: {
   started: boolean;
   reason: "disabled" | "already-started" | "started";
   intervalMs?: number;
+  initialDelayMs?: number;
 }) {
   const payload = {
     started: result.started,
     reason: result.reason,
     intervalMs: result.intervalMs,
+    initialDelayMs: result.initialDelayMs,
   };
 
   if (result.started) {

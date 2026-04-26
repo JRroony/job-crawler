@@ -285,21 +285,42 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     indexedJobs.map((job) => job._id),
   );
 
+  const allowRequestTimeSupplementalCrawl =
+    runtime.allowRequestTimeSupplementalCrawl === true;
+  const allowRequestTimeFreshnessRecovery =
+    (runtime.providers?.length ?? 1) > 0 && Boolean(runtime.discovery ?? true);
   const supplementalDecision = resolveSupplementalCrawlDecision(
     session.search.filters,
     indexedSearch,
     session.searchReuse,
     session.now,
     {
-      allowRequestTimeSupplementalCrawl:
-        runtime.allowRequestTimeSupplementalCrawl === true,
-      allowRequestTimeFreshnessRecovery:
-        (runtime.providers?.length ?? 1) > 0 && Boolean(runtime.discovery ?? true),
+      allowRequestTimeSupplementalCrawl,
+      allowRequestTimeFreshnessRecovery,
     },
   );
   const backgroundIngestion = supplementalDecision.requestBackgroundIngestion
     ? await requestBackgroundIngestionForIndexGap(runtime, session.now)
     : { status: "not_requested" as const };
+  const ingestionDecisionLog = {
+    searchId: session.search._id,
+    searchSessionId: session.searchSession._id,
+    crawlRunId: session.crawlRun._id,
+    title: session.search.filters.title,
+    country: session.search.filters.country ?? null,
+    indexedCandidateCount: indexedSearch.candidateCount,
+    indexedMatchedCount: indexedJobs.length,
+    minimumIndexedCoverage: supplementalDecision.minimumIndexedCoverage,
+    targetJobCount: supplementalDecision.targetJobCount,
+    triggerReason: supplementalDecision.triggerReason,
+    shouldQueue: supplementalDecision.shouldQueue,
+    requestBackgroundIngestion: supplementalDecision.requestBackgroundIngestion,
+    backgroundIngestionStatus: backgroundIngestion.status,
+    allowRequestTimeSupplementalCrawl,
+    allowRequestTimeFreshnessRecovery,
+    latestIndexedJobAgeMs: supplementalDecision.latestIndexedJobAgeMs ?? null,
+  };
+  console.info("[ingestion:decision]", ingestionDecisionLog);
   console.info("[ingestion:trace:decision]", {
     searchId: session.search._id,
     searchSessionId: session.searchSession._id,
