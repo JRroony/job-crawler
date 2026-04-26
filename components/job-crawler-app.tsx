@@ -143,12 +143,15 @@ export function JobCrawlerApp({
   const [errorKind, setErrorKind] = useState<AppErrorKind | null>(
     initialError ? "initial_load" : null,
   );
+  const [isLoadingMoreResults, setIsLoadingMoreResults] = useState(false);
   const [revalidatingIds, setRevalidatingIds] = useState<string[]>([]);
   const pollSequenceRef = useRef(0);
+  const loadMoreSequenceRef = useRef(0);
   const activeDeliveryCursorRef = useRef(0);
   const activeIndexedDeliveryCursorRef = useRef(0);
   const clientRequestOwnerKeyRef = useRef(createClientRequestOwnerKey());
   const activeRequestControllerRef = useRef<AbortController | null>(null);
+  const loadMoreRequestControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (initialSearches.length > 0) {
@@ -317,6 +320,7 @@ export function JobCrawlerApp({
       return;
     }
 
+    cancelLoadMoreRequest();
     setViewState("loading");
     setMessage("");
     setErrorKind(null);
@@ -399,6 +403,7 @@ export function JobCrawlerApp({
 
     const pollToken = ++pollSequenceRef.current;
     const requestController = replaceActiveRequestController();
+    cancelLoadMoreRequest();
     setViewState("loading");
     setMessage("");
     setErrorKind(null);
@@ -454,6 +459,7 @@ export function JobCrawlerApp({
   async function loadSearch(searchId: string) {
     const pollToken = ++pollSequenceRef.current;
     const requestController = replaceActiveRequestController();
+    cancelLoadMoreRequest();
     setViewState("loading");
     setMessage("");
     setErrorKind(null);
@@ -488,6 +494,78 @@ export function JobCrawlerApp({
       setViewState("error");
       setErrorKind(resolveErrorKind(error));
       setMessage(error instanceof Error ? error.message : "The search could not be loaded.");
+    }
+  }
+
+  async function loadMoreResults() {
+    const currentResult = activeResult;
+    const nextCursor = currentResult?.nextCursor;
+
+    if (!currentResult || currentResult.hasMore !== true || nextCursor == null) {
+      return;
+    }
+
+    const searchId = currentResult.search._id;
+    const searchSessionId = resolveResultSearchSessionId(currentResult);
+    const pollToken = pollSequenceRef.current;
+    const loadMoreToken = ++loadMoreSequenceRef.current;
+    loadMoreRequestControllerRef.current?.abort();
+    const requestController = new AbortController();
+    loadMoreRequestControllerRef.current = requestController;
+    setIsLoadingMoreResults(true);
+    setMessage("");
+    setErrorKind(null);
+
+    const params = new URLSearchParams({
+      cursor: String(nextCursor),
+      pageSize: String(currentResult.pageSize ?? 50),
+    });
+    if (searchSessionId) {
+      params.set("searchSessionId", searchSessionId);
+    }
+
+    try {
+      const response = await fetch(`/api/searches/${searchId}?${params.toString()}`, {
+        signal: requestController.signal,
+      });
+      const payload = (await response.json()) as SearchRoutePayload;
+      if (
+        !isLatestClientRequest(pollToken, pollSequenceRef.current) ||
+        !isLatestClientRequest(loadMoreToken, loadMoreSequenceRef.current)
+      ) {
+        return;
+      }
+      if (!response.ok) {
+        throw createClassifiedClientError(
+          "runtime",
+          payload.error ?? "More results could not be loaded.",
+        );
+      }
+
+      const normalizedPayload = normalizeCrawlResponseForClient(payload);
+      let mergedResult: CrawlResponse | null = null;
+      setActiveResult((current) => {
+        mergedResult = mergeSearchPageIntoResult(current, normalizedPayload);
+        return mergedResult;
+      });
+      if (mergedResult) {
+        setViewState(resolveViewState(mergedResult));
+      }
+      refreshRecentSearch(payload.search);
+    } catch (error) {
+      if (
+        !isLatestClientRequest(pollToken, pollSequenceRef.current) ||
+        !isLatestClientRequest(loadMoreToken, loadMoreSequenceRef.current) ||
+        isAbortLikeClientError(error)
+      ) {
+        return;
+      }
+      setMessage(error instanceof Error ? error.message : "More results could not be loaded.");
+      setErrorKind("runtime");
+    } finally {
+      if (isLatestClientRequest(loadMoreToken, loadMoreSequenceRef.current)) {
+        setIsLoadingMoreResults(false);
+      }
     }
   }
 
@@ -542,6 +620,13 @@ export function JobCrawlerApp({
     const controller = new AbortController();
     activeRequestControllerRef.current = controller;
     return controller;
+  }
+
+  function cancelLoadMoreRequest() {
+    loadMoreRequestControllerRef.current?.abort();
+    loadMoreRequestControllerRef.current = null;
+    loadMoreSequenceRef.current += 1;
+    setIsLoadingMoreResults(false);
   }
 
   async function revalidateSingleJob(jobId: string) {
@@ -607,6 +692,7 @@ export function JobCrawlerApp({
 
     activeRequestControllerRef.current?.abort();
     activeRequestControllerRef.current = null;
+    cancelLoadMoreRequest();
     setActiveResult(null);
     setViewState("idle");
     setMessage("");
@@ -632,6 +718,8 @@ export function JobCrawlerApp({
         : [],
     [activeResult, clientResultFilters, filters],
   );
+  const totalMatchedCount = activeResult ? resolveTotalMatchedCount(activeResult) : 0;
+  const loadedResultCount = activeResult?.jobs.length ?? 0;
   const isBlockingSearchLoad = shouldShowBlockingSearchLoad(viewState, activeResult);
   const isRefreshingVisibleSession = isSupplementingSearchSession(activeResult);
   const zeroResultState =
@@ -856,9 +944,9 @@ export function JobCrawlerApp({
                         Visible results
                       </div>
                       <div className="mt-1 text-base font-semibold text-ink">
-                        {visibleJobs.length === activeResult.jobs.length
-                          ? `${visibleJobs.length} jobs`
-                          : `${visibleJobs.length} of ${activeResult.jobs.length}`}
+                        {visibleJobs.length === loadedResultCount
+                          ? `${loadedResultCount} of ${totalMatchedCount} jobs`
+                          : `${visibleJobs.length} of ${loadedResultCount} loaded`}
                       </div>
                     </div>
                     <div className="rounded-[18px] border border-ink/8 bg-mist/30 px-4 py-3">
@@ -897,12 +985,24 @@ export function JobCrawlerApp({
 
               <ResultsTable
                 jobs={visibleJobs}
-                totalJobs={activeResult.jobs.length}
+                totalJobs={totalMatchedCount}
                 exportFilename={buildResultsExportFilename(activeResult.search.filters)}
                 emptyMessage="No jobs match the current browse filters. Clear a few filters or rerun the search."
                 onRevalidate={revalidateSingleJob}
                 revalidatingIds={revalidatingIds}
               />
+              {activeResult.hasMore ? (
+                <div className="flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => void loadMoreResults()}
+                    disabled={isLoadingMoreResults}
+                    className="inline-flex items-center justify-center rounded-full border border-ink/15 bg-white px-5 py-2 text-sm font-semibold text-ink transition hover:border-[#0a66c2]/40 hover:text-[#0a66c2] disabled:cursor-not-allowed disabled:border-ink/8 disabled:bg-mist/35 disabled:text-slate/45"
+                  >
+                    {isLoadingMoreResults ? "Loading..." : "Load More"}
+                  </button>
+                </div>
+              ) : null}
             </>
           ) : null}
 
@@ -1282,6 +1382,85 @@ function normalizeCrawlDeltaResponseForClient(payload: CrawlDeltaResponse): Craw
   };
 }
 
+export function resolveTotalMatchedCount(result: CrawlResponse) {
+  return (
+    result.totalMatchedCount ??
+    result.finalMatchedCount ??
+    result.diagnostics.searchResponse?.totalMatchedCount ??
+    result.diagnostics.searchResponse?.finalMatchedCount ??
+    result.diagnostics.searchResponse?.matchedCount ??
+    result.diagnostics.session?.totalVisibleResultsCount ??
+    result.jobs.length
+  );
+}
+
+export function resolveResultSearchSessionId(
+  result: Pick<CrawlResponse, "search"> & {
+    searchSession?: CrawlResponse["searchSession"];
+    searchSessionId?: string | null;
+  },
+) {
+  return (
+    result.searchSession?._id ??
+    result.searchSessionId ??
+    result.search.latestSearchSessionId ??
+    undefined
+  );
+}
+
+export function isSameSearchSessionResult(
+  current: CrawlResponse | null | undefined,
+  payload: Pick<CrawlResponse, "search"> & {
+    searchSession?: CrawlResponse["searchSession"];
+    searchSessionId?: string | null;
+  },
+) {
+  if (!current || current.search._id !== payload.search._id) {
+    return false;
+  }
+
+  const currentSessionId = resolveResultSearchSessionId(current);
+  const payloadSessionId = resolveResultSearchSessionId(payload);
+
+  if (!currentSessionId && !payloadSessionId) {
+    return true;
+  }
+
+  return Boolean(currentSessionId && payloadSessionId && currentSessionId === payloadSessionId);
+}
+
+export function mergeSearchPageIntoResult(
+  current: CrawlResponse | null,
+  payload: CrawlResponse,
+): CrawlResponse | null {
+  if (!current) {
+    return payload;
+  }
+
+  if (!isSameSearchSessionResult(current, payload)) {
+    return current;
+  }
+
+  const mergedJobs = dedupeJobsForSessionRender([...current.jobs, ...payload.jobs]).sort(jobComparator);
+  const totalMatchedCount = resolveTotalMatchedCount(payload);
+
+  return {
+    ...payload,
+    jobs: mergedJobs,
+    returnedCount: mergedJobs.length,
+    totalMatchedCount,
+    finalMatchedCount: totalMatchedCount,
+    pageSize: payload.pageSize ?? current.pageSize,
+    nextCursor: payload.nextCursor,
+    hasMore: payload.hasMore === true,
+    delivery: {
+      mode: "full",
+      cursor: payload.delivery?.cursor ?? current.delivery?.cursor ?? 0,
+      indexedCursor: payload.delivery?.indexedCursor ?? current.delivery?.indexedCursor,
+    },
+  };
+}
+
 export function mergeCrawlDeltaIntoResult(
   current: CrawlResponse | null,
   payload: CrawlDeltaResponse,
@@ -1297,6 +1476,23 @@ export function mergeCrawlDeltaIntoResult(
   const mergedJobs = dedupeJobsForSessionRender([...baseJobs, ...guardedDeltaJobs]).sort(jobComparator);
 
   return {
+    searchId: payload.searchId ?? payload.search._id,
+    searchSessionId: payload.searchSessionId ?? resolveResultSearchSessionId(payload),
+    candidateCount: payload.candidateCount ?? current?.candidateCount,
+    finalMatchedCount:
+      payload.finalMatchedCount ??
+      current?.finalMatchedCount ??
+      current?.totalMatchedCount ??
+      mergedJobs.length,
+    totalMatchedCount:
+      payload.totalMatchedCount ??
+      current?.totalMatchedCount ??
+      current?.finalMatchedCount ??
+      mergedJobs.length,
+    returnedCount: mergedJobs.length,
+    pageSize: payload.pageSize ?? current?.pageSize,
+    nextCursor: payload.nextCursor ?? current?.nextCursor,
+    hasMore: payload.hasMore ?? current?.hasMore,
     search: payload.search,
     ...(payload.searchSession ? { searchSession: payload.searchSession } : {}),
     crawlRun: payload.crawlRun,

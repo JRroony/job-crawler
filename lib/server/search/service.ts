@@ -21,16 +21,21 @@ import {
 } from "@/lib/server/search/session-service";
 import { getIndexedJobsForSearch } from "@/lib/server/search/indexed-jobs";
 import { InputValidationError, isInputValidationError } from "@/lib/server/search/errors";
+import {
+  attachSearchTraceStage,
+  buildSearchIntentTracePayload,
+  createEmptySearchTrace,
+  createSearchTraceId,
+  emitSearchTraceStage,
+  type SearchTraceDiagnostics,
+} from "@/lib/server/search/search-trace";
 import type { CrawlDiagnostics, SearchDocument } from "@/lib/types";
 
 export async function runSearchFromFilters(
   rawFilters: unknown,
   runtime: JobCrawlerRuntime = {},
 ) {
-  const filters = parseSearchFilters(rawFilters);
-  console.info("[crawl:normalized-filters]", filters);
-
-  const { result } = await startSearchFromFilters(filters, runtime);
+  const { result } = await startSearchFromFilters(rawFilters, runtime);
   return result;
 }
 
@@ -43,6 +48,7 @@ export async function startSearchFromFilters(
   rawFilters: unknown,
   runtime: JobCrawlerRuntime = {},
 ) {
+  const traceId = createSearchTraceId();
   const filters = parseSearchFilters(rawFilters);
   console.info("[crawl:normalized-filters]", filters);
 
@@ -51,7 +57,19 @@ export async function startSearchFromFilters(
   });
 
   const session = await createSearchSession(filters, runtime);
-  const queued = await primeSearchSessionAndMaybeQueueSupplemental(session, runtime);
+  const searchTrace = initializeSearchTrace({
+    traceId,
+    rawFilters,
+    normalizedFilters: filters,
+    searchId: session.search._id,
+    searchSessionId: session.searchSession._id,
+    timestamp: session.now.toISOString(),
+  });
+  const queued = await primeSearchSessionAndMaybeQueueSupplemental(
+    session,
+    runtime,
+    searchTrace,
+  );
 
   if (queued) {
     await monitorSearchRequestAbort(session.search._id, {
@@ -60,37 +78,53 @@ export async function startSearchFromFilters(
     });
   }
 
+  const result = await getInitialSearchResult(session.search._id, session.searchSession._id, {
+    repository: session.repository,
+    fetchImpl: runtime.fetchImpl ?? fetch,
+    now: session.now,
+    earlyVisibleTarget: runtime.earlyVisibleTarget,
+    initialVisibleWaitMs: runtime.initialVisibleWaitMs,
+    signal: runtime.signal,
+  });
+
   return {
     queued,
-    result: await getInitialSearchResult(session.search._id, session.searchSession._id, {
-      repository: session.repository,
-      fetchImpl: runtime.fetchImpl ?? fetch,
-      now: session.now,
-      earlyVisibleTarget: runtime.earlyVisibleTarget,
-      initialVisibleWaitMs: runtime.initialVisibleWaitMs,
-      signal: runtime.signal,
-    }),
+    result: attachSearchTraceResponse(result, traceId),
   };
 }
 
 export async function startSearchRerun(searchId: string, runtime: JobCrawlerRuntime = {}) {
+  const traceId = createSearchTraceId();
   await abortSupersededSearch(searchId, runtime, {
     defaultReason: "The crawl was superseded by a rerun request.",
   });
 
   const session = await createSearchRerunSession(searchId, runtime);
-  const queued = await primeSearchSessionAndMaybeQueueSupplemental(session, runtime);
+  const searchTrace = initializeSearchTrace({
+    traceId,
+    rawFilters: session.search.filters,
+    normalizedFilters: session.search.filters,
+    searchId: session.search._id,
+    searchSessionId: session.searchSession._id,
+    timestamp: session.now.toISOString(),
+  });
+  const queued = await primeSearchSessionAndMaybeQueueSupplemental(
+    session,
+    runtime,
+    searchTrace,
+  );
+  const result = await getInitialSearchResult(searchId, session.searchSession._id, {
+    repository: session.repository,
+    fetchImpl: runtime.fetchImpl ?? fetch,
+    now: session.now,
+    earlyVisibleTarget: runtime.earlyVisibleTarget,
+    initialVisibleWaitMs: runtime.initialVisibleWaitMs,
+    signal: runtime.signal,
+  });
 
   return {
     queued,
-    result: await getInitialSearchResult(searchId, session.searchSession._id, {
-      repository: session.repository,
-      fetchImpl: runtime.fetchImpl ?? fetch,
-      now: session.now,
-      earlyVisibleTarget: runtime.earlyVisibleTarget,
-      initialVisibleWaitMs: runtime.initialVisibleWaitMs,
-      signal: runtime.signal,
-    }),
+    result: attachSearchTraceResponse(result, traceId),
   };
 }
 
@@ -150,11 +184,99 @@ function parseSearchFilters(rawFilters: unknown) {
   return parsedFilters.data;
 }
 
+function initializeSearchTrace(input: {
+  traceId: string;
+  rawFilters: unknown;
+  normalizedFilters: ReturnType<typeof parseSearchFilters>;
+  searchId: string;
+  searchSessionId: string;
+  timestamp: string;
+}): SearchTraceDiagnostics {
+  const searchTrace = createEmptySearchTrace(input.traceId);
+  const startTrace = emitSearchTraceStage("start", {
+    traceId: input.traceId,
+    searchId: input.searchId,
+    searchSessionId: input.searchSessionId,
+    rawFilters: input.rawFilters,
+    normalizedFilters: input.normalizedFilters,
+    timestamp: input.timestamp,
+  });
+  const intentTrace = emitSearchTraceStage("intent", {
+    ...buildSearchIntentTracePayload({
+      traceId: input.traceId,
+      filters: input.normalizedFilters,
+    }),
+    searchId: input.searchId,
+    searchSessionId: input.searchSessionId,
+  });
+
+  return attachSearchTraceStage(
+    attachSearchTraceStage(searchTrace, "start", startTrace),
+    "intent",
+    intentTrace,
+  );
+}
+
+function attachSearchTraceResponse<
+  TResult extends {
+    search: { _id: string };
+    searchSession?: { _id: string };
+    jobs: unknown[];
+    totalMatchedCount?: number;
+    returnedCount?: number;
+    pageSize?: number;
+    nextCursor?: number | null;
+    hasMore?: boolean;
+    diagnostics: CrawlDiagnostics;
+    crawlRun: { diagnostics: CrawlDiagnostics };
+  },
+>(result: TResult, traceId: string): TResult {
+  const responseTrace = emitSearchTraceStage("response", {
+    traceId,
+    returnedCount: result.returnedCount ?? result.jobs.length,
+    totalMatchedCount:
+      result.totalMatchedCount ??
+      result.diagnostics.searchResponse?.matchedCount ??
+      result.diagnostics.session?.totalVisibleResultsCount,
+    pageSize: result.pageSize,
+    nextCursor: result.nextCursor,
+    hasMore: result.hasMore,
+    searchId: result.search._id,
+    searchSessionId: result.searchSession?._id,
+  });
+  const diagnostics = {
+    ...result.diagnostics,
+    searchTrace: attachSearchTraceStage(
+      (result.diagnostics.searchTrace as SearchTraceDiagnostics | undefined) ??
+        createEmptySearchTrace(traceId),
+      "response",
+      responseTrace,
+    ),
+  };
+
+  return {
+    ...result,
+    diagnostics,
+    crawlRun: {
+      ...result.crawlRun,
+      diagnostics: {
+        ...result.crawlRun.diagnostics,
+        searchTrace: diagnostics.searchTrace,
+      },
+    },
+  };
+}
+
 async function primeSearchSessionAndMaybeQueueSupplemental(
   session: Awaited<ReturnType<typeof createSearchSession>> | Awaited<ReturnType<typeof createSearchRerunSession>>,
   runtime: JobCrawlerRuntime,
+  searchTrace: SearchTraceDiagnostics,
 ) {
-  const indexedSearch = await getIndexedJobsForSearch(session.repository, session.search.filters);
+  const indexedSearch = await getIndexedJobsForSearch(
+    session.repository,
+    session.search.filters,
+    { traceId: searchTrace.traceId },
+  );
   const indexedJobs = indexedSearch.matches.map(({ job }) => job);
 
   await session.repository.appendExistingJobsToSearchSession(
@@ -178,10 +300,32 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
   const backgroundIngestion = supplementalDecision.requestBackgroundIngestion
     ? await requestBackgroundIngestionForIndexGap(runtime, session.now)
     : { status: "not_requested" as const };
+  const indexFirstDecisionTrace = emitSearchTraceStage("index-first-decision", {
+    traceId: searchTrace.traceId,
+    indexedCandidateCount: indexedSearch.candidateCount,
+    indexedMatchedCount: indexedJobs.length,
+    minimumIndexedCoverage: supplementalDecision.minimumIndexedCoverage,
+    triggerReason: supplementalDecision.triggerReason,
+    backgroundIngestionRequested: supplementalDecision.requestBackgroundIngestion,
+    shouldQueueSupplemental: supplementalDecision.shouldQueue,
+  });
+  const indexedSearchTrace = indexedSearch.searchTrace ?? { traceId: searchTrace.traceId };
+  const completedSearchTrace = attachSearchTraceStage(
+    {
+      ...searchTrace,
+      candidateQuery: indexedSearchTrace.candidateQuery,
+      candidateDbResult: indexedSearchTrace.candidateDbResult,
+      candidateChannelBreakdown: indexedSearchTrace.candidateChannelBreakdown,
+      finalFilter: indexedSearchTrace.finalFilter,
+    },
+    "index-first-decision",
+    indexFirstDecisionTrace,
+  );
   const primedDiagnostics = buildPrimedSessionDiagnostics(
     supplementalDecision,
     indexedJobs.length,
     backgroundIngestion,
+    completedSearchTrace,
   );
   session.crawlRun = {
     ...session.crawlRun,
@@ -211,6 +355,7 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     latestIndexedJobAgeMs: supplementalDecision.latestIndexedJobAgeMs,
     indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
     indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+    indexedCandidateChannelBreakdown: indexedSearch.candidateChannelBreakdown,
       indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
       indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
       indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
@@ -531,6 +676,7 @@ function buildPrimedSessionDiagnostics(
   decision: SupplementalDecision,
   indexedJobCount: number,
   backgroundIngestion: BackgroundIngestionRequestDiagnostics,
+  searchTrace: SearchTraceDiagnostics,
 ): CrawlDiagnostics {
   return {
     discoveredSources: 0,
@@ -567,6 +713,7 @@ function buildPrimedSessionDiagnostics(
       latestIndexedJobAgeMs: decision.latestIndexedJobAgeMs,
       backgroundIngestion,
     },
+    searchTrace,
     dropReasonCounts: {},
     filterDecisionTraces: [],
     dedupeDecisionTraces: [],

@@ -189,6 +189,123 @@ async function createActiveSearchState(
 }
 
 describe("jobs-first indexed search", () => {
+  it("emits structured search trace logs and attaches the trace to response diagnostics", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    await seedIndexedJobs(
+      repository,
+      Array.from({ length: 5 }, (_, index) => {
+        const sourceJobId = `trace-indexed-${index + 1}`;
+        const canonicalUrl = `https://example.com/jobs/${sourceJobId}`;
+        return createPersistableJob({
+          title: "Software Engineer",
+          locationText: "Remote - United States",
+          country: "United States",
+          sourceJobId,
+          canonicalUrl,
+          applyUrl: `${canonicalUrl}/apply`,
+          sourceUrl: canonicalUrl,
+          dedupeFingerprint: `dedupe:${sourceJobId}`,
+          contentFingerprint: `content:${sourceJobId}`,
+          contentHash: `content-hash:${sourceJobId}`,
+        });
+      }),
+    );
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    try {
+      const result = await runSearchFromFilters(
+        {
+          title: "Software Engineer",
+          country: "United States",
+          platforms: ["greenhouse"],
+        },
+        {
+          repository,
+          providers: [],
+          discovery: createDiscovery(),
+          fetchImpl: vi.fn() as unknown as typeof fetch,
+          now: new Date("2026-04-15T12:00:00.000Z"),
+          requestOwnerKey: "trace-search",
+        },
+      );
+
+      const traceLabels = [
+        "[search:trace:start]",
+        "[search:trace:intent]",
+        "[search:trace:candidate-query]",
+        "[search:trace:candidate-db-result]",
+        "[search:trace:final-filter]",
+        "[search:trace:index-first-decision]",
+        "[search:trace:response]",
+      ];
+      const traceCalls = traceLabels.map((label) => {
+        const call = infoSpy.mock.calls.find(([actualLabel]) => actualLabel === label);
+        expect(call).toBeDefined();
+        return call as [string, Record<string, unknown>];
+      });
+      const traceId = traceCalls[0]?.[1].traceId;
+
+      expect(typeof traceId).toBe("string");
+      for (const [, payload] of traceCalls) {
+        expect(payload.traceId).toBe(traceId);
+        expect(() => JSON.stringify(payload)).not.toThrow();
+      }
+      expect(traceCalls[2]?.[1]).toMatchObject({
+        limit: expect.any(Number),
+        sort: expect.any(Object),
+        diagnostics: expect.objectContaining({
+          strategy: "coarse_prefilter",
+        }),
+      });
+      expect(traceCalls[2]?.[1].filter).toBeDefined();
+      expect(traceCalls[3]?.[1]).toMatchObject({
+        candidateCountReturned: 5,
+        candidateLimit: expect.any(Number),
+        sampleCandidateIds: expect.arrayContaining([expect.any(String)]),
+        sampleCandidateTitles: expect.arrayContaining(["Software Engineer"]),
+      });
+      expect(traceCalls[4]?.[1]).toMatchObject({
+        evaluatedCount: 5,
+        matchedCount: 5,
+        excludedByTitle: 0,
+        excludedByLocation: 0,
+        excludedByExperience: 0,
+      });
+      expect(traceCalls[5]?.[1]).toMatchObject({
+        indexedCandidateCount: 5,
+        indexedMatchedCount: 5,
+        minimumIndexedCoverage: 5,
+        triggerReason: "indexed_coverage_sufficient",
+        backgroundIngestionRequested: false,
+        shouldQueueSupplemental: false,
+      });
+      expect(traceCalls[6]?.[1]).toMatchObject({
+        returnedCount: 5,
+        totalMatchedCount: 5,
+        searchId: result.search._id,
+        searchSessionId: result.searchSession?._id,
+      });
+      expect(result.diagnostics.searchTrace).toMatchObject({
+        traceId,
+        start: expect.objectContaining({ traceId }),
+        intent: expect.objectContaining({
+          traceId,
+          title: "Software Engineer",
+          country: "United States",
+          platforms: ["greenhouse"],
+          crawlMode: "balanced",
+        }),
+        candidateQuery: expect.objectContaining({ traceId }),
+        candidateDbResult: expect.objectContaining({ traceId }),
+        finalFilter: expect.objectContaining({ traceId, matchedCount: 5 }),
+        indexFirstDecision: expect.objectContaining({ traceId }),
+        response: expect.objectContaining({ traceId, returnedCount: 5 }),
+      });
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
   it("treats runSearchFromFilters as an indexed-first search entry point and keeps ordinary low coverage off the request crawl path", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     await seedIndexedJobs(repository, [
@@ -501,6 +618,102 @@ describe("jobs-first indexed search", () => {
     expect(delta.delivery.cursor).toBe(5);
   });
 
+  it("paginates final indexed matches without collapsing the total matched count", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    await seedIndexedJobs(
+      repository,
+      Array.from({ length: 300 }, (_, index) => {
+        const sourceJobId = `pagination-software-${index + 1}`;
+        const canonicalUrl = `https://example.com/jobs/${sourceJobId}`;
+        return createPersistableJob({
+          title: "Software Engineer",
+          locationText: "Remote - United States",
+          country: "United States",
+          sourceJobId,
+          canonicalUrl,
+          applyUrl: `${canonicalUrl}/apply`,
+          sourceUrl: canonicalUrl,
+          dedupeFingerprint: `dedupe:${sourceJobId}`,
+          contentFingerprint: `content:${sourceJobId}`,
+          contentHash: `content-hash:${sourceJobId}`,
+          postingDate: `2026-04-${String((index % 20) + 1).padStart(2, "0")}T00:00:00.000Z`,
+          postedAt: `2026-04-${String((index % 20) + 1).padStart(2, "0")}T00:00:00.000Z`,
+        });
+      }),
+    );
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    try {
+      const active = await createActiveSearchState(
+        repository,
+        {
+          title: "Software Engineer",
+          country: "United States",
+          platforms: ["greenhouse"],
+        },
+        "2026-04-15T12:04:00.000Z",
+      );
+
+      const firstPage = await getSearchDetails(active.search._id, {
+        repository,
+        pageSize: 50,
+        searchSessionId: active.searchSession._id,
+        now: new Date("2026-04-15T12:04:00.000Z"),
+      });
+
+      expect(firstPage.jobs).toHaveLength(50);
+      expect(firstPage.totalMatchedCount).toBe(300);
+      expect(firstPage.finalMatchedCount).toBe(300);
+      expect(firstPage.returnedCount).toBe(50);
+      expect(firstPage.pageSize).toBe(50);
+      expect(firstPage.nextCursor).toBe(50);
+      expect(firstPage.hasMore).toBe(true);
+      expect(firstPage.searchId).toBe(firstPage.search._id);
+      expect(firstPage.searchSessionId).toBe(firstPage.searchSession?._id);
+      expect(firstPage.diagnostics.searchResponse).toMatchObject({
+        candidateCount: expect.any(Number),
+        matchedCount: 300,
+        finalMatchedCount: 300,
+        totalMatchedCount: 300,
+        returnedCount: 50,
+        pageSize: 50,
+        nextCursor: 50,
+        hasMore: true,
+      });
+
+      const nextPage = await getSearchDetails(firstPage.search._id, {
+        repository,
+        cursor: firstPage.nextCursor ?? 0,
+        pageSize: 50,
+        searchSessionId: firstPage.searchSession?._id,
+      });
+      const firstPageIds = new Set(firstPage.jobs.map((job) => job._id));
+      const nextPageIds = new Set(nextPage.jobs.map((job) => job._id));
+
+      expect(nextPage.jobs).toHaveLength(50);
+      expect(nextPage.totalMatchedCount).toBe(300);
+      expect(nextPage.returnedCount).toBe(50);
+      expect(nextPage.nextCursor).toBe(100);
+      expect(nextPage.hasMore).toBe(true);
+      expect([...nextPageIds].some((jobId) => firstPageIds.has(jobId))).toBe(false);
+
+      const paginationLogs = infoSpy.mock.calls.filter(
+        ([label]) => label === "[search:pagination]",
+      ) as Array<[string, Record<string, unknown>]>;
+      expect(paginationLogs.length).toBeGreaterThanOrEqual(2);
+      expect(paginationLogs[0]?.[1]).toMatchObject({
+        searchId: firstPage.search._id,
+        searchSessionId: firstPage.searchSession?._id,
+        totalMatchedCount: 300,
+        returnedCount: 50,
+        nextCursor: 50,
+        hasMore: true,
+      });
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
   it("does not fall back to a full listJobs scan when priming indexed search results", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     await seedIndexedJobs(repository, [
@@ -781,7 +994,11 @@ describe("jobs-first indexed search", () => {
       "toronto-mle",
       "vancouver-ml",
     ]);
-    expect(indexed.candidateCount).toBe(3);
+    expect(indexed.candidateCount).toBeGreaterThanOrEqual(3);
+    expect(indexed.candidateChannelBreakdown).toMatchObject({
+      finalMatchedCount: 3,
+      returnedCount: 3,
+    });
 
     const active = await createActiveSearchState(repository, {
       title: "machine learning engineer",
@@ -817,6 +1034,123 @@ describe("jobs-first indexed search", () => {
         JSON.stringify(job.rawSourceMetadata).includes("locationMatch"),
       ),
     ).toBe(true);
+  });
+
+  it("uses multi-channel indexed retrieval so machine learning engineer US recall is not capped by one narrow candidate query", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const makeJobs = (
+      count: number,
+      title: string,
+      prefix: string,
+      location: {
+        country: string;
+        locationText: string;
+        state?: string;
+        city?: string;
+      },
+    ) =>
+      Array.from({ length: count }, (_, index) => {
+        const sourceJobId = `${prefix}-${index + 1}`;
+        const canonicalUrl = `https://example.com/jobs/${sourceJobId}`;
+
+        return createPersistableJob({
+          title,
+          sourceJobId,
+          canonicalUrl,
+          applyUrl: `${canonicalUrl}/apply`,
+          sourceUrl: canonicalUrl,
+          country: location.country,
+          locationText: location.locationText,
+          state: location.state,
+          city: location.city,
+          dedupeFingerprint: `dedupe:${sourceJobId}`,
+          contentFingerprint: `content:${sourceJobId}`,
+          contentHash: `content-hash:${sourceJobId}`,
+        });
+      });
+    const outsideLocations = [
+      { country: "Canada", locationText: "Toronto, Canada", state: "Ontario", city: "Toronto" },
+      { country: "Japan", locationText: "Tokyo, Japan", city: "Tokyo" },
+      { country: "South Korea", locationText: "Seoul, South Korea", city: "Seoul" },
+    ];
+    const outsideJobs = Array.from({ length: 50 }, (_, index) => {
+      const location = outsideLocations[index % outsideLocations.length]!;
+      const title = index % 2 === 0 ? "AI Engineer" : "Machine Learning Engineer";
+      const sourceJobId = `outside-ai-ml-${index + 1}`;
+      const canonicalUrl = `https://example.com/jobs/${sourceJobId}`;
+
+      return createPersistableJob({
+        title,
+        sourceJobId,
+        canonicalUrl,
+        applyUrl: `${canonicalUrl}/apply`,
+        sourceUrl: canonicalUrl,
+        country: location.country,
+        locationText: location.locationText,
+        state: location.state,
+        city: location.city,
+        dedupeFingerprint: `dedupe:${sourceJobId}`,
+        contentFingerprint: `content:${sourceJobId}`,
+        contentHash: `content-hash:${sourceJobId}`,
+      });
+    });
+
+    await seedIndexedJobs(repository, [
+      ...makeJobs(100, "Machine Learning Engineer", "mle-us", {
+        country: "United States",
+        locationText: "Remote - United States",
+      }),
+      ...makeJobs(100, "ML Engineer", "ml-us", {
+        country: "United States",
+        locationText: "Seattle, WA",
+        state: "Washington",
+        city: "Seattle",
+      }),
+      ...makeJobs(100, "AI Engineer", "ai-us", {
+        country: "United States",
+        locationText: "Austin, TX",
+        state: "Texas",
+        city: "Austin",
+      }),
+      ...makeJobs(100, "Applied AI Engineer", "applied-ai-us", {
+        country: "United States",
+        locationText: "New York, NY",
+        state: "New York",
+        city: "New York",
+      }),
+      ...makeJobs(50, "LLM Engineer", "llm-us", {
+        country: "United States",
+        locationText: "Remote - California",
+        state: "California",
+      }),
+      ...outsideJobs,
+    ]);
+
+    const indexed = await getIndexedJobsForSearch(repository, {
+      title: "machine learning engineer",
+      country: "United States",
+    });
+
+    expect(indexed.matchedCount).toBeGreaterThan(34);
+    expect(indexed.matchedCount).toBeGreaterThanOrEqual(400);
+    expect(indexed.matches.every(({ job }) => job.country === "United States")).toBe(true);
+    const matchedIds = new Set(indexed.matches.map(({ job }) => job.sourceJobId));
+    expect(outsideJobs.some((job) => matchedIds.has(job.sourceJobId))).toBe(false);
+    expect(indexed.candidateChannelBreakdown).toMatchObject({
+      exactTitleCount: expect.any(Number),
+      aliasTitleCount: expect.any(Number),
+      conceptCount: expect.any(Number),
+      familyCount: expect.any(Number),
+      geoCount: expect.any(Number),
+      legacyTitleFallbackCount: expect.any(Number),
+      legacyLocationFallbackCount: expect.any(Number),
+      mergedCandidateCount: indexed.candidateCount,
+      finalMatchedCount: indexed.matchedCount,
+      returnedCount: indexed.matches.length,
+    });
+    expect(indexed.candidateChannelBreakdown.aliasTitleCount).toBeGreaterThan(0);
+    expect(indexed.candidateChannelBreakdown.geoCount).toBeGreaterThan(0);
+    expect(indexed.excludedByLocationCount).toBeGreaterThan(0);
   });
 
   it("dedupes overlapping session and indexed deltas when background and active-session writes converge on the same job", async () => {
@@ -1989,7 +2323,11 @@ describe("jobs-first indexed search", () => {
         ),
       ).toBe(true);
       expect(result.matches.some(({ job }) => job.sourcePlatform === "company_page")).toBe(true);
-      expect(result.candidateCount).toBeLessThan(12);
+      expect(result.candidateCount).toBeGreaterThanOrEqual(result.matches.length);
+      expect(result.candidateChannelBreakdown).toMatchObject({
+        finalMatchedCount: result.matches.length,
+        returnedCount: result.matches.length,
+      });
       expect(result.requestTimeEvaluationCount).toBe(result.candidateCount);
       expect(result.candidateQuery).toMatchObject({
         strategy: "coarse_prefilter",
@@ -2305,7 +2643,7 @@ describe("jobs-first indexed search", () => {
       country: "United States",
     });
 
-    expect(indexedSearch.candidateCount).toBeLessThan(seededJobs.length);
+    expect(indexedSearch.candidateCount).toBeGreaterThanOrEqual(indexedSearch.matches.length);
     expect(indexedSearch.candidateQuery).toMatchObject({
       strategy: "coarse_prefilter",
       titleFamily: "product",
@@ -2481,9 +2819,9 @@ describe("jobs-first indexed search", () => {
       expect(result.matches.map(({ job }) => job.sourceJobId)).toContain(
         scenario.match.sourceJobId,
       );
-      expect(result.candidateCount).toBeLessThan(10);
+      expect(result.candidateCount).toBeGreaterThanOrEqual(result.matches.length);
       expect(result.requestTimeEvaluationCount).toBe(result.candidateCount);
-      expect(result.requestTimeExcludedCount).toBeLessThan(5);
+      expect(result.requestTimeExcludedCount).toBeGreaterThan(0);
       expect(result.candidateQuery).toMatchObject({
         usedSearchReadyTitleKeys: true,
         usedSearchReadyLocationKeys: true,

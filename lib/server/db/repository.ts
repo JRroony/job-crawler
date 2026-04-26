@@ -28,7 +28,11 @@ import { resolveObservedSourceNextEligibleAt } from "@/lib/server/inventory/sele
 import {
   buildIndexedJobCandidateQuery,
   buildJobSearchIndex,
+  emptyIndexedJobCandidateChannelBreakdown,
+  type IndexedJobCandidateChannelBreakdown,
+  type IndexedJobCandidateChannelName,
 } from "@/lib/server/search/job-search-index";
+import { emitSearchTraceStage } from "@/lib/server/search/search-trace";
 import { normalizeJobGeoLocation } from "@/lib/server/geo/match";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import type {
@@ -63,6 +67,7 @@ import {
   experienceLevelSchema,
   indexedJobEventSchema,
   jobListingSchema,
+  linkStatusSchema,
   linkValidationResultSchema,
   persistableJobSchema,
   resolvedLocationSchema,
@@ -1069,18 +1074,63 @@ export class JobCrawlerRepository {
     return dedupeStoredJobs(documents.map((document) => parseStoredJob(document)));
   }
 
-  async getIndexedJobCandidatesForSearch(filters: SearchFilters) {
+  async getIndexedJobCandidatesForSearch(
+    filters: SearchFilters,
+    options: { traceId?: string } = {},
+  ) {
     const candidateQuery = buildIndexedJobCandidateQuery(filters);
-    const documents = await this.jobs()
-      .find(candidateQuery.filter, {
+    if (options.traceId) {
+      emitSearchTraceStage("candidate-query", {
+        traceId: options.traceId,
+        filter: candidateQuery.filter,
         sort: candidateQuery.sort,
         limit: candidateQuery.limit,
-      })
-      .toArray();
+        diagnostics: candidateQuery.diagnostics,
+      });
+    }
+    const channelResults = await Promise.all(
+      candidateQuery.channels.map(async (channel) => ({
+        channel,
+        documents: await this.jobs()
+          .find(channel.filter, {
+            sort: channel.sort,
+            limit: channel.limit,
+          })
+          .toArray(),
+      })),
+    );
+    const candidateChannelBreakdown = buildIndexedCandidateChannelBreakdown(
+      channelResults.map((result) => ({
+        channelName: result.channel.name,
+        count: result.documents.length,
+      })),
+    );
+    const documents = mergeIndexedCandidateChannelDocuments(
+      channelResults.map((result) => result.documents),
+      candidateQuery.mergedCandidateLimit,
+    );
+    candidateChannelBreakdown.mergedCandidateCount = documents.length;
+    const diagnostics = {
+      ...candidateQuery.diagnostics,
+      candidateChannelBreakdown,
+    };
+
+    if (options.traceId) {
+      console.info("[search:indexed-candidate-channels]", {
+        traceId: options.traceId,
+        ...candidateChannelBreakdown,
+        mergedCandidateLimit: candidateQuery.mergedCandidateLimit,
+        channelLimits: candidateQuery.diagnostics.channelLimits,
+      });
+    }
 
     return {
       jobs: dedupeStoredJobs(documents.map((document) => parseStoredJob(document))),
-      query: candidateQuery,
+      query: {
+        ...candidateQuery,
+        diagnostics,
+      },
+      candidateChannelBreakdown,
     };
   }
 
@@ -1584,6 +1634,67 @@ function stableSerialize(value: unknown): string {
 
 function buildContentHash(value: unknown) {
   return createHash("sha256").update(stableSerialize(value)).digest("hex");
+}
+
+function buildIndexedCandidateChannelBreakdown(
+  counts: Array<{
+    channelName: IndexedJobCandidateChannelName;
+    count: number;
+  }>,
+): IndexedJobCandidateChannelBreakdown {
+  const breakdown = emptyIndexedJobCandidateChannelBreakdown();
+
+  for (const { channelName, count } of counts) {
+    if (channelName === "exactTitleChannel") {
+      breakdown.exactTitleCount = count;
+    } else if (channelName === "aliasTitleChannel") {
+      breakdown.aliasTitleCount = count;
+    } else if (channelName === "conceptChannel") {
+      breakdown.conceptCount = count;
+    } else if (channelName === "familyChannel") {
+      breakdown.familyCount = count;
+    } else if (channelName === "geoChannel") {
+      breakdown.geoCount = count;
+    } else if (channelName === "legacyTitleFallbackChannel") {
+      breakdown.legacyTitleFallbackCount = count;
+    } else if (channelName === "legacyLocationFallbackChannel") {
+      breakdown.legacyLocationFallbackCount = count;
+    }
+  }
+
+  return breakdown;
+}
+
+function mergeIndexedCandidateChannelDocuments<TDocument extends Record<string, unknown>>(
+  channelDocuments: TDocument[][],
+  limit: number,
+) {
+  const merged: TDocument[] = [];
+  const seenIds = new Set<string>();
+  const maxChannelLength = Math.max(0, ...channelDocuments.map((documents) => documents.length));
+
+  for (let index = 0; index < maxChannelLength && merged.length < limit; index += 1) {
+    for (const documents of channelDocuments) {
+      if (merged.length >= limit) {
+        break;
+      }
+
+      const document = documents[index];
+      if (!document) {
+        continue;
+      }
+
+      const id = typeof document._id === "string" ? document._id : String(document._id ?? "");
+      if (!id || seenIds.has(id)) {
+        continue;
+      }
+
+      seenIds.add(id);
+      merged.push(document);
+    }
+  }
+
+  return merged;
 }
 
 function parseStoredSourceInventory(document: Record<string, unknown>) {
@@ -2579,6 +2690,15 @@ function normalizeStoredJobFields(document: Record<string, unknown>) {
     geoLocation,
     experienceLevel: normalizeOptionalExperienceLevel(document.experienceLevel),
     experienceClassification: normalizeExperienceClassification(document.experienceClassification),
+    sourcePlatform: document.sourcePlatform as JobListing["sourcePlatform"],
+    linkStatus: normalizeLinkStatus(document.linkStatus),
+    isActive,
+    postingDate,
+    postedAt: postingDate,
+    lastSeenAt,
+    crawledAt,
+    discoveredAt,
+    indexedAt,
   });
 
   return {
@@ -2841,6 +2961,11 @@ function normalizeSalaryInfo(value: unknown) {
 
 function normalizeSponsorshipHint(value: unknown) {
   const parsed = sponsorshipHintSchema.safeParse(value);
+  return parsed.success ? parsed.data : "unknown";
+}
+
+function normalizeLinkStatus(value: unknown) {
+  const parsed = linkStatusSchema.safeParse(value);
   return parsed.success ? parsed.data : "unknown";
 }
 

@@ -28,12 +28,32 @@ import {
 import { ResourceNotFoundError } from "@/lib/server/search/errors";
 
 const initialVisiblePollIntervalMs = 75;
+const defaultSearchResultsPageSize = 50;
+const maxSearchResultsPageSize = 100;
 
 type SearchReuseBaseline = {
   reusedExistingSearch: boolean;
   previousVisibleJobCount: number;
   previousRunStatus?: SearchDocument["lastStatus"];
   previousFinishedAt?: string;
+};
+
+export type SearchPaginationOptions = {
+  cursor?: number;
+  pageSize?: number;
+  searchSessionId?: string;
+};
+
+type SearchDetailsRuntime = JobCrawlerRuntime & SearchPaginationOptions;
+
+type SearchPage = {
+  cursor: number;
+  pageSize: number;
+  totalMatchedCount: number;
+  returnedCount: number;
+  nextCursor: number | null;
+  hasMore: boolean;
+  jobs: JobListing[];
 };
 
 export async function createSearchSession(
@@ -167,13 +187,17 @@ export async function getInitialSearchResult(
   runtime: Pick<
     JobCrawlerRuntime,
     "repository" | "fetchImpl" | "now" | "earlyVisibleTarget" | "initialVisibleWaitMs" | "signal"
-  > = {},
+  > &
+    SearchPaginationOptions = {},
 ) {
   const repository = await resolveRepository(runtime.repository);
   const initialResult = await getSearchDetails(searchId, {
     repository,
     fetchImpl: runtime.fetchImpl ?? fetch,
     now: runtime.now,
+    cursor: runtime.cursor,
+    pageSize: runtime.pageSize,
+    searchSessionId: runtime.searchSessionId,
   });
 
   if (
@@ -216,10 +240,13 @@ export async function getInitialSearchResult(
     repository,
     fetchImpl: runtime.fetchImpl ?? fetch,
     now: runtime.now,
+    cursor: runtime.cursor,
+    pageSize: runtime.pageSize,
+    searchSessionId: runtime.searchSessionId,
   });
 }
 
-export async function getSearchDetails(searchId: string, runtime: JobCrawlerRuntime = {}) {
+export async function getSearchDetails(searchId: string, runtime: SearchDetailsRuntime = {}) {
   const repository = await resolveRepository(runtime.repository);
   const resolved = await loadSearchState(searchId, repository);
   const indexedCursor = await repository.getIndexedJobDeliveryCursor();
@@ -230,6 +257,7 @@ export async function getSearchDetails(searchId: string, runtime: JobCrawlerRunt
       await loadIndexedSearchJobs(resolved.search, repository),
       (await isSearchRunPending(searchId, repository)) ? "running" : undefined,
       indexedCursor,
+      runtime,
     );
   }
 
@@ -254,6 +282,14 @@ export async function getSearchDetails(searchId: string, runtime: JobCrawlerRunt
     resolved.search.filters,
     "response_guard",
   );
+  const sortedJobs = sortJobsWithDiagnostics(
+    mergedJobs,
+    resolved.search.filters.title,
+    runtime.now ?? new Date(),
+  );
+  const page = paginateSearchResults(sortedJobs, runtime);
+  const candidateCount =
+    resolved.crawlRun.diagnostics.session?.indexedCandidateCount ?? indexedJobs.length;
   const diagnostics = attachSessionDiagnostics(
     resolved.crawlRun.diagnostics,
     indexedJobs.length,
@@ -262,8 +298,12 @@ export async function getSearchDetails(searchId: string, runtime: JobCrawlerRunt
     resolved.crawlRun,
     resolved.search,
     {
-      candidateCount: resolved.crawlRun.diagnostics.session?.indexedCandidateCount ?? indexedJobs.length,
-      matchedCount: mergedJobs.length,
+      candidateCount,
+      matchedCount: page.totalMatchedCount,
+      returnedCount: page.returnedCount,
+      pageSize: page.pageSize,
+      nextCursor: page.nextCursor,
+      hasMore: page.hasMore,
       excludedByTitleCount: resolved.crawlRun.diagnostics.excludedByTitle,
       excludedByLocationCount:
         resolved.crawlRun.diagnostics.excludedByLocation +
@@ -271,17 +311,31 @@ export async function getSearchDetails(searchId: string, runtime: JobCrawlerRunt
       excludedByExperienceCount: resolved.crawlRun.diagnostics.excludedByExperience,
     },
   );
+  logSearchPagination({
+    searchId: resolved.search._id,
+    searchSessionId: resolved.searchSession?._id ?? resolved.search.latestSearchSessionId,
+    totalMatchedCount: page.totalMatchedCount,
+    returnedCount: page.returnedCount,
+    pageSize: page.pageSize,
+    nextCursor: page.nextCursor,
+    hasMore: page.hasMore,
+  });
 
   return crawlResponseSchema.parse({
+    searchId: resolved.search._id,
+    searchSessionId: resolved.searchSession?._id ?? resolved.search.latestSearchSessionId,
+    candidateCount,
+    finalMatchedCount: page.totalMatchedCount,
+    totalMatchedCount: page.totalMatchedCount,
+    returnedCount: page.returnedCount,
+    pageSize: page.pageSize,
+    nextCursor: page.nextCursor,
+    hasMore: page.hasMore,
     search: resolved.search,
     ...(resolved.searchSession ? { searchSession: resolved.searchSession } : {}),
     crawlRun: resolved.crawlRun,
     sourceResults,
-    jobs: sortJobsWithDiagnostics(
-      mergedJobs,
-      resolved.search.filters.title,
-      runtime.now ?? new Date(),
-    ),
+    jobs: page.jobs,
     diagnostics,
     delivery: {
       mode: "full",
@@ -407,6 +461,71 @@ export async function listRecentSearches(runtime: JobCrawlerRuntime = {}) {
   return repository.listRecentSearches();
 }
 
+export function normalizeSearchPaginationOptions(
+  options: SearchPaginationOptions = {},
+) {
+  const cursor =
+    Number.isFinite(options.cursor) && (options.cursor ?? 0) > 0
+      ? Math.floor(options.cursor ?? 0)
+      : 0;
+  const requestedPageSize =
+    Number.isFinite(options.pageSize) && (options.pageSize ?? 0) > 0
+      ? Math.floor(options.pageSize ?? defaultSearchResultsPageSize)
+      : defaultSearchResultsPageSize;
+
+  return {
+    cursor,
+    pageSize: Math.min(Math.max(1, requestedPageSize), maxSearchResultsPageSize),
+    searchSessionId: normalizeOptionalString(options.searchSessionId),
+  };
+}
+
+function paginateSearchResults(
+  jobs: JobListing[],
+  options: SearchPaginationOptions = {},
+): SearchPage {
+  const pagination = normalizeSearchPaginationOptions(options);
+  const totalMatchedCount = jobs.length;
+  const pageJobs = jobs.slice(pagination.cursor, pagination.cursor + pagination.pageSize);
+  const nextCursorValue = pagination.cursor + pageJobs.length;
+  const hasMore = nextCursorValue < totalMatchedCount;
+
+  return {
+    cursor: pagination.cursor,
+    pageSize: pagination.pageSize,
+    totalMatchedCount,
+    returnedCount: pageJobs.length,
+    nextCursor: hasMore ? nextCursorValue : null,
+    hasMore,
+    jobs: pageJobs,
+  };
+}
+
+function logSearchPagination(input: {
+  searchId: string;
+  searchSessionId?: string | null;
+  totalMatchedCount: number;
+  returnedCount: number;
+  pageSize: number;
+  nextCursor: number | null;
+  hasMore: boolean;
+}) {
+  console.info("[search:pagination]", {
+    searchId: input.searchId,
+    searchSessionId: input.searchSessionId,
+    totalMatchedCount: input.totalMatchedCount,
+    returnedCount: input.returnedCount,
+    pageSize: input.pageSize,
+    nextCursor: input.nextCursor,
+    hasMore: input.hasMore,
+  });
+}
+
+function normalizeOptionalString(value?: string) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 export async function requestSearchCancellation(
   searchId: string,
   repository: Awaited<ReturnType<typeof resolveRepository>>,
@@ -492,8 +611,11 @@ function buildSyntheticCrawlResponse(
   jobs: JobListing[],
   status?: "running" | "aborted",
   indexedCursor = 0,
+  paginationOptions: SearchPaginationOptions = {},
 ) {
   const crawlStatus = status ?? search.lastStatus ?? "completed";
+  const sortedJobs = sortJobsWithDiagnostics(jobs, search.filters.title);
+  const page = paginateSearchResults(sortedJobs, paginationOptions);
   const diagnostics = {
     discoveredSources: 0,
     crawledSources: 0,
@@ -520,14 +642,38 @@ function buildSyntheticCrawlResponse(
       searchId: search._id,
       sessionId: search.latestSearchSessionId,
       candidateCount: jobs.length,
-      matchedCount: jobs.length,
+      matchedCount: page.totalMatchedCount,
+      finalMatchedCount: page.totalMatchedCount,
+      totalMatchedCount: page.totalMatchedCount,
+      returnedCount: page.returnedCount,
+      pageSize: page.pageSize,
+      nextCursor: page.nextCursor,
+      hasMore: page.hasMore,
       excludedByTitleCount: 0,
       excludedByLocationCount: 0,
       excludedByExperienceCount: 0,
     },
   };
+  logSearchPagination({
+    searchId: search._id,
+    searchSessionId: search.latestSearchSessionId,
+    totalMatchedCount: page.totalMatchedCount,
+    returnedCount: page.returnedCount,
+    pageSize: page.pageSize,
+    nextCursor: page.nextCursor,
+    hasMore: page.hasMore,
+  });
 
   return crawlResponseSchema.parse({
+    searchId: search._id,
+    searchSessionId: search.latestSearchSessionId,
+    candidateCount: jobs.length,
+    finalMatchedCount: page.totalMatchedCount,
+    totalMatchedCount: page.totalMatchedCount,
+    returnedCount: page.returnedCount,
+    pageSize: page.pageSize,
+    nextCursor: page.nextCursor,
+    hasMore: page.hasMore,
     search: {
       ...search,
       ...(status
@@ -552,7 +698,7 @@ function buildSyntheticCrawlResponse(
       diagnostics,
     },
     sourceResults: [],
-    jobs: sortJobsWithDiagnostics(jobs, search.filters.title),
+    jobs: page.jobs,
     diagnostics,
     delivery: {
       mode: "full",
@@ -679,6 +825,10 @@ function attachSessionDiagnostics(
   searchResponse?: {
     candidateCount: number;
     matchedCount: number;
+    returnedCount?: number;
+    pageSize?: number;
+    nextCursor?: number | null;
+    hasMore?: boolean;
     excludedByTitleCount: number;
     excludedByLocationCount: number;
     excludedByExperienceCount: number;
@@ -712,6 +862,15 @@ function attachSessionDiagnostics(
               baseDiagnostics.session?.indexedCandidateCount ??
               indexedResultsCount,
             matchedCount: searchResponse?.matchedCount ?? totalVisibleResultsCount,
+            finalMatchedCount: searchResponse?.matchedCount ?? totalVisibleResultsCount,
+            totalMatchedCount: searchResponse?.matchedCount ?? totalVisibleResultsCount,
+            returnedCount:
+              searchResponse?.returnedCount ??
+              searchResponse?.matchedCount ??
+              totalVisibleResultsCount,
+            pageSize: searchResponse?.pageSize,
+            nextCursor: searchResponse?.nextCursor,
+            hasMore: searchResponse?.hasMore,
             excludedByTitleCount:
               searchResponse?.excludedByTitleCount ?? baseDiagnostics.excludedByTitle,
             excludedByLocationCount:

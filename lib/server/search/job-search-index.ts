@@ -36,26 +36,94 @@ import { resolveOperationalCrawlerPlatforms } from "@/lib/types";
 
 type CandidateQuerySort = Record<string, 1 | -1>;
 
-export type IndexedJobCandidateQuery = {
+export const indexedJobCandidateChannelNames = [
+  "exactTitleChannel",
+  "aliasTitleChannel",
+  "conceptChannel",
+  "familyChannel",
+  "geoChannel",
+  "legacyTitleFallbackChannel",
+  "legacyLocationFallbackChannel",
+] as const;
+
+export type IndexedJobCandidateChannelName =
+  (typeof indexedJobCandidateChannelNames)[number];
+
+export type IndexedJobCandidateChannelBreakdown = {
+  exactTitleCount: number;
+  aliasTitleCount: number;
+  conceptCount: number;
+  familyCount: number;
+  geoCount: number;
+  legacyTitleFallbackCount: number;
+  legacyLocationFallbackCount: number;
+  mergedCandidateCount: number;
+  finalMatchedCount: number;
+  returnedCount: number;
+};
+
+export type IndexedJobCandidateChannel = {
+  name: IndexedJobCandidateChannelName;
   filter: Record<string, unknown>;
   limit: number;
   sort: CandidateQuerySort;
   diagnostics: {
-    strategy: "coarse_prefilter";
+    strategy: "multi_channel_prefilter";
+    channel: IndexedJobCandidateChannelName;
+    titleTerms?: string[];
+    titleConceptIds?: string[];
     titleFamily?: string;
-    titleConceptIds: string[];
-    titleSearchTerms: string[];
-    usedPlatformPrefilter: boolean;
-  usedLocationPrefilter: boolean;
-  usedLocationTextFallback: boolean;
-  usedExperiencePrefilter: boolean;
-  usedNormalizedTitleRegex: boolean;
-  usedFamilyRoleFallback: boolean;
-  usedSearchReadyTitleKeys: boolean;
-  usedSearchReadyLocationKeys: boolean;
-  usedSearchReadyExperienceKeys: boolean;
+    titleRoleGroup?: string;
+    locationSearchKeys?: string[];
+    usesRegexFallback?: boolean;
   };
 };
+
+export type IndexedJobCandidateQuery = {
+  filter: Record<string, unknown>;
+  limit: number;
+  sort: CandidateQuerySort;
+  channels: IndexedJobCandidateChannel[];
+  mergedCandidateLimit: number;
+  diagnostics: {
+    strategy: "coarse_prefilter";
+    titleFamily?: string;
+    titleRoleGroup?: string;
+    titleConceptIds: string[];
+    titleSearchTerms: string[];
+    exactTitleTerms: string[];
+    aliasTitleTerms: string[];
+    locationSearchKeys: string[];
+    channelLimits: Record<IndexedJobCandidateChannelName, number>;
+    candidateChannelBreakdown?: IndexedJobCandidateChannelBreakdown;
+    usedPlatformPrefilter: boolean;
+    usedLocationPrefilter: boolean;
+    usedLocationTextFallback: boolean;
+    usedExperiencePrefilter: boolean;
+    usedNormalizedTitleRegex: boolean;
+    usedFamilyRoleFallback: boolean;
+    usedSearchReadyTitleKeys: boolean;
+    usedSearchReadyLocationKeys: boolean;
+    usedSearchReadyExperienceKeys: boolean;
+  };
+};
+
+export const emptyIndexedJobCandidateChannelBreakdown =
+  (): IndexedJobCandidateChannelBreakdown => ({
+    exactTitleCount: 0,
+    aliasTitleCount: 0,
+    conceptCount: 0,
+    familyCount: 0,
+    geoCount: 0,
+    legacyTitleFallbackCount: 0,
+    legacyLocationFallbackCount: 0,
+    mergedCandidateCount: 0,
+    finalMatchedCount: 0,
+    returnedCount: 0,
+  });
+
+const defaultMergedCandidateLimit = 5_000;
+const defaultChannelCandidateLimit = 5_000;
 
 const genericSingleWordTitleTerms = new Set([
   "analyst",
@@ -65,6 +133,29 @@ const genericSingleWordTitleTerms = new Set([
   "owner",
   "specialist",
 ]);
+
+function readPositiveIntegerEnv(name: string, fallback: number) {
+  const parsed = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function resolveIndexedCandidateLimits() {
+  const mergedCandidateLimit = readPositiveIntegerEnv(
+    "INDEXED_SEARCH_MERGED_CANDIDATE_LIMIT",
+    defaultMergedCandidateLimit,
+  );
+  const channelLimit = readPositiveIntegerEnv(
+    "INDEXED_SEARCH_CHANNEL_CANDIDATE_LIMIT",
+    defaultChannelCandidateLimit,
+  );
+
+  return {
+    mergedCandidateLimit,
+    channelLimits: Object.fromEntries(
+      indexedJobCandidateChannelNames.map((name) => [name, channelLimit]),
+    ) as Record<IndexedJobCandidateChannelName, number>,
+  };
+}
 
 function dedupeStrings(values: Array<string | undefined>) {
   const seen = new Set<string>();
@@ -170,6 +261,36 @@ function buildTitleSearchTerms(title: string) {
   ]);
 }
 
+function buildExactTitleTerms(title: string) {
+  const analysis = analyzeTitle(title);
+
+  return dedupeStrings([
+    analysis.normalized,
+    analysis.strippedNormalized,
+    normalizeTitleText(analysis.canonicalTitle),
+  ]);
+}
+
+function buildAliasTitleTerms(title: string) {
+  return dedupeStrings(
+    buildTitleQueryVariants(title, { maxQueries: 64 })
+      .filter((variant) =>
+        variant.kind === "synonym" ||
+        variant.kind === "abbreviation" ||
+        variant.kind === "adjacent_concept",
+      )
+      .map((variant) => variant.normalized),
+  );
+}
+
+function titleTermSearchKeys(terms: string[]) {
+  return terms.map((term) => `term:${term}`);
+}
+
+function titleConceptSearchKeys(conceptIds: string[]) {
+  return conceptIds.map((conceptId) => `concept:${conceptId}`);
+}
+
 export function buildJobSearchIndex(
   job: Pick<
     JobListing,
@@ -185,7 +306,21 @@ export function buildJobSearchIndex(
     | "geoLocation"
     | "experienceLevel"
     | "experienceClassification"
-  >,
+  > &
+    Partial<
+      Pick<
+        JobListing,
+        | "sourcePlatform"
+        | "linkStatus"
+        | "isActive"
+        | "postingDate"
+        | "postedAt"
+        | "lastSeenAt"
+        | "crawledAt"
+        | "discoveredAt"
+        | "indexedAt"
+      >
+    >,
 ): JobSearchIndex {
   const analysis = analyzeTitle(job.title);
   const titleNormalized = normalizeTitleText(job.normalizedTitle || job.title);
@@ -227,6 +362,15 @@ export function buildJobSearchIndex(
     locationCityKeys: locationKeys.cityKeys,
     locationSearchKeys: locationKeys.searchKeys,
     experienceSearchKeys,
+    statusSearchKeys: buildJobStatusSearchKeys(job),
+    rankingTimestamps: {
+      ...(job.postingDate ? { postingDate: job.postingDate } : {}),
+      ...(job.postedAt ? { postedAt: job.postedAt } : {}),
+      ...(job.lastSeenAt ? { lastSeenAt: job.lastSeenAt } : {}),
+      ...(job.crawledAt ? { crawledAt: job.crawledAt } : {}),
+      ...(job.discoveredAt ? { discoveredAt: job.discoveredAt } : {}),
+      ...(job.indexedAt ? { indexedAt: job.indexedAt } : {}),
+    },
   };
 }
 
@@ -284,11 +428,24 @@ function buildJobLocationSearchKeys(
     regionKeys: dedupedRegionKeys,
     cityKeys: dedupedCityKeys,
     searchKeys: dedupeStrings([
+      ...geoLocation.searchKeys,
       ...dedupedCountryKeys,
       ...dedupedRegionKeys,
       ...dedupedCityKeys,
     ]),
   };
+}
+
+function buildJobStatusSearchKeys(
+  job: Partial<Pick<JobListing, "sourcePlatform" | "linkStatus" | "isActive">>,
+) {
+  return dedupeStrings([
+    typeof job.isActive === "boolean"
+      ? `status:${job.isActive ? "active" : "inactive"}`
+      : undefined,
+    job.linkStatus ? `link_status:${job.linkStatus}` : undefined,
+    job.sourcePlatform ? `platform:${job.sourcePlatform}` : undefined,
+  ]);
 }
 
 function normalizeCountryName(value?: string) {
@@ -311,85 +468,99 @@ function normalizeSearchKey(value?: string) {
   return normalizeLocationText(value);
 }
 
-function buildLocationCandidateClause(filters: SearchFilters) {
+function buildSearchReadyLocationCandidateClause(filters: SearchFilters) {
   const geoIntent = parseGeoIntentFromFilters(filters);
-  const legacyClauses: Record<string, unknown>[] = [];
   const searchReadyKeys = geoIntent.searchKeys;
-  const searchReadyClause =
-    searchReadyKeys.length > 0
-      ? {
-          $or: [
-            { "searchIndex.locationSearchKeys": { $in: searchReadyKeys } },
-            { "geoLocation.searchKeys": { $in: searchReadyKeys } },
-          ],
-        }
-      : undefined;
+
+  if (searchReadyKeys.length === 0) {
+    return undefined;
+  }
+
+  return {
+    $or: [
+      { "searchIndex.locationSearchKeys": { $in: searchReadyKeys } },
+      { "geoLocation.searchKeys": { $in: searchReadyKeys } },
+    ],
+  };
+}
+
+function buildLegacyLocationFallbackClause(filters: SearchFilters) {
+  const geoIntent = parseGeoIntentFromFilters(filters);
+  const terms: string[] = [];
 
   if (geoIntent.country) {
     const catalogCountry = geoCatalog.find(
       (country) => country.code === geoIntent.country?.code || country.name === geoIntent.country?.name,
     );
-    const aliases = dedupeStrings([
+    terms.push(...dedupeStrings([
       geoIntent.country.name,
       geoIntent.country.code,
       ...geoIntent.country.aliases,
       ...(catalogCountry ? countryLocationAliases(catalogCountry) : []),
-    ]);
-    const locationTextFallback = buildGenericLocationTextFallbackClause(aliases);
-    legacyClauses.push({
-      $or: [
-        { country: geoIntent.country.name },
-        { "resolvedLocation.country": geoIntent.country.name },
-        { "resolvedLocation.physicalLocations.country": geoIntent.country.name },
-        { "resolvedLocation.eligibilityCountries": geoIntent.country.name },
-        { "geoLocation.physicalLocations.country": geoIntent.country.name },
-        { "geoLocation.remoteEligibility.country": geoIntent.country.name },
-        ...(locationTextFallback ? [locationTextFallback] : []),
-      ],
-    });
+    ]));
+
+    if (isUnitedStatesValue(geoIntent.country.name) || isUnitedStatesValue(geoIntent.country.code)) {
+      terms.push(...buildBroadUnitedStatesLegacyFallbackTerms());
+    }
   }
 
   if (geoIntent.region) {
-    const stateClauses = dedupeStrings([
+    terms.push(...dedupeStrings([
       geoIntent.region.name,
       geoIntent.region.code,
       ...geoIntent.region.aliases,
-    ]).flatMap((value) => [
-      { "resolvedLocation.state": value },
-      { "resolvedLocation.stateCode": value },
-      { "resolvedLocation.physicalLocations.state": value },
-      { "resolvedLocation.physicalLocations.stateCode": value },
-      { "geoLocation.physicalLocations.region": value },
-      { "geoLocation.physicalLocations.regionCode": value },
-      { "geoLocation.remoteEligibility.region": value },
-      { "geoLocation.remoteEligibility.regionCode": value },
-      { state: value },
-    ]);
+    ]));
 
-    if (stateClauses.length > 0) {
-      legacyClauses.push({ $or: stateClauses });
+    const usState = resolveUsState(geoIntent.region.name) ?? resolveUsState(geoIntent.region.code);
+    const usStateCode =
+      resolveUsStateCode(geoIntent.region.name) ?? resolveUsStateCode(geoIntent.region.code);
+    if (usState) {
+      terms.push(usState);
+    }
+    if (usStateCode) {
+      terms.push(usStateCode);
     }
   }
 
   if (geoIntent.city) {
-    legacyClauses.push({
-      $or: [
-        { "resolvedLocation.city": geoIntent.city.name },
-        { "resolvedLocation.physicalLocations.city": geoIntent.city.name },
-        { "geoLocation.physicalLocations.city": geoIntent.city.name },
-        { "geoLocation.remoteEligibility.city": geoIntent.city.name },
-        { city: geoIntent.city.name },
-        ...(geoIntent.confidence === "low" ? [buildGenericLocationTextFallbackClause(geoIntent.city.aliases)] : []),
-      ],
-    });
+    terms.push(geoIntent.city.name, ...geoIntent.city.aliases);
+
+    const analyzedCity = analyzeUsLocation(geoIntent.city.name);
+    if (analyzedCity.isUnitedStates) {
+      terms.push(...dedupeStrings([
+        analyzedCity.city,
+        analyzedCity.stateName,
+        analyzedCity.stateCode,
+        [analyzedCity.city, analyzedCity.stateCode].filter(Boolean).join(" "),
+        [analyzedCity.city, analyzedCity.stateName].filter(Boolean).join(" "),
+      ]));
+    }
   }
 
-  const legacyClause =
-    legacyClauses.length === 0
-      ? undefined
-      : legacyClauses.length === 1
-        ? legacyClauses[0]
-        : { $and: legacyClauses };
+  return buildGenericLocationTextFallbackClause(terms);
+}
+
+function buildBroadUnitedStatesLegacyFallbackTerms() {
+  return dedupeStrings([
+    ...getUsStateCatalog().flatMap((state) => [
+      state.name,
+      isAmbiguousShortLocationTerm(state.code) ? undefined : state.code,
+    ]),
+    ...getUsMetroCatalog().flatMap((metro) => [
+      metro.city,
+      `${metro.city} ${metro.stateCode}`,
+      `${metro.city} ${metro.stateName}`,
+    ]),
+  ]);
+}
+
+function isAmbiguousShortLocationTerm(value: string) {
+  return new Set(["AS", "HI", "ID", "IN", "ME", "OR"]).has(value.toUpperCase());
+}
+
+function buildLocationCandidateClause(filters: SearchFilters) {
+  const searchReadyClause = buildSearchReadyLocationCandidateClause(filters);
+  const legacyClause = buildLegacyLocationFallbackClause(filters);
 
   if (!searchReadyClause && !legacyClause) {
     return undefined;
@@ -460,108 +631,130 @@ export function buildIndexedJobCandidateQuery(
     ? resolveOperationalCrawlerPlatforms(filters.platforms)
     : undefined;
   const titleAnalysis = analyzeTitle(filters.title);
+  const exactTitleTerms = buildExactTitleTerms(filters.title);
+  const aliasTitleTerms = buildAliasTitleTerms(filters.title);
   const titleConceptIds = buildTitleConceptIds(filters.title);
   const titleSearchTerms = buildTitleSearchTerms(filters.title);
   const titleSearchKeys = buildFilterTitleSearchKeys(filters.title);
   const normalizedTitleRegex = buildNormalizedPhraseRegex(titleSearchTerms);
   const familyRoleFallback = buildFamilyRoleFallbackClause(filters.title);
-  const titleClauses: Record<string, unknown>[] = [];
-
-  if (titleSearchKeys.length > 0) {
-    titleClauses.push({
-      "searchIndex.titleSearchKeys": {
-        $in: titleSearchKeys,
-      },
-    });
-  }
-
-  if (titleConceptIds.length > 0) {
-    titleClauses.push({
-      "searchIndex.titleConceptIds": {
-        $in: titleConceptIds,
-      },
-    });
-  }
-
-  if (titleAnalysis.family && titleSearchTerms.length > 0) {
-    titleClauses.push({
-      $and: [
-        { "searchIndex.titleFamily": titleAnalysis.family },
-        { "searchIndex.titleSearchTerms": { $in: titleSearchTerms } },
-      ],
-    });
-  }
-
-  if (normalizedTitleRegex) {
-    titleClauses.push({
+  const geoLocationClause = buildSearchReadyLocationCandidateClause(filters);
+  const legacyLocationFallbackClause = buildLegacyLocationFallbackClause(filters);
+  const experienceClause = buildExperienceCandidateClause(filters);
+  const limits = resolveIndexedCandidateLimits();
+  const baseClauses: Record<string, unknown>[] = [
+    {
       $or: [
-        {
-          normalizedTitle: {
-            $regex: normalizedTitleRegex,
-          },
-        },
-        {
-          titleNormalized: {
-            $regex: normalizedTitleRegex,
-          },
-        },
+        { isActive: true },
+        { isActive: { $exists: false } },
       ],
-    });
-  }
-
-  if (familyRoleFallback) {
-    titleClauses.push(familyRoleFallback);
-  }
-
-  const clauses: Record<string, unknown>[] = [{ isActive: true }];
+    },
+  ];
 
   if (allowedPlatforms?.length) {
-    clauses.push({
+    baseClauses.push({
       sourcePlatform: { $in: allowedPlatforms },
     });
   }
 
-  const locationClause = buildLocationCandidateClause(filters);
-  if (locationClause) {
-    clauses.push(locationClause);
-  }
-
-  const experienceClause = buildExperienceCandidateClause(filters);
   if (experienceClause) {
-    clauses.push(experienceClause);
+    baseClauses.push(experienceClause);
   }
 
-  if (titleClauses.length > 0) {
-    clauses.push(titleClauses.length === 1 ? titleClauses[0] : { $or: titleClauses });
-  }
+  const channels = [
+    buildCandidateChannel({
+      name: "exactTitleChannel",
+      baseClauses,
+      channelClause: buildExactTitleChannelClause(exactTitleTerms),
+      limit: limits.channelLimits.exactTitleChannel,
+      diagnostics: {
+        titleTerms: exactTitleTerms,
+      },
+    }),
+    buildCandidateChannel({
+      name: "aliasTitleChannel",
+      baseClauses,
+      channelClause: buildAliasTitleChannelClause(aliasTitleTerms),
+      limit: limits.channelLimits.aliasTitleChannel,
+      diagnostics: {
+        titleTerms: aliasTitleTerms,
+      },
+    }),
+    buildCandidateChannel({
+      name: "conceptChannel",
+      baseClauses,
+      channelClause: buildConceptChannelClause(titleConceptIds),
+      limit: limits.channelLimits.conceptChannel,
+      diagnostics: {
+        titleConceptIds,
+      },
+    }),
+    buildCandidateChannel({
+      name: "familyChannel",
+      baseClauses,
+      channelClause: familyRoleFallback,
+      limit: limits.channelLimits.familyChannel,
+      diagnostics: {
+        titleFamily: titleAnalysis.family,
+        titleRoleGroup: titleAnalysis.roleGroup,
+      },
+    }),
+    buildCandidateChannel({
+      name: "geoChannel",
+      baseClauses,
+      channelClause: geoLocationClause,
+      limit: limits.channelLimits.geoChannel,
+      diagnostics: {
+        locationSearchKeys: parseGeoIntentFromFilters(filters).searchKeys,
+      },
+    }),
+    buildCandidateChannel({
+      name: "legacyTitleFallbackChannel",
+      baseClauses,
+      channelClause: buildLegacyTitleFallbackClause(normalizedTitleRegex),
+      limit: limits.channelLimits.legacyTitleFallbackChannel,
+      diagnostics: {
+        titleTerms: titleSearchTerms,
+        usesRegexFallback: true,
+      },
+    }),
+    buildCandidateChannel({
+      name: "legacyLocationFallbackChannel",
+      baseClauses,
+      channelClause: legacyLocationFallbackClause,
+      limit: limits.channelLimits.legacyLocationFallbackChannel,
+      diagnostics: {
+        usesRegexFallback: true,
+      },
+    }),
+  ].filter((channel): channel is IndexedJobCandidateChannel => Boolean(channel));
 
-  const filter = clauses.length === 1 ? clauses[0] : { $and: clauses };
-  const limit =
-    filters.state || filters.city || filters.experienceLevels?.length || filters.platforms?.length
-      ? 250
-      : titleAnalysis.primaryConceptId || titleAnalysis.family
-        ? 300
-        : 400;
+  const filter =
+    channels.length === 0
+      ? composeCandidateClause(baseClauses)
+      : channels.length === 1
+        ? channels[0].filter
+        : { $or: channels.map((channel) => channel.filter) };
 
   return {
     filter,
-    limit,
-    sort: {
-      postingDate: -1,
-      postedAt: -1,
-      lastSeenAt: -1,
-      crawledAt: -1,
-      discoveredAt: -1,
-      title: 1,
-    },
+    limit: limits.mergedCandidateLimit,
+    sort: indexedJobCandidateSort,
+    channels,
+    mergedCandidateLimit: limits.mergedCandidateLimit,
     diagnostics: {
       strategy: "coarse_prefilter",
       titleFamily: titleAnalysis.family,
+      titleRoleGroup: titleAnalysis.roleGroup,
       titleConceptIds,
       titleSearchTerms,
+      exactTitleTerms,
+      aliasTitleTerms,
+      locationSearchKeys: parseGeoIntentFromFilters(filters).searchKeys,
+      channelLimits: limits.channelLimits,
       usedPlatformPrefilter: Boolean(allowedPlatforms?.length),
-      usedLocationPrefilter: Boolean(locationClause),
-      usedLocationTextFallback: Boolean(parseGeoIntentFromFilters(filters).rawInput),
+      usedLocationPrefilter: Boolean(geoLocationClause || legacyLocationFallbackClause),
+      usedLocationTextFallback: Boolean(legacyLocationFallbackClause),
       usedExperiencePrefilter: Boolean(experienceClause),
       usedNormalizedTitleRegex: Boolean(normalizedTitleRegex),
       usedFamilyRoleFallback: Boolean(familyRoleFallback),
@@ -569,6 +762,113 @@ export function buildIndexedJobCandidateQuery(
       usedSearchReadyLocationKeys: parseGeoIntentFromFilters(filters).searchKeys.length > 0,
       usedSearchReadyExperienceKeys: Boolean(filters.experienceLevels?.length),
     },
+  };
+}
+
+const indexedJobCandidateSort: CandidateQuerySort = {
+  postingDate: -1,
+  postedAt: -1,
+  lastSeenAt: -1,
+  crawledAt: -1,
+  discoveredAt: -1,
+  title: 1,
+};
+
+function buildCandidateChannel(input: {
+  name: IndexedJobCandidateChannelName;
+  baseClauses: Record<string, unknown>[];
+  channelClause?: Record<string, unknown>;
+  limit: number;
+  diagnostics: Omit<
+    IndexedJobCandidateChannel["diagnostics"],
+    "strategy" | "channel"
+  >;
+}): IndexedJobCandidateChannel | undefined {
+  if (!input.channelClause) {
+    return undefined;
+  }
+
+  return {
+    name: input.name,
+    filter: composeCandidateClause(input.baseClauses, input.channelClause),
+    limit: input.limit,
+    sort: indexedJobCandidateSort,
+    diagnostics: {
+      strategy: "multi_channel_prefilter",
+      channel: input.name,
+      ...input.diagnostics,
+    },
+  };
+}
+
+function composeCandidateClause(
+  baseClauses: Record<string, unknown>[],
+  channelClause?: Record<string, unknown>,
+) {
+  const clauses = [...baseClauses, ...(channelClause ? [channelClause] : [])];
+
+  if (clauses.length === 1) {
+    return clauses[0] ?? {};
+  }
+
+  return { $and: clauses };
+}
+
+function buildExactTitleChannelClause(terms: string[]) {
+  if (terms.length === 0) {
+    return undefined;
+  }
+
+  return buildTitleFieldClause(terms);
+}
+
+function buildAliasTitleChannelClause(terms: string[]) {
+  if (terms.length === 0) {
+    return undefined;
+  }
+
+  return buildTitleFieldClause(terms);
+}
+
+function buildTitleFieldClause(terms: string[]) {
+  const titleSearchKeys = titleTermSearchKeys(terms);
+
+  return {
+    $or: [
+      { "searchIndex.titleNormalized": { $in: terms } },
+      { "searchIndex.titleStrippedNormalized": { $in: terms } },
+      { "searchIndex.titleSearchTerms": { $in: terms } },
+      { "searchIndex.titleSearchKeys": { $in: titleSearchKeys } },
+      { normalizedTitle: { $in: terms } },
+      { titleNormalized: { $in: terms } },
+    ],
+  };
+}
+
+function buildConceptChannelClause(conceptIds: string[]) {
+  if (conceptIds.length === 0) {
+    return undefined;
+  }
+
+  return {
+    $or: [
+      { "searchIndex.titleConceptIds": { $in: conceptIds } },
+      { "searchIndex.titleSearchKeys": { $in: titleConceptSearchKeys(conceptIds) } },
+    ],
+  };
+}
+
+function buildLegacyTitleFallbackClause(regex?: RegExp) {
+  if (!regex) {
+    return undefined;
+  }
+
+  return {
+    $or: [
+      { normalizedTitle: { $regex: regex } },
+      { titleNormalized: { $regex: regex } },
+      { title: { $regex: regex } },
+    ],
   };
 }
 

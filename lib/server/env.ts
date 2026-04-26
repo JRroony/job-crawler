@@ -37,6 +37,8 @@ const envSchema = z.object({
   CRAWL_INITIAL_VISIBLE_WAIT_MS: z.coerce.number().int().nonnegative().default(400),
   CRAWL_TARGET_JOB_COUNT: z.coerce.number().int().positive().default(30),
   CRAWL_EARLY_VISIBLE_TARGET: z.coerce.number().int().positive().default(30),
+  INDEXED_SEARCH_MERGED_CANDIDATE_LIMIT: z.coerce.number().int().positive().default(5000),
+  INDEXED_SEARCH_CHANNEL_CANDIDATE_LIMIT: z.coerce.number().int().positive().default(5000),
   BACKGROUND_INGESTION_ENABLED: z
     .enum(["true", "false"])
     .default("true")
@@ -109,6 +111,10 @@ export function getEnv() {
         process.env.CRAWL_TARGET_JOB_COUNT ?? "30",
       CRAWL_EARLY_VISIBLE_TARGET:
         process.env.CRAWL_EARLY_VISIBLE_TARGET ?? "30",
+      INDEXED_SEARCH_MERGED_CANDIDATE_LIMIT:
+        process.env.INDEXED_SEARCH_MERGED_CANDIDATE_LIMIT ?? "5000",
+      INDEXED_SEARCH_CHANNEL_CANDIDATE_LIMIT:
+        process.env.INDEXED_SEARCH_CHANNEL_CANDIDATE_LIMIT ?? "5000",
       BACKGROUND_INGESTION_ENABLED:
         process.env.BACKGROUND_INGESTION_ENABLED ?? "true",
       BACKGROUND_INGESTION_INTERVAL_MS:

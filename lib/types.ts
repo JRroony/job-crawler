@@ -609,11 +609,18 @@ export const crawlDiagnosticsSchema = z.object({
       sessionId: nullableOptional(z.string()),
       candidateCount: z.number().int().nonnegative().default(0),
       matchedCount: z.number().int().nonnegative().default(0),
+      finalMatchedCount: z.number().int().nonnegative().optional(),
+      totalMatchedCount: z.number().int().nonnegative().optional(),
+      returnedCount: z.number().int().nonnegative().optional(),
+      pageSize: z.number().int().positive().optional(),
+      nextCursor: z.number().int().nonnegative().nullable().optional(),
+      hasMore: z.boolean().optional(),
       excludedByTitleCount: z.number().int().nonnegative().default(0),
       excludedByLocationCount: z.number().int().nonnegative().default(0),
       excludedByExperienceCount: z.number().int().nonnegative().default(0),
     })
     .optional(),
+  searchTrace: z.record(z.string(), z.unknown()).optional(),
   session: z
     .object({
       indexedResultsCount: z.number().int().nonnegative().default(0),
@@ -991,6 +998,17 @@ export const jobSearchIndexSchema = z.object({
   locationCityKeys: z.array(z.string().min(1)).default([]),
   locationSearchKeys: z.array(z.string().min(1)).default([]),
   experienceSearchKeys: z.array(z.string().min(1)).default([]),
+  statusSearchKeys: z.array(z.string().min(1)).default([]),
+  rankingTimestamps: z
+    .object({
+      postingDate: z.string().datetime().optional(),
+      postedAt: z.string().datetime().optional(),
+      lastSeenAt: z.string().datetime().optional(),
+      crawledAt: z.string().datetime().optional(),
+      discoveredAt: z.string().datetime().optional(),
+      indexedAt: z.string().datetime().optional(),
+    })
+    .default({}),
 });
 
 // Canonical job-search entity. Keep this aligned with docs/normalized-job-model.md.
@@ -1198,6 +1216,15 @@ export const companyPageSourceConfigSchema = z.discriminatedUnion("type", [
 ]);
 
 export const crawlResponseSchema = z.object({
+  searchId: z.string().min(1).optional(),
+  searchSessionId: nullableOptional(z.string()),
+  candidateCount: z.number().int().nonnegative().optional(),
+  finalMatchedCount: z.number().int().nonnegative().optional(),
+  totalMatchedCount: z.number().int().nonnegative().optional(),
+  returnedCount: z.number().int().nonnegative().optional(),
+  pageSize: z.number().int().positive().optional(),
+  nextCursor: z.number().int().nonnegative().nullable().optional(),
+  hasMore: z.boolean().optional(),
   search: searchDocumentSchema,
   searchSession: searchSessionDocumentSchema.optional(),
   crawlRun: crawlRunDocumentSchema,
@@ -1212,6 +1239,15 @@ export const crawlResponseSchema = z.object({
 });
 
 export const crawlDeltaResponseSchema = z.object({
+  searchId: z.string().min(1).optional(),
+  searchSessionId: nullableOptional(z.string()),
+  candidateCount: z.number().int().nonnegative().optional(),
+  finalMatchedCount: z.number().int().nonnegative().optional(),
+  totalMatchedCount: z.number().int().nonnegative().optional(),
+  returnedCount: z.number().int().nonnegative().optional(),
+  pageSize: z.number().int().positive().optional(),
+  nextCursor: z.number().int().nonnegative().nullable().optional(),
+  hasMore: z.boolean().optional(),
   search: searchDocumentSchema,
   searchSession: searchSessionDocumentSchema.optional(),
   crawlRun: crawlRunDocumentSchema,

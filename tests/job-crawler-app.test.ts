@@ -6,8 +6,11 @@ import {
   describeZeroResultState,
   isSupplementingSearchSession,
   isLatestClientRequest,
+  isSameSearchSessionResult,
+  mergeSearchPageIntoResult,
   mergeCrawlDeltaIntoResult,
   normalizeSearchFiltersForClient,
+  resolveTotalMatchedCount,
   resolveQueuedSearchPollIntervalMs,
   resolveViewState,
   shouldShowBlockingSearchLoad,
@@ -339,6 +342,140 @@ describe("job crawler app result state", () => {
 
     expect(merged.jobs.map((job) => job._id)).toEqual(["job-1", "job-2"]);
     expect(merged.delivery?.cursor).toBe(2);
+  });
+
+  it("keeps total match count when only the first result page is loaded", () => {
+    const result = {
+      ...createResult("completed"),
+      totalMatchedCount: 300,
+      finalMatchedCount: 300,
+      returnedCount: 50,
+      pageSize: 50,
+      nextCursor: 50,
+      hasMore: true,
+      jobs: Array.from({ length: 50 }, (_, index) => createTestJob(`job-${index + 1}`)),
+      diagnostics: {
+        ...createResult("completed").diagnostics,
+        searchResponse: {
+          requestedFilters: { title: "Software Engineer" },
+          parsedFilters: { title: "Software Engineer" },
+          searchId: "search-1",
+          candidateCount: 300,
+          matchedCount: 300,
+          finalMatchedCount: 300,
+          totalMatchedCount: 300,
+          returnedCount: 50,
+          pageSize: 50,
+          nextCursor: 50,
+          hasMore: true,
+          excludedByTitleCount: 0,
+          excludedByLocationCount: 0,
+          excludedByExperienceCount: 0,
+        },
+      },
+    } satisfies CrawlResponse;
+
+    expect(result.jobs).toHaveLength(50);
+    expect(resolveTotalMatchedCount(result)).toBe(300);
+  });
+
+  it("appends the next page only for the same search session", () => {
+    const base = {
+      ...createResult("completed"),
+      searchSessionId: "session-1",
+      search: {
+        ...createResult("completed").search,
+        latestSearchSessionId: "session-1",
+      },
+      searchSession: {
+        _id: "session-1",
+        searchId: "search-1",
+        latestCrawlRunId: "run-1",
+        status: "completed" as const,
+        createdAt: "2026-03-30T12:00:00.000Z",
+        updatedAt: "2026-03-30T12:00:00.000Z",
+        finishedAt: "2026-03-30T12:05:00.000Z",
+        lastEventSequence: 50,
+      },
+      totalMatchedCount: 300,
+      returnedCount: 50,
+      pageSize: 50,
+      nextCursor: 50,
+      hasMore: true,
+      jobs: [createTestJob("job-1")],
+    } satisfies CrawlResponse;
+    const nextPage = {
+      ...base,
+      returnedCount: 50,
+      nextCursor: 100,
+      hasMore: true,
+      jobs: [createTestJob("job-2")],
+    } satisfies CrawlResponse;
+    const stalePage = {
+      ...base,
+      searchSessionId: "session-previous",
+      search: {
+        ...base.search,
+        latestSearchSessionId: "session-previous",
+      },
+      searchSession: {
+        ...base.searchSession!,
+        _id: "session-previous",
+      },
+      jobs: [createTestJob("stale-job")],
+    } satisfies CrawlResponse;
+
+    expect(mergeSearchPageIntoResult(base, nextPage)?.jobs.map((job) => job._id)).toEqual([
+      "job-1",
+      "job-2",
+    ]);
+    expect(mergeSearchPageIntoResult(base, stalePage)?.jobs.map((job) => job._id)).toEqual([
+      "job-1",
+    ]);
+  });
+
+  it("does not treat a new search response as appendable to old visible jobs", () => {
+    const previousSearch = {
+      ...createResult("completed"),
+      searchSessionId: "session-old",
+      search: {
+        ...createResult("completed").search,
+        _id: "search-old",
+        latestSearchSessionId: "session-old",
+      },
+      searchSession: {
+        _id: "session-old",
+        searchId: "search-old",
+        latestCrawlRunId: "run-1",
+        status: "completed" as const,
+        createdAt: "2026-03-30T12:00:00.000Z",
+        updatedAt: "2026-03-30T12:00:00.000Z",
+        finishedAt: "2026-03-30T12:05:00.000Z",
+        lastEventSequence: 1,
+      },
+      jobs: [createTestJob("old-job")],
+    } satisfies CrawlResponse;
+    const newSearch = {
+      ...previousSearch,
+      searchId: "search-new",
+      searchSessionId: "session-new",
+      search: {
+        ...previousSearch.search,
+        _id: "search-new",
+        latestSearchSessionId: "session-new",
+      },
+      searchSession: {
+        ...previousSearch.searchSession!,
+        _id: "session-new",
+        searchId: "search-new",
+      },
+      jobs: [createTestJob("new-job")],
+    } satisfies CrawlResponse;
+
+    expect(isSameSearchSessionResult(previousSearch, newSearch)).toBe(false);
+    expect(mergeSearchPageIntoResult(previousSearch, newSearch)?.jobs.map((job) => job._id)).toEqual([
+      "old-job",
+    ]);
   });
 
   it("explains that results arrive while background work continues", () => {

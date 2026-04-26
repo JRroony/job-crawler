@@ -4,6 +4,7 @@ import {
   abortSearch,
   getSearchDetails,
   getSearchJobDeltas,
+  normalizeSearchPaginationOptions,
 } from "@/lib/server/search/session-service";
 import { ResourceNotFoundError } from "@/lib/server/search/errors";
 
@@ -17,6 +18,9 @@ export async function GET(
     const mode = searchParams.get("mode");
     const afterParam = searchParams.get("after");
     const indexedAfterParam = searchParams.get("indexedAfter");
+    const cursorParam = searchParams.get("cursor");
+    const pageSizeParam = searchParams.get("pageSize");
+    const searchSessionId = searchParams.get("searchSessionId")?.trim() || undefined;
     const afterCursor =
       typeof afterParam === "string" && afterParam.trim().length > 0
         ? Number.parseInt(afterParam, 10)
@@ -37,7 +41,19 @@ export async function GET(
                   : undefined,
             },
           )
-        : await getSearchDetails(params.id);
+        : await getSearchDetails(params.id, {
+            ...normalizeSearchPaginationOptions({
+              cursor:
+                typeof cursorParam === "string" && cursorParam.trim().length > 0
+                  ? Number.parseInt(cursorParam, 10)
+                  : undefined,
+              pageSize:
+                typeof pageSizeParam === "string" && pageSizeParam.trim().length > 0
+                  ? Number.parseInt(pageSizeParam, 10)
+                  : undefined,
+              searchSessionId,
+            }),
+          });
     return NextResponse.json(result);
   } catch (error) {
     if (error instanceof ResourceNotFoundError) {

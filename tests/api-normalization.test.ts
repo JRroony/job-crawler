@@ -31,6 +31,18 @@ vi.mock("@/lib/server/search/session-service", () => ({
   abortSearch: abortSearchMock,
   getSearchDetails: getSearchDetailsMock,
   getSearchJobDeltas: getSearchJobDeltasMock,
+  normalizeSearchPaginationOptions: (options: {
+    cursor?: number;
+    pageSize?: number;
+    searchSessionId?: string;
+  }) => ({
+    cursor: Number.isFinite(options.cursor) && (options.cursor ?? 0) > 0 ? options.cursor : 0,
+    pageSize:
+      Number.isFinite(options.pageSize) && (options.pageSize ?? 0) > 0
+        ? Math.min(options.pageSize ?? 50, 100)
+        : 50,
+    searchSessionId: options.searchSessionId,
+  }),
 }));
 
 vi.mock("@/lib/server/search/errors", () => ({
@@ -142,5 +154,51 @@ describe("search API normalization", () => {
       afterIndexedCursor: 9,
     });
     expect(getSearchDetailsMock).not.toHaveBeenCalled();
+  });
+
+  it("passes cursor pagination options to search detail requests", async () => {
+    getSearchDetailsMock.mockResolvedValue({
+      searchId: "search-1",
+      searchSessionId: "session-1",
+      totalMatchedCount: 300,
+      returnedCount: 50,
+      pageSize: 50,
+      nextCursor: 100,
+      hasMore: true,
+      search: { _id: "search-1" },
+      searchSession: { _id: "session-1" },
+      crawlRun: { status: "completed" },
+      jobs: [],
+      sourceResults: [],
+      diagnostics: {},
+    });
+
+    const response = await GET(
+      new Request(
+        "http://localhost/api/searches/search-1?cursor=50&pageSize=50&searchSessionId=session-1",
+      ),
+      {
+        params: Promise.resolve({ id: "search-1" }),
+      },
+    );
+    const payload = (await response.json()) as {
+      totalMatchedCount?: number;
+      returnedCount?: number;
+      nextCursor?: number;
+      hasMore?: boolean;
+    };
+
+    expect(response.status).toBe(200);
+    expect(getSearchDetailsMock).toHaveBeenCalledWith("search-1", {
+      cursor: 50,
+      pageSize: 50,
+      searchSessionId: "session-1",
+    });
+    expect(payload).toMatchObject({
+      totalMatchedCount: 300,
+      returnedCount: 50,
+      nextCursor: 100,
+      hasMore: true,
+    });
   });
 });
