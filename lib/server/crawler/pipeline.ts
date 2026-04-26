@@ -217,6 +217,8 @@ export async function executeCrawlPipeline(
     crawlRunId: input.crawlRun?._id ?? null,
     title: input.search.filters.title,
     country: input.search.filters.country ?? null,
+    filters: input.search.filters,
+    providerCount: input.providers.length,
   });
   throwIfAborted(input.signal);
   const crawlStartedMs = Date.now();
@@ -641,6 +643,16 @@ export async function executeCrawlPipeline(
           batchLabel: payload.batchLabel,
           provider: traceProvider,
           persistedJobCount: savedJobs.length,
+          insertedCount: persistence.insertedCount,
+          updatedCount: persistence.updatedCount,
+          linkedToRunCount: persistence.linkedToRunCount,
+          indexedEventCount: persistence.indexedEventCount,
+          newVisibleJobCount,
+        });
+        console.info("[ingestion:db-write-result]", {
+          searchId: search._id,
+          searchSessionId: searchSession._id,
+          crawlRunId: crawlRun._id,
           insertedCount: persistence.insertedCount,
           updatedCount: persistence.updatedCount,
           linkedToRunCount: persistence.linkedToRunCount,

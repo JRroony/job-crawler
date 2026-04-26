@@ -19,6 +19,7 @@ export type JobCrawlerRuntime = {
   initialVisibleWaitMs?: number;
   allowRequestTimeSupplementalCrawl?: boolean;
   requestOwnerKey?: string;
+  ingestionQueueReason?: string;
   signal?: AbortSignal;
 };
 

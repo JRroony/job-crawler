@@ -638,14 +638,20 @@ export const crawlDiagnosticsSchema = z.object({
         })
         .optional(),
       minimumIndexedCoverage: z.number().int().nonnegative().default(0),
+      coverageTarget: z.number().int().nonnegative().default(0),
+      coveragePolicyReason: nullableOptional(z.string()),
       targetJobCount: z.number().int().nonnegative().default(0),
       supplementalQueued: z.boolean().default(false),
       supplementalRunning: z.boolean().default(false),
+      targetedReplenishmentQueued: z.boolean().default(false),
+      targetedReplenishmentActive: z.boolean().default(false),
+      activeQueueAlreadyExists: z.boolean().default(false),
       triggerReason: z
         .enum([
           "indexed_coverage_sufficient",
           "reused_completed_coverage",
           "insufficient_indexed_coverage",
+          "insufficient_indexed_coverage_targeted_replenishment",
           "insufficient_indexed_coverage_background_requested",
           "indexed_empty_background_requested",
           "background_ingestion_already_active",

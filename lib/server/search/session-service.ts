@@ -892,11 +892,19 @@ function attachSessionDiagnostics(
         baseDiagnostics.session?.indexedRequestTimeExcludedCount ?? 0,
       indexedSearchTimingsMs: baseDiagnostics.session?.indexedSearchTimingsMs,
       minimumIndexedCoverage: baseDiagnostics.session?.minimumIndexedCoverage ?? 0,
+      coverageTarget: baseDiagnostics.session?.coverageTarget ?? 0,
+      coveragePolicyReason: baseDiagnostics.session?.coveragePolicyReason,
       targetJobCount: baseDiagnostics.session?.targetJobCount ?? 0,
       supplementalQueued:
         baseDiagnostics.session?.supplementalQueued ??
         (crawlRun.status === "running" || supplementalResultsCount > 0),
       supplementalRunning: crawlRun.status === "running" && !crawlRun.finishedAt,
+      targetedReplenishmentQueued:
+        baseDiagnostics.session?.targetedReplenishmentQueued ?? false,
+      targetedReplenishmentActive:
+        baseDiagnostics.session?.targetedReplenishmentActive ?? false,
+      activeQueueAlreadyExists:
+        baseDiagnostics.session?.activeQueueAlreadyExists ?? false,
       triggerReason: baseDiagnostics.session?.triggerReason,
       triggerExplanation: baseDiagnostics.session?.triggerExplanation,
       reusedExistingSearch: baseDiagnostics.session?.reusedExistingSearch,

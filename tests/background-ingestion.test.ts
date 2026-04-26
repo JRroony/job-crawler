@@ -383,7 +383,10 @@ describe("recurring background ingestion", () => {
     expect(indexedResult.diagnostics.session).toMatchObject({
       indexedResultsCount: indexedResult.jobs.length,
       supplementalQueued: false,
-      triggerReason: "indexed_coverage_sufficient",
+      triggerReason: "insufficient_indexed_coverage_background_requested",
+      backgroundIngestion: expect.objectContaining({
+        status: expect.stringMatching(/^(started|already_active)$/),
+      }),
     });
   });
 

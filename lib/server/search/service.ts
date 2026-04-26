@@ -11,6 +11,7 @@ import {
   runSearchIngestionFromSession,
 } from "@/lib/server/ingestion/service";
 import { triggerRecurringBackgroundIngestion } from "@/lib/server/background/recurring-ingestion";
+import { analyzeTitle } from "@/lib/server/title-retrieval/analyze";
 import {
   createSearchRerunSession,
   createSearchSession,
@@ -30,6 +31,8 @@ import {
   type SearchTraceDiagnostics,
 } from "@/lib/server/search/search-trace";
 import type { CrawlDiagnostics, SearchDocument } from "@/lib/types";
+
+type ParsedSearchFilters = ReturnType<typeof parseSearchFilters>;
 
 export async function runSearchFromFilters(
   rawFilters: unknown,
@@ -289,6 +292,9 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     runtime.allowRequestTimeSupplementalCrawl === true;
   const allowRequestTimeFreshnessRecovery =
     (runtime.providers?.length ?? 1) > 0 && Boolean(runtime.discovery ?? true);
+  const targetedReplenishmentOwnerKey = buildTargetedReplenishmentOwnerKey(
+    session.search.filters,
+  );
   const supplementalDecision = resolveSupplementalCrawlDecision(
     session.search.filters,
     indexedSearch,
@@ -299,7 +305,21 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
       allowRequestTimeFreshnessRecovery,
     },
   );
-  const backgroundIngestion = supplementalDecision.requestBackgroundIngestion
+  const activeTargetedQueueEntry =
+    supplementalDecision.shouldQueueTargetedReplenishment
+      ? await session.repository.getActiveCrawlQueueEntryForOwner(
+          targetedReplenishmentOwnerKey,
+        )
+      : null;
+  const activeQueueAlreadyExists = Boolean(
+    activeTargetedQueueEntry &&
+      activeTargetedQueueEntry.crawlRunId !== session.crawlRun._id,
+  );
+  const shouldQueueCurrentRun =
+    supplementalDecision.shouldQueue && !activeQueueAlreadyExists;
+  const shouldRequestGenericBackgroundIngestion =
+    supplementalDecision.requestBackgroundIngestion && !shouldQueueCurrentRun;
+  const backgroundIngestion = shouldRequestGenericBackgroundIngestion
     ? await requestBackgroundIngestionForIndexGap(runtime, session.now)
     : { status: "not_requested" as const };
   const ingestionDecisionLog = {
@@ -310,15 +330,21 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     country: session.search.filters.country ?? null,
     indexedCandidateCount: indexedSearch.candidateCount,
     indexedMatchedCount: indexedJobs.length,
-    minimumIndexedCoverage: supplementalDecision.minimumIndexedCoverage,
+    coverageTarget: supplementalDecision.coverageTarget,
+    coveragePolicyReason: supplementalDecision.coveragePolicyReason,
     targetJobCount: supplementalDecision.targetJobCount,
+    latestIndexedJobAgeMs: supplementalDecision.latestIndexedJobAgeMs ?? null,
     triggerReason: supplementalDecision.triggerReason,
-    shouldQueue: supplementalDecision.shouldQueue,
-    requestBackgroundIngestion: supplementalDecision.requestBackgroundIngestion,
+    shouldQueueTargetedReplenishment:
+      supplementalDecision.shouldQueueTargetedReplenishment && !activeQueueAlreadyExists,
+    shouldRequestGenericBackgroundIngestion,
+    shouldRunRequestTimeCrawl: supplementalDecision.shouldRunRequestTimeCrawl,
+    activeQueueAlreadyExists,
+    shouldQueue: shouldQueueCurrentRun,
+    requestBackgroundIngestion: shouldRequestGenericBackgroundIngestion,
     backgroundIngestionStatus: backgroundIngestion.status,
     allowRequestTimeSupplementalCrawl,
     allowRequestTimeFreshnessRecovery,
-    latestIndexedJobAgeMs: supplementalDecision.latestIndexedJobAgeMs ?? null,
   };
   console.info("[ingestion:decision]", ingestionDecisionLog);
   console.info("[ingestion:trace:decision]", {
@@ -327,12 +353,16 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     crawlRunId: session.crawlRun._id,
     indexedCandidateCount: indexedSearch.candidateCount,
     indexedMatchedCount: indexedJobs.length,
-    minimumIndexedCoverage: supplementalDecision.minimumIndexedCoverage,
+    coverageTarget: supplementalDecision.coverageTarget,
+    coveragePolicyReason: supplementalDecision.coveragePolicyReason,
     triggerReason: supplementalDecision.triggerReason,
-    shouldQueue: supplementalDecision.shouldQueue,
-    requestBackgroundIngestion: supplementalDecision.requestBackgroundIngestion,
+    shouldQueue: shouldQueueCurrentRun,
+    shouldQueueTargetedReplenishment:
+      supplementalDecision.shouldQueueTargetedReplenishment && !activeQueueAlreadyExists,
+    requestBackgroundIngestion: shouldRequestGenericBackgroundIngestion,
     backgroundIngestionStatus: backgroundIngestion.status,
     backgroundIngestion,
+    activeQueueAlreadyExists,
     crawlMode: session.search.filters.crawlMode ?? "balanced",
   });
   const indexFirstDecisionTrace = emitSearchTraceStage("index-first-decision", {
@@ -340,9 +370,14 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     indexedCandidateCount: indexedSearch.candidateCount,
     indexedMatchedCount: indexedJobs.length,
     minimumIndexedCoverage: supplementalDecision.minimumIndexedCoverage,
+    coverageTarget: supplementalDecision.coverageTarget,
+    coveragePolicyReason: supplementalDecision.coveragePolicyReason,
     triggerReason: supplementalDecision.triggerReason,
-    backgroundIngestionRequested: supplementalDecision.requestBackgroundIngestion,
-    shouldQueueSupplemental: supplementalDecision.shouldQueue,
+    backgroundIngestionRequested: shouldRequestGenericBackgroundIngestion,
+    shouldQueueSupplemental: shouldQueueCurrentRun,
+    shouldQueueTargetedReplenishment:
+      supplementalDecision.shouldQueueTargetedReplenishment && !activeQueueAlreadyExists,
+    activeQueueAlreadyExists,
   });
   const indexedSearchTrace = indexedSearch.searchTrace ?? { traceId: searchTrace.traceId };
   const completedSearchTrace = attachSearchTraceStage(
@@ -361,6 +396,15 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     indexedJobs.length,
     backgroundIngestion,
     completedSearchTrace,
+    {
+      shouldQueueCurrentRun,
+      targetedReplenishmentQueued:
+        supplementalDecision.shouldQueueTargetedReplenishment && !activeQueueAlreadyExists,
+      targetedReplenishmentActive:
+        supplementalDecision.shouldQueueTargetedReplenishment &&
+        (activeQueueAlreadyExists || shouldQueueCurrentRun),
+      activeQueueAlreadyExists,
+    },
   );
   session.crawlRun = {
     ...session.crawlRun,
@@ -368,7 +412,7 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
   };
 
   await session.repository.updateCrawlRunProgress(session.crawlRun._id, {
-    stage: supplementalDecision.shouldQueue ? "queued" : "finalizing",
+    stage: shouldQueueCurrentRun ? "queued" : "finalizing",
     totalFetchedJobs: 0,
     totalMatchedJobs: indexedJobs.length,
     dedupedJobs: indexedJobs.length,
@@ -380,9 +424,12 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     searchSessionId: session.searchSession._id,
     indexedCandidates: indexedSearch.candidateCount,
     indexedJobs: indexedJobs.length,
-    supplementalQueued: supplementalDecision.shouldQueue,
+    supplementalQueued: shouldQueueCurrentRun,
+    targetedReplenishmentQueued:
+      supplementalDecision.shouldQueueTargetedReplenishment && !activeQueueAlreadyExists,
     supplementalReason: supplementalDecision.triggerReason,
     backgroundIngestion,
+    activeQueueAlreadyExists,
     crawlMode: session.search.filters.crawlMode ?? "balanced",
     reusedExistingSearch: session.searchReuse.reusedExistingSearch,
     previousVisibleJobCount: session.searchReuse.previousVisibleJobCount,
@@ -397,7 +444,7 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     indexedSearchTimingsMs: indexedSearch.timingsMs,
   });
 
-  if (!supplementalDecision.shouldQueue) {
+  if (!shouldQueueCurrentRun) {
     const finishedAt = session.now.toISOString();
     await Promise.all([
       session.repository.finalizeCrawlRun(session.crawlRun._id, {
@@ -442,16 +489,24 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
       ...runtime,
       repository: session.repository,
       now: session.now,
+      requestOwnerKey: supplementalDecision.shouldQueueTargetedReplenishment
+        ? targetedReplenishmentOwnerKey
+        : runtime.requestOwnerKey,
+      ingestionQueueReason: supplementalDecision.triggerReason,
     },
   );
 }
 
 type SupplementalDecision = {
   shouldQueue: boolean;
+  shouldQueueTargetedReplenishment: boolean;
+  shouldRunRequestTimeCrawl: boolean;
   requestBackgroundIngestion: boolean;
   triggerReason: NonNullable<NonNullable<CrawlDiagnostics["session"]>["triggerReason"]>;
   triggerExplanation: string;
   minimumIndexedCoverage: number;
+  coverageTarget: number;
+  coveragePolicyReason: string;
   targetJobCount: number;
   indexedCandidateCount: number;
   indexedRequestTimeEvaluationCount: number;
@@ -473,7 +528,7 @@ type BackgroundIngestionRequestDiagnostics = NonNullable<
 >;
 
 function resolveSupplementalCrawlDecision(
-  filters: ReturnType<typeof parseSearchFilters>,
+  filters: ParsedSearchFilters,
   indexedSearch: Awaited<ReturnType<typeof getIndexedJobsForSearch>>,
   previousCoverage: {
     reusedExistingSearch: boolean;
@@ -489,87 +544,59 @@ function resolveSupplementalCrawlDecision(
 ): SupplementalDecision {
   const env = getEnv();
   const mode = filters.crawlMode ?? "balanced";
-  const minimumIndexedCoverageByMode = {
-    fast: Math.min(3, env.CRAWL_TARGET_JOB_COUNT),
-    balanced: Math.min(5, env.CRAWL_TARGET_JOB_COUNT),
-    deep: Math.min(8, env.CRAWL_TARGET_JOB_COUNT),
-  } as const;
-  const minimumIndexedCoverage = minimumIndexedCoverageByMode[mode];
   const indexedJobCount = indexedSearch.matches.length;
   const latestIndexedJobAgeMs = resolveLatestIndexedJobAgeMs(
     indexedSearch.matches.map(({ job }) => job),
     now,
   );
+  const coveragePolicy = resolveIndexedCoveragePolicy(
+    filters,
+    indexedSearch,
+    env,
+    latestIndexedJobAgeMs,
+  );
+  const minimumIndexedCoverage = coveragePolicy.coverageTarget;
+  const baseDecision = {
+    minimumIndexedCoverage,
+    coverageTarget: coveragePolicy.coverageTarget,
+    coveragePolicyReason: coveragePolicy.reason,
+    targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
+    indexedCandidateCount: indexedSearch.candidateCount,
+    indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
+    indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
+    indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
+    indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
+    indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
+    indexedSearchTimingsMs: indexedSearch.timingsMs,
+    indexedJobCount,
+    reusedExistingSearch: previousCoverage.reusedExistingSearch,
+    previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
+    previousRunStatus: previousCoverage.previousRunStatus,
+    previousFinishedAt: previousCoverage.previousFinishedAt,
+    latestIndexedJobAgeMs,
+  };
 
   if (options.allowRequestTimeSupplementalCrawl && indexedJobCount < minimumIndexedCoverage) {
     return {
+      ...baseDecision,
       shouldQueue: true,
+      shouldQueueTargetedReplenishment: false,
+      shouldRunRequestTimeCrawl: true,
       requestBackgroundIngestion: false,
       triggerReason: "explicit_request_time_recovery",
-      triggerExplanation: `An explicit request-time supplemental recovery opt-in was provided and indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${mode} threshold.`,
-      minimumIndexedCoverage,
-      targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
-      indexedCandidateCount: indexedSearch.candidateCount,
-      indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
-      indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
-      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
-      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
-      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
-      indexedSearchTimingsMs: indexedSearch.timingsMs,
-      indexedJobCount,
-      reusedExistingSearch: previousCoverage.reusedExistingSearch,
-      previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
-      previousRunStatus: previousCoverage.previousRunStatus,
-      previousFinishedAt: previousCoverage.previousFinishedAt,
-      latestIndexedJobAgeMs,
-    };
-  }
-
-  if (indexedJobCount === 0) {
-    return {
-      shouldQueue: false,
-      requestBackgroundIngestion: true,
-      triggerReason: "indexed_empty_background_requested",
-      triggerExplanation: `Indexed coverage returned zero visible jobs for ${mode} mode, so the request path stays index-first and an independent background ingestion cycle was requested.`,
-      minimumIndexedCoverage,
-      targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
-      indexedCandidateCount: indexedSearch.candidateCount,
-      indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
-      indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
-      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
-      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
-      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
-      indexedSearchTimingsMs: indexedSearch.timingsMs,
-      indexedJobCount,
-      reusedExistingSearch: previousCoverage.reusedExistingSearch,
-      previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
-      previousRunStatus: previousCoverage.previousRunStatus,
-      previousFinishedAt: previousCoverage.previousFinishedAt,
-      latestIndexedJobAgeMs,
+      triggerExplanation: `An explicit request-time supplemental recovery opt-in was provided and indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${coveragePolicy.reason} target.`,
     };
   }
 
   if (indexedJobCount >= minimumIndexedCoverage) {
     return {
+      ...baseDecision,
       shouldQueue: false,
+      shouldQueueTargetedReplenishment: false,
+      shouldRunRequestTimeCrawl: false,
       requestBackgroundIngestion: false,
       triggerReason: "indexed_coverage_sufficient",
-      triggerExplanation: `Indexed results already meet the ${minimumIndexedCoverage}-job ${mode} coverage threshold, so request-time crawl stays off.`,
-      minimumIndexedCoverage,
-      targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
-      indexedCandidateCount: indexedSearch.candidateCount,
-      indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
-      indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
-      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
-      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
-      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
-      indexedSearchTimingsMs: indexedSearch.timingsMs,
-      indexedJobCount,
-      reusedExistingSearch: previousCoverage.reusedExistingSearch,
-      previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
-      previousRunStatus: previousCoverage.previousRunStatus,
-      previousFinishedAt: previousCoverage.previousFinishedAt,
-      latestIndexedJobAgeMs,
+      triggerExplanation: `Indexed results meet the ${minimumIndexedCoverage}-job ${coveragePolicy.reason} target, so request-time crawl stays off.`,
     };
   }
 
@@ -577,28 +604,17 @@ function resolveSupplementalCrawlDecision(
     previousCoverage.reusedExistingSearch &&
     previousCoverage.previousRunStatus === "completed" &&
     previousCoverage.previousVisibleJobCount > 0 &&
-    indexedJobCount >= previousCoverage.previousVisibleJobCount
+    indexedJobCount >= previousCoverage.previousVisibleJobCount &&
+    previousCoverage.previousVisibleJobCount >= minimumIndexedCoverage
   ) {
     return {
+      ...baseDecision,
       shouldQueue: false,
+      shouldQueueTargetedReplenishment: false,
+      shouldRunRequestTimeCrawl: false,
       requestBackgroundIngestion: false,
       triggerReason: "reused_completed_coverage",
       triggerExplanation: "A completed identical search was reused and the indexed session already preserves its previously visible coverage.",
-      minimumIndexedCoverage,
-      targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
-      indexedCandidateCount: indexedSearch.candidateCount,
-      indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
-      indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
-      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
-      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
-      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
-      indexedSearchTimingsMs: indexedSearch.timingsMs,
-      indexedJobCount,
-      reusedExistingSearch: previousCoverage.reusedExistingSearch,
-      previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
-      previousRunStatus: previousCoverage.previousRunStatus,
-      previousFinishedAt: previousCoverage.previousFinishedAt,
-      latestIndexedJobAgeMs,
     };
   }
 
@@ -608,103 +624,186 @@ function resolveSupplementalCrawlDecision(
     typeof latestIndexedJobAgeMs === "number" &&
     latestIndexedJobAgeMs >= staleAfterMs;
 
-  if (freshnessRecoveryEligible) {
-    if (mode !== "deep" || !options.allowRequestTimeFreshnessRecovery) {
-      return {
-        shouldQueue: false,
-        requestBackgroundIngestion: true,
-        triggerReason: "stale_indexed_coverage_background_requested",
-        triggerExplanation: `Indexed coverage is below the ${minimumIndexedCoverage}-job ${mode} threshold and the newest indexed match is stale, so background ingestion was requested instead of making the search request crawl.`,
-        minimumIndexedCoverage,
-        targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
-        indexedCandidateCount: indexedSearch.candidateCount,
-        indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
-        indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
-      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
-      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
-      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
-        indexedSearchTimingsMs: indexedSearch.timingsMs,
-        indexedJobCount,
-        reusedExistingSearch: previousCoverage.reusedExistingSearch,
-        previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
-        previousRunStatus: previousCoverage.previousRunStatus,
-        previousFinishedAt: previousCoverage.previousFinishedAt,
-        latestIndexedJobAgeMs,
-      };
-    }
-
-    return {
-      shouldQueue: true,
-      requestBackgroundIngestion: false,
-      triggerReason: "freshness_recovery",
-      triggerExplanation: `Deep mode explicitly requested broader retrieval and indexed coverage is below the ${minimumIndexedCoverage}-job threshold with stale matches, so a bounded supplemental freshness recovery was queued.`,
-      minimumIndexedCoverage,
-      targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
-      indexedCandidateCount: indexedSearch.candidateCount,
-      indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
-      indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
-      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
-      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
-      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
-      indexedSearchTimingsMs: indexedSearch.timingsMs,
-      indexedJobCount,
-      reusedExistingSearch: previousCoverage.reusedExistingSearch,
-      previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
-      previousRunStatus: previousCoverage.previousRunStatus,
-      previousFinishedAt: previousCoverage.previousFinishedAt,
-      latestIndexedJobAgeMs,
-    };
-  }
-
   if (
     previousCoverage.reusedExistingSearch &&
     previousCoverage.previousRunStatus &&
-    previousCoverage.previousRunStatus !== "completed"
+    previousCoverage.previousRunStatus !== "completed" &&
+    !options.allowRequestTimeFreshnessRecovery
   ) {
     return {
+      ...baseDecision,
       shouldQueue: false,
+      shouldQueueTargetedReplenishment: false,
+      shouldRunRequestTimeCrawl: false,
       requestBackgroundIngestion: true,
       triggerReason: "incomplete_previous_run_background_requested",
-      triggerExplanation: "The previous identical session did not complete cleanly and indexed coverage is still below threshold, so background ingestion was requested instead of retrying crawl work in the search request.",
-      minimumIndexedCoverage,
-      targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
-      indexedCandidateCount: indexedSearch.candidateCount,
-      indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
-      indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
-      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
-      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
-      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
-      indexedSearchTimingsMs: indexedSearch.timingsMs,
-      indexedJobCount,
-      reusedExistingSearch: previousCoverage.reusedExistingSearch,
-      previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
-      previousRunStatus: previousCoverage.previousRunStatus,
-      previousFinishedAt: previousCoverage.previousFinishedAt,
-      latestIndexedJobAgeMs,
+      triggerExplanation: "The previous identical session did not complete cleanly and indexed coverage is still below target, so generic background ingestion was requested because targeted providers are unavailable.",
+    };
+  }
+
+  if (freshnessRecoveryEligible && mode === "deep" && options.allowRequestTimeFreshnessRecovery) {
+    return {
+      ...baseDecision,
+      shouldQueue: true,
+      shouldQueueTargetedReplenishment: false,
+      shouldRunRequestTimeCrawl: true,
+      requestBackgroundIngestion: false,
+      triggerReason: "freshness_recovery",
+      triggerExplanation: `Deep mode explicitly requested broader retrieval and indexed coverage is below the ${minimumIndexedCoverage}-job target with stale matches, so a bounded supplemental freshness recovery was queued.`,
+    };
+  }
+
+  if (!options.allowRequestTimeFreshnessRecovery) {
+    return {
+      ...baseDecision,
+      shouldQueue: false,
+      shouldQueueTargetedReplenishment: false,
+      shouldRunRequestTimeCrawl: false,
+      requestBackgroundIngestion: true,
+      triggerReason:
+        indexedJobCount === 0
+          ? "indexed_empty_background_requested"
+          : freshnessRecoveryEligible
+            ? "stale_indexed_coverage_background_requested"
+            : "insufficient_indexed_coverage_background_requested",
+      triggerExplanation: `Indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${coveragePolicy.reason} target, but targeted providers are unavailable so generic background ingestion was requested.`,
     };
   }
 
   return {
-    shouldQueue: false,
-    requestBackgroundIngestion: true,
-    triggerReason: "insufficient_indexed_coverage_background_requested",
-    triggerExplanation: `Indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${mode} threshold, so background ingestion was requested and the search request stayed DB-first.`,
-    minimumIndexedCoverage,
-    targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
-    indexedCandidateCount: indexedSearch.candidateCount,
-    indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
-    indexedRequestTimeExcludedCount: indexedSearch.requestTimeExcludedCount,
-      indexedExcludedByTitleCount: indexedSearch.excludedByTitleCount,
-      indexedExcludedByLocationCount: indexedSearch.excludedByLocationCount,
-      indexedExcludedByExperienceCount: indexedSearch.excludedByExperienceCount,
-    indexedSearchTimingsMs: indexedSearch.timingsMs,
-    indexedJobCount,
-    reusedExistingSearch: previousCoverage.reusedExistingSearch,
-    previousVisibleJobCount: previousCoverage.previousVisibleJobCount,
-    previousRunStatus: previousCoverage.previousRunStatus,
-    previousFinishedAt: previousCoverage.previousFinishedAt,
-    latestIndexedJobAgeMs,
+    ...baseDecision,
+    shouldQueue: true,
+    shouldQueueTargetedReplenishment: true,
+    shouldRunRequestTimeCrawl: false,
+    requestBackgroundIngestion: false,
+    triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
+    triggerExplanation: `Indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${coveragePolicy.reason} target, so a targeted replenishment run was queued for the current search filters.`,
   };
+}
+
+function resolveIndexedCoveragePolicy(
+  filters: ParsedSearchFilters,
+  indexedSearch: Awaited<ReturnType<typeof getIndexedJobsForSearch>>,
+  env: ReturnType<typeof getEnv>,
+  latestIndexedJobAgeMs?: number,
+) {
+  const mode = filters.crawlMode ?? "balanced";
+  const modeTargets = {
+    fast: env.SEARCH_MIN_COVERAGE_FAST,
+    balanced: env.SEARCH_MIN_COVERAGE_BALANCED,
+    deep: env.SEARCH_MIN_COVERAGE_DEEP,
+  } as const;
+  const titleAnalysis = analyzeTitle(filters.title);
+  const country = normalizeCoverageText(filters.country);
+  const state = normalizeCoverageText(filters.state);
+  const city = normalizeCoverageText(filters.city);
+  const isCountryWide = Boolean(country) && !state && !city;
+  const isCityLevel = Boolean(city);
+  const highDemandRole = isHighDemandRoleFamily(titleAnalysis.family);
+  const hasSenioritySpecificity = titleAnalysis.seniorityTokens.length > 0;
+  const meaningfulTokenCount = titleAnalysis.meaningfulTokens.length;
+  const titleBroadness = !hasSenioritySpecificity && meaningfulTokenCount <= 3
+    ? "broad"
+    : "specific";
+  const locationBroadness = isCityLevel
+    ? "city"
+    : isCountryWide
+      ? "country"
+      : state
+        ? "state"
+        : "unspecified";
+  const cityTargets = {
+    fast: 3,
+    balanced: 5,
+    deep: 8,
+  } as const;
+  let coverageTarget = isCityLevel
+    ? Math.min(modeTargets[mode], cityTargets[mode])
+    : modeTargets[mode];
+  const reasons = [`${mode}_mode_${locationBroadness}_search`];
+
+  if (isCountryWide) {
+    coverageTarget = Math.max(coverageTarget, env.SEARCH_BROAD_COUNTRY_MIN_COVERAGE);
+    reasons.push("broad_country_minimum");
+  }
+
+  if (isCountryWide && highDemandRole) {
+    coverageTarget = Math.max(coverageTarget, env.SEARCH_HIGH_DEMAND_ROLE_MIN_COVERAGE);
+    reasons.push("high_demand_role_country_minimum");
+  }
+
+  if (mode === "deep") {
+    coverageTarget = Math.max(coverageTarget, env.SEARCH_MIN_COVERAGE_DEEP);
+    reasons.push("deep_mode_highest_target");
+  }
+
+  if (titleBroadness === "specific" && isCityLevel) {
+    reasons.push("specific_title_city_scope");
+  } else {
+    reasons.push(`${titleBroadness}_title`);
+  }
+
+  if (typeof latestIndexedJobAgeMs === "number") {
+    reasons.push(`latest_age_ms:${latestIndexedJobAgeMs}`);
+  }
+
+  reasons.push(`candidates:${indexedSearch.candidateCount}`);
+  reasons.push(`matches:${indexedSearch.matches.length}`);
+
+  return {
+    coverageTarget,
+    reason: reasons.join("|"),
+    titleBroadness,
+    locationBroadness,
+    highDemandRole,
+  };
+}
+
+function isHighDemandRoleFamily(family: ReturnType<typeof analyzeTitle>["family"]) {
+  return (
+    family === "ai_ml_science" ||
+    family === "software_engineering" ||
+    family === "data_platform" ||
+    family === "data_analytics" ||
+    family === "product"
+  );
+}
+
+function normalizeCoverageText(value?: string) {
+  return value?.trim().toLowerCase() ?? "";
+}
+
+function buildTargetedReplenishmentOwnerKey(filters: ParsedSearchFilters) {
+  return `targeted-replenishment:${stableSerializeSearchFilters({
+    title: filters.title,
+    country: filters.country,
+    state: filters.state,
+    city: filters.city,
+    platforms: [...(filters.platforms ?? [])].sort(),
+    crawlMode: filters.crawlMode ?? "balanced",
+    experienceLevels: [...(filters.experienceLevels ?? [])].sort(),
+  })}`;
+}
+
+function stableSerializeSearchFilters(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerializeSearchFilters(item)).join(",")}]`;
+  }
+
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSerializeSearchFilters(record[key])}`)
+      .join(",")}}`;
+  }
+
+  return JSON.stringify(value);
+}
+
+function normalizeRequestOwnerKey(value?: string) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 function buildPrimedSessionDiagnostics(
@@ -712,6 +811,12 @@ function buildPrimedSessionDiagnostics(
   indexedJobCount: number,
   backgroundIngestion: BackgroundIngestionRequestDiagnostics,
   searchTrace: SearchTraceDiagnostics,
+  queueState: {
+    shouldQueueCurrentRun: boolean;
+    targetedReplenishmentQueued: boolean;
+    targetedReplenishmentActive: boolean;
+    activeQueueAlreadyExists: boolean;
+  },
 ): CrawlDiagnostics {
   return {
     discoveredSources: 0,
@@ -736,9 +841,15 @@ function buildPrimedSessionDiagnostics(
       indexedRequestTimeExcludedCount: decision.indexedRequestTimeExcludedCount,
       indexedSearchTimingsMs: decision.indexedSearchTimingsMs,
       minimumIndexedCoverage: decision.minimumIndexedCoverage,
+      coverageTarget: decision.coverageTarget,
+      coveragePolicyReason: decision.coveragePolicyReason,
       targetJobCount: decision.targetJobCount,
-      supplementalQueued: decision.shouldQueue,
-      supplementalRunning: decision.shouldQueue,
+      supplementalQueued:
+        queueState.shouldQueueCurrentRun || queueState.targetedReplenishmentActive,
+      supplementalRunning: queueState.shouldQueueCurrentRun,
+      targetedReplenishmentQueued: queueState.targetedReplenishmentQueued,
+      targetedReplenishmentActive: queueState.targetedReplenishmentActive,
+      activeQueueAlreadyExists: queueState.activeQueueAlreadyExists,
       triggerReason: decision.triggerReason,
       triggerExplanation: decision.triggerExplanation,
       reusedExistingSearch: decision.reusedExistingSearch,

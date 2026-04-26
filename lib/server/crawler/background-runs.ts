@@ -71,6 +71,20 @@ export async function queueSearchRun(
     return false;
   }
 
+  if (options.ownerKey) {
+    const activeOwnerQueueEntry = await repository.getActiveCrawlQueueEntryForOwner(
+      options.ownerKey,
+    );
+    if (activeOwnerQueueEntry && activeOwnerQueueEntry.crawlRunId !== crawlRunId) {
+      return false;
+    }
+
+    const activeOwnerSearchId = getPendingRunOwners().get(options.ownerKey);
+    if (activeOwnerSearchId && activeOwnerSearchId !== searchId) {
+      return false;
+    }
+  }
+
   await repository.enqueueCrawlRun({
     crawlRunId,
     searchId,

@@ -114,6 +114,14 @@ export async function queueSearchIngestion(
     queuedResult,
     isSearchRunPendingResult,
   });
+  console.info("[ingestion:targeted-queue]", {
+    searchId: target.search._id,
+    searchSessionId: target.searchSession._id,
+    crawlRunId: target.crawlRun._id,
+    ownerKey: ownerKey ?? null,
+    queued,
+    reason: runtime.ingestionQueueReason ?? null,
+  });
 
   return queued;
 }

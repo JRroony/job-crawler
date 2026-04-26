@@ -37,6 +37,11 @@ const envSchema = z.object({
   CRAWL_INITIAL_VISIBLE_WAIT_MS: z.coerce.number().int().nonnegative().default(400),
   CRAWL_TARGET_JOB_COUNT: z.coerce.number().int().positive().default(30),
   CRAWL_EARLY_VISIBLE_TARGET: z.coerce.number().int().positive().default(30),
+  SEARCH_MIN_COVERAGE_FAST: z.coerce.number().int().positive().default(12),
+  SEARCH_MIN_COVERAGE_BALANCED: z.coerce.number().int().positive().default(30),
+  SEARCH_MIN_COVERAGE_DEEP: z.coerce.number().int().positive().default(60),
+  SEARCH_BROAD_COUNTRY_MIN_COVERAGE: z.coerce.number().int().positive().default(75),
+  SEARCH_HIGH_DEMAND_ROLE_MIN_COVERAGE: z.coerce.number().int().positive().default(120),
   INDEXED_SEARCH_MERGED_CANDIDATE_LIMIT: z.coerce.number().int().positive().default(5000),
   INDEXED_SEARCH_CHANNEL_CANDIDATE_LIMIT: z.coerce.number().int().positive().default(5000),
   BACKGROUND_INGESTION_ENABLED: z
@@ -111,6 +116,16 @@ export function getEnv() {
         process.env.CRAWL_TARGET_JOB_COUNT ?? "30",
       CRAWL_EARLY_VISIBLE_TARGET:
         process.env.CRAWL_EARLY_VISIBLE_TARGET ?? "30",
+      SEARCH_MIN_COVERAGE_FAST:
+        process.env.SEARCH_MIN_COVERAGE_FAST ?? "12",
+      SEARCH_MIN_COVERAGE_BALANCED:
+        process.env.SEARCH_MIN_COVERAGE_BALANCED ?? "30",
+      SEARCH_MIN_COVERAGE_DEEP:
+        process.env.SEARCH_MIN_COVERAGE_DEEP ?? "60",
+      SEARCH_BROAD_COUNTRY_MIN_COVERAGE:
+        process.env.SEARCH_BROAD_COUNTRY_MIN_COVERAGE ?? "75",
+      SEARCH_HIGH_DEMAND_ROLE_MIN_COVERAGE:
+        process.env.SEARCH_HIGH_DEMAND_ROLE_MIN_COVERAGE ?? "120",
       INDEXED_SEARCH_MERGED_CANDIDATE_LIMIT:
         process.env.INDEXED_SEARCH_MERGED_CANDIDATE_LIMIT ?? "5000",
       INDEXED_SEARCH_CHANNEL_CANDIDATE_LIMIT:
