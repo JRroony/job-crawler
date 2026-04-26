@@ -71,35 +71,49 @@ export async function queueSearchIngestion(
   runtime: JobCrawlerRuntime = {},
 ) {
   const context = await buildSearchIngestionContext(runtime);
-  const queued =
-    (await queueSearchRun(
-      target.search._id,
-      context.repository,
-      async (signal) => {
-        await executeCrawlPipeline({
-          search: target.search,
-          searchSession: target.searchSession,
-          crawlRun: target.crawlRun,
-          repository: context.repository,
-          discovery: context.discovery,
-          providers: context.providers,
-          fetchImpl: context.fetchImpl,
-          now: context.now,
-          deepExperienceInference: context.deepExperienceInference,
-          linkValidationMode: context.linkValidationMode,
-          inlineValidationTopN: context.inlineValidationTopN,
-          providerTimeoutMs: context.providerTimeoutMs,
-          progressUpdateIntervalMs: context.progressUpdateIntervalMs,
-          signal,
-        });
-      },
-      {
-        ownerKey: normalizeRequestOwnerKey(runtime.requestOwnerKey),
-        crawlRunId: target.crawlRun._id,
-        searchSessionId: target.searchSession._id,
-        queuedAt: context.now.toISOString(),
-      },
-    )) || (await isSearchRunPending(target.search._id, context.repository));
+  const ownerKey = normalizeRequestOwnerKey(runtime.requestOwnerKey);
+  const queuedResult = await queueSearchRun(
+    target.search._id,
+    context.repository,
+    async (signal) => {
+      await executeCrawlPipeline({
+        search: target.search,
+        searchSession: target.searchSession,
+        crawlRun: target.crawlRun,
+        repository: context.repository,
+        discovery: context.discovery,
+        providers: context.providers,
+        fetchImpl: context.fetchImpl,
+        now: context.now,
+        deepExperienceInference: context.deepExperienceInference,
+        linkValidationMode: context.linkValidationMode,
+        inlineValidationTopN: context.inlineValidationTopN,
+        providerTimeoutMs: context.providerTimeoutMs,
+        progressUpdateIntervalMs: context.progressUpdateIntervalMs,
+        signal,
+      });
+    },
+    {
+      ownerKey,
+      crawlRunId: target.crawlRun._id,
+      searchSessionId: target.searchSession._id,
+      queuedAt: context.now.toISOString(),
+    },
+  );
+  const isSearchRunPendingResult = await isSearchRunPending(
+    target.search._id,
+    context.repository,
+  );
+  const queued = queuedResult || isSearchRunPendingResult;
+
+  console.info("[ingestion:trace:queue-request]", {
+    searchId: target.search._id,
+    searchSessionId: target.searchSession._id,
+    crawlRunId: target.crawlRun._id,
+    ownerKey,
+    queuedResult,
+    isSearchRunPendingResult,
+  });
 
   return queued;
 }

@@ -265,6 +265,19 @@ export async function executeCrawlPipeline(
       updatedAt: input.now.toISOString(),
     })) ?? searchSession;
 
+  logIngestionTrace("pipeline-start", {
+    searchId: search._id,
+    searchSessionId: searchSession._id,
+    crawlRunId: crawlRun._id,
+    filters: normalizedFilters,
+    selectedProviders: selectedProviders.map((provider) => provider.provider),
+    providerCount: selectedProviders.length,
+    crawlMode: normalizedFilters.crawlMode ?? "balanced",
+    targetJobCount,
+    providerTimeoutMs,
+    globalTimeoutMs,
+  });
+
   const persistentCancellation = await createPersistentCancellationController({
     repository: input.repository,
     crawlRunId: crawlRun._id,
@@ -451,6 +464,17 @@ export async function executeCrawlPipeline(
       try {
         await persistentCancellation.throwIfCanceled({ heartbeat: true });
         throwIfAborted(mergedSignal);
+        const traceProvider = payload.provider ?? "discovery_harvest";
+        logIngestionTrace("persist-start", {
+          searchId: search._id,
+          searchSessionId: searchSession._id,
+          crawlRunId: crawlRun._id,
+          batchLabel: payload.batchLabel,
+          provider: traceProvider,
+          sourceCount: payload.sourceCount,
+          fetchedCount: payload.fetchedCount,
+          seedCount: payload.seeds.length,
+        });
         const filteringStartedMs = Date.now();
         persistenceBatchCount += 1;
         console.info("[crawl:persistence-batch-start]", {
@@ -474,6 +498,28 @@ export async function executeCrawlPipeline(
           diagnostics.dropReasonCounts[reason] = (diagnostics.dropReasonCounts[reason] ?? 0) + count;
         });
         totalMatchedJobs += filteredSeeds.jobs.length;
+        logIngestionTrace("filter-result", {
+          searchId: search._id,
+          searchSessionId: searchSession._id,
+          crawlRunId: crawlRun._id,
+          batchLabel: payload.batchLabel,
+          provider: traceProvider,
+          seedCount: payload.seeds.length,
+          matchedCount: filteredSeeds.jobs.length,
+          excludedByTitle: filteredSeeds.excludedByTitle,
+          excludedByLocation: filteredSeeds.excludedByLocation,
+          excludedByExperience: filteredSeeds.excludedByExperience,
+          sampleDroppedByTitle: sampleDroppedFilterTraces(
+            filteredSeeds.filterDecisionTraces,
+            "title",
+            5,
+          ),
+          sampleDroppedByLocation: sampleDroppedFilterTraces(
+            filteredSeeds.filterDecisionTraces,
+            "location",
+            5,
+          ),
+        });
 
         const dedupeStartedMs = Date.now();
         const hydration = hydrateJobs(filteredSeeds.jobs, input.now);
@@ -492,6 +538,17 @@ export async function executeCrawlPipeline(
           });
         });
         const hydratedJobs = hydration.jobs;
+        logIngestionTrace("hydrate-result", {
+          searchId: search._id,
+          searchSessionId: searchSession._id,
+          crawlRunId: crawlRun._id,
+          batchLabel: payload.batchLabel,
+          provider: traceProvider,
+          inputCount: filteredSeeds.jobs.length,
+          hydratedCount: hydratedJobs.length,
+          droppedCount: hydration.dropped.length,
+          sampleDroppedReasons: sampleHydrationDropReasons(hydration.dropped, 5),
+        });
         diagnostics.jobsBeforeDedupe += hydratedJobs.length;
         const dedupeResult = dedupeJobsWithDiagnostics(
           hydratedJobs,
@@ -505,16 +562,61 @@ export async function executeCrawlPipeline(
         );
         const dedupedJobs = sortJobsForPersistence(dedupeResult.jobs, normalizedFilters.title);
         stageTimingsMs.dedupe += Date.now() - dedupeStartedMs;
+        logIngestionTrace("dedupe-result", {
+          searchId: search._id,
+          searchSessionId: searchSession._id,
+          crawlRunId: crawlRun._id,
+          batchLabel: payload.batchLabel,
+          provider: traceProvider,
+          inputCount: hydratedJobs.length,
+          outputCount: dedupedJobs.length,
+          dedupedOutCount: Math.max(0, hydratedJobs.length - dedupedJobs.length),
+          sampleDedupeReasons: sampleDedupeReasons(dedupeResult.dropped, 5),
+        });
 
         const persistenceStartedMs = Date.now();
         await persistentCancellation.throwIfCanceled({ heartbeat: true });
-        const persistence = await input.repository.persistJobsWithStats(
-          crawlRun._id,
-          dedupedJobs,
-          {
+        logIngestionTrace("db-write-start", {
+          searchId: search._id,
+          searchSessionId: searchSession._id,
+          crawlRunId: crawlRun._id,
+          batchLabel: payload.batchLabel,
+          provider: traceProvider,
+          jobCountToPersist: dedupedJobs.length,
+          sampleCanonicalJobKeys: dedupedJobs
+            .slice(0, 5)
+            .map((job) => job.canonicalJobKey),
+          sampleSourceJobIds: dedupedJobs
+            .slice(0, 5)
+            .map((job) => job.sourceJobId),
+        });
+        let persistence: Awaited<ReturnType<JobCrawlerRepository["persistJobsWithStats"]>>;
+        try {
+          persistence = await input.repository.persistJobsWithStats(
+            crawlRun._id,
+            dedupedJobs,
+            {
+              searchSessionId: searchSession._id,
+            },
+          );
+        } catch (error) {
+          logIngestionTrace("db-write-failed", {
+            searchId: search._id,
             searchSessionId: searchSession._id,
-          },
-        );
+            crawlRunId: crawlRun._id,
+            batchLabel: payload.batchLabel,
+            provider: traceProvider,
+            errorName: error instanceof Error ? error.name : "Error",
+            errorMessage:
+              error instanceof Error
+                ? error.message
+                : "Job persistence failed unexpectedly.",
+            stack: error instanceof Error && error.stack
+              ? error.stack.split("\n").slice(0, 3)
+              : [],
+          }, "error");
+          throw error;
+        }
         const savedJobs = persistence.jobs;
         stageTimingsMs.persistence += Date.now() - persistenceStartedMs;
 
@@ -525,6 +627,19 @@ export async function executeCrawlPipeline(
             newVisibleJobCount += 1;
           }
         }
+        logIngestionTrace("db-write-result", {
+          searchId: search._id,
+          searchSessionId: searchSession._id,
+          crawlRunId: crawlRun._id,
+          batchLabel: payload.batchLabel,
+          provider: traceProvider,
+          persistedJobCount: savedJobs.length,
+          insertedCount: persistence.insertedCount,
+          updatedCount: persistence.updatedCount,
+          linkedToRunCount: persistence.linkedToRunCount,
+          indexedEventCount: persistence.indexedEventCount,
+          newVisibleJobCount,
+        });
 
         if (newVisibleJobCount > 0) {
           payload.onFirstVisibleSaved?.();
@@ -663,6 +778,14 @@ export async function executeCrawlPipeline(
       const startedMs = Date.now();
       let emittedLiveBatch = false;
       const runningSourceResult = sourceResultsByProvider.get(provider.provider);
+      logIngestionTrace("provider-start", {
+        searchId: search._id,
+        searchSessionId: searchSession._id,
+        crawlRunId: crawlRun._id,
+        provider: provider.provider,
+        sourceCount: sourcesForProvider.length,
+        sampleSources: sampleSourceSummaries(sourcesForProvider, 5),
+      });
 
       if (runningSourceResult) {
         const updatedRunningResult = crawlSourceResultSchema.parse({
@@ -737,6 +860,19 @@ export async function executeCrawlPipeline(
           duration: durationMs,
           sourceCount: result.sourceCount ?? sourcesForProvider.length,
           timedOut: false,
+        });
+        logIngestionTrace("provider-result", {
+          searchId: search._id,
+          searchSessionId: searchSession._id,
+          crawlRunId: crawlRun._id,
+          provider: result.provider,
+          status: result.status,
+          sourceCount: result.sourceCount ?? sourcesForProvider.length,
+          fetchedCount: result.fetchedCount,
+          returnedJobSeedCount: result.jobs.length,
+          warningCount: result.warningCount ?? 0,
+          errorMessage: result.errorMessage,
+          durationMs,
         });
 
         if (result.status === "failed" || result.status === "partial") {
@@ -839,6 +975,22 @@ export async function executeCrawlPipeline(
           sourceCount: sourcesForProvider.length,
           timedOut,
         });
+        logIngestionTrace("provider-result", {
+          searchId: search._id,
+          searchSessionId: searchSession._id,
+          crawlRunId: crawlRun._id,
+          provider: provider.provider,
+          status: "failed",
+          sourceCount: sourcesForProvider.length,
+          fetchedCount: 0,
+          returnedJobSeedCount: 0,
+          warningCount: 1,
+          errorMessage:
+            reason instanceof Error
+              ? reason.message
+              : `Provider ${provider.provider} failed unexpectedly.`,
+          durationMs,
+        }, "error");
 
         await queueMutation(async () => {
           diagnostics.providerFailures += 1;
@@ -946,6 +1098,20 @@ export async function executeCrawlPipeline(
       const providerSources = selectedProviders.map((provider) =>
         cappedSources.filter((source) => provider.supportsSource(source)),
       );
+      logIngestionTrace("discovery-result", {
+        searchId: search._id,
+        searchSessionId: searchSession._id,
+        crawlRunId: crawlRun._id,
+        discoveredSources: payload.sources.length,
+        publicSources: payload.diagnostics?.publicSources ?? 0,
+        publicJobs: payload.diagnostics?.publicJobs ?? payload.jobs.length,
+        sourcesAfterFiltering:
+          payload.diagnostics?.discoveredAfterFiltering ?? cappedSources.length,
+        platformCounts: Object.keys(payload.diagnostics?.platformCounts ?? {}).length > 0
+          ? payload.diagnostics?.platformCounts
+          : summarizeSourcePlatforms(cappedSources),
+        sampleSourceUrls: sampleSourceUrls(cappedSources, 10),
+      });
 
       if (cappedSources.length > 0) {
         await input.repository.upsertDiscoveredSourcesIntoInventory(
@@ -2085,6 +2251,94 @@ function buildExperienceDropReason(experienceMatch?: ExperienceFilterResult) {
   }
 
   return "filter:experience_level_mismatch";
+}
+
+function logIngestionTrace(
+  stage: string,
+  payload: Record<string, unknown>,
+  level: "info" | "error" = "info",
+) {
+  console[level](`[ingestion:trace:${stage}]`, payload);
+}
+
+function sampleSourceUrls(sources: readonly DiscoveredSource[], limit: number) {
+  return sources.slice(0, limit).map((source) => source.url);
+}
+
+function sampleSourceSummaries(sources: readonly DiscoveredSource[], limit: number) {
+  return sources.slice(0, limit).map((source) => ({
+    id: source.id,
+    platform: source.platform,
+    url: source.url,
+    companyHint: source.companyHint,
+    discoveryMethod: source.discoveryMethod,
+    confidence: source.confidence,
+  }));
+}
+
+function summarizeSourcePlatforms(sources: readonly DiscoveredSource[]) {
+  return sources.reduce<Record<string, number>>((counts, source) => {
+    counts[source.platform] = (counts[source.platform] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function sampleDroppedFilterTraces(
+  traces: CrawlDiagnostics["filterDecisionTraces"],
+  filterStage: "title" | "location",
+  limit: number,
+) {
+  return traces
+    .filter((trace) => trace.outcome === "dropped" && trace.filterStage === filterStage)
+    .slice(0, limit)
+    .map((trace) => ({
+      traceId: trace.traceId,
+      sourcePlatform: trace.sourcePlatform,
+      sourceJobId: trace.sourceJobId,
+      title: trace.title,
+      company: trace.company,
+      locationText: trace.locationText,
+      dropReason: trace.dropReason,
+    }));
+}
+
+function sampleHydrationDropReasons(
+  dropped: Array<{
+    seed: NormalizedJobSeed;
+    reason: string;
+    message: string;
+  }>,
+  limit: number,
+) {
+  return dropped.slice(0, limit).map((drop) => ({
+    sourcePlatform: drop.seed.sourcePlatform,
+    sourceJobId: drop.seed.sourceJobId,
+    title: drop.seed.title,
+    company: drop.seed.company,
+    reason: drop.reason,
+    message: truncateTraceText(drop.message, 300),
+  }));
+}
+
+function sampleDedupeReasons(
+  dropped: Array<{
+    traceId: string;
+    keptTraceId: string;
+    matchedKeys: string[];
+    dropReason: string;
+  }>,
+  limit: number,
+) {
+  return dropped.slice(0, limit).map((trace) => ({
+    traceId: trace.traceId,
+    keptTraceId: trace.keptTraceId,
+    dropReason: trace.dropReason,
+    matchedKeys: trace.matchedKeys.slice(0, 5),
+  }));
+}
+
+function truncateTraceText(value: string, maxLength: number) {
+  return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
 }
 
 function getPipelineTraceId(

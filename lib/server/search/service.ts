@@ -300,6 +300,20 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
   const backgroundIngestion = supplementalDecision.requestBackgroundIngestion
     ? await requestBackgroundIngestionForIndexGap(runtime, session.now)
     : { status: "not_requested" as const };
+  console.info("[ingestion:trace:decision]", {
+    searchId: session.search._id,
+    searchSessionId: session.searchSession._id,
+    crawlRunId: session.crawlRun._id,
+    indexedCandidateCount: indexedSearch.candidateCount,
+    indexedMatchedCount: indexedJobs.length,
+    minimumIndexedCoverage: supplementalDecision.minimumIndexedCoverage,
+    triggerReason: supplementalDecision.triggerReason,
+    shouldQueue: supplementalDecision.shouldQueue,
+    requestBackgroundIngestion: supplementalDecision.requestBackgroundIngestion,
+    backgroundIngestionStatus: backgroundIngestion.status,
+    backgroundIngestion,
+    crawlMode: session.search.filters.crawlMode ?? "balanced",
+  });
   const indexFirstDecisionTrace = emitSearchTraceStage("index-first-decision", {
     traceId: searchTrace.traceId,
     indexedCandidateCount: indexedSearch.candidateCount,

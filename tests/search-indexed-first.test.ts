@@ -188,6 +188,18 @@ async function createActiveSearchState(
   return { search, searchSession, crawlRun };
 }
 
+async function waitForQueueToSettle(repository: JobCrawlerRepository, searchId: string) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (!(await repository.hasActiveCrawlQueueEntryForSearch(searchId))) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error(`Search queue did not settle for ${searchId}.`);
+}
+
 describe("jobs-first indexed search", () => {
   it("emits structured search trace logs and attaches the trace to response diagnostics", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
@@ -285,6 +297,24 @@ describe("jobs-first indexed search", () => {
         searchId: result.search._id,
         searchSessionId: result.searchSession?._id,
       });
+      const ingestionDecisionCall = infoSpy.mock.calls.find(
+        ([actualLabel]) => actualLabel === "[ingestion:trace:decision]",
+      ) as [string, Record<string, unknown>] | undefined;
+      expect(ingestionDecisionCall).toBeDefined();
+      expect(() => JSON.stringify(ingestionDecisionCall?.[1])).not.toThrow();
+      expect(ingestionDecisionCall?.[1]).toMatchObject({
+        searchId: result.search._id,
+        searchSessionId: result.searchSession?._id,
+        crawlRunId: result.crawlRun._id,
+        indexedCandidateCount: 5,
+        indexedMatchedCount: 5,
+        minimumIndexedCoverage: 5,
+        triggerReason: "indexed_coverage_sufficient",
+        shouldQueue: false,
+        requestBackgroundIngestion: false,
+        backgroundIngestionStatus: "not_requested",
+        crawlMode: "balanced",
+      });
       expect(result.diagnostics.searchTrace).toMatchObject({
         traceId,
         start: expect.objectContaining({ traceId }),
@@ -302,6 +332,86 @@ describe("jobs-first indexed search", () => {
         response: expect.objectContaining({ traceId, returnedCount: 5 }),
       });
     } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  it("emits ingestion trace queue-request logs when supplemental request-time ingestion is queued", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const crawlSources = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return {
+        provider: "greenhouse" as const,
+        status: "success" as const,
+        sourceCount: 1,
+        fetchedCount: 0,
+        matchedCount: 0,
+        warningCount: 0,
+        jobs: [],
+      };
+    });
+    const provider = createStubProvider("greenhouse", crawlSources);
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    let searchId: string | undefined;
+
+    try {
+      const started = await startSearchFromFilters(
+        {
+          title: "Software Engineer",
+          country: "United States",
+          platforms: ["greenhouse"],
+        },
+        {
+          repository,
+          providers: [provider],
+          discovery: createDiscovery(),
+          fetchImpl: vi.fn() as unknown as typeof fetch,
+          now: new Date("2026-04-15T12:00:00.000Z"),
+          allowRequestTimeSupplementalCrawl: true,
+          initialVisibleWaitMs: 0,
+          requestOwnerKey: "ingestion-trace-queue",
+        },
+      );
+      searchId = started.result.search._id;
+      await waitForQueueToSettle(repository, searchId);
+
+      const decisionCall = infoSpy.mock.calls.find(
+        ([actualLabel]) => actualLabel === "[ingestion:trace:decision]",
+      ) as [string, Record<string, unknown>] | undefined;
+      const queueCall = infoSpy.mock.calls.find(
+        ([actualLabel]) => actualLabel === "[ingestion:trace:queue-request]",
+      ) as [string, Record<string, unknown>] | undefined;
+
+      expect(decisionCall).toBeDefined();
+      expect(queueCall).toBeDefined();
+      expect(() => JSON.stringify(decisionCall?.[1])).not.toThrow();
+      expect(() => JSON.stringify(queueCall?.[1])).not.toThrow();
+      expect(decisionCall?.[1]).toMatchObject({
+        searchId,
+        searchSessionId: started.result.searchSession?._id,
+        crawlRunId: started.result.crawlRun._id,
+        indexedCandidateCount: 0,
+        indexedMatchedCount: 0,
+        minimumIndexedCoverage: 5,
+        triggerReason: "explicit_request_time_recovery",
+        shouldQueue: true,
+        requestBackgroundIngestion: false,
+        backgroundIngestionStatus: "not_requested",
+        crawlMode: "balanced",
+      });
+      expect(queueCall?.[1]).toMatchObject({
+        searchId,
+        searchSessionId: started.result.searchSession?._id,
+        crawlRunId: started.result.crawlRun._id,
+        ownerKey: "ingestion-trace-queue",
+        queuedResult: true,
+        isSearchRunPendingResult: true,
+      });
+      expect(crawlSources).toHaveBeenCalled();
+    } finally {
+      if (searchId) {
+        await waitForQueueToSettle(repository, searchId).catch(() => undefined);
+      }
       infoSpy.mockRestore();
     }
   });

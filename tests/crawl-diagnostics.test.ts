@@ -372,6 +372,225 @@ describe("crawl diagnostics", () => {
     });
   });
 
+  it("emits ingestion trace logs across discovery, provider execution, and persistence", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-03-29T12:00:00.000Z");
+
+    const provider = createStubProvider("greenhouse", async () => {
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: 1,
+        fetchedCount: 4,
+        matchedCount: 4,
+        warningCount: 0,
+        jobs: [
+          {
+            title: "Data Scientist",
+            company: "Acme",
+            country: "United States",
+            locationText: "Remote, United States",
+            sourcePlatform: "greenhouse",
+            sourceJobId: "trace-title-drop",
+            sourceUrl: "https://example.com/jobs/trace-title-drop",
+            applyUrl: "https://example.com/jobs/trace-title-drop/apply",
+            canonicalUrl: "https://example.com/jobs/trace-title-drop",
+            discoveredAt: now.toISOString(),
+            rawSourceMetadata: {},
+          },
+          {
+            title: "Software Engineer",
+            company: "Acme",
+            country: "Canada",
+            locationText: "Toronto, Canada",
+            sourcePlatform: "greenhouse",
+            sourceJobId: "trace-location-drop",
+            sourceUrl: "https://example.com/jobs/trace-location-drop",
+            applyUrl: "https://example.com/jobs/trace-location-drop/apply",
+            canonicalUrl: "https://example.com/jobs/trace-location-drop",
+            discoveredAt: now.toISOString(),
+            rawSourceMetadata: {},
+          },
+          {
+            title: "Software Engineer",
+            company: "Acme",
+            country: "United States",
+            locationText: "Remote, United States",
+            sourcePlatform: "greenhouse",
+            sourceJobId: "trace-keep-a",
+            sourceUrl: "https://example.com/jobs/trace-shared",
+            applyUrl: "https://example.com/jobs/trace-shared/apply",
+            canonicalUrl: "https://example.com/jobs/trace-shared",
+            discoveredAt: now.toISOString(),
+            rawSourceMetadata: {},
+          },
+          {
+            title: "Software Engineer",
+            company: "Acme",
+            country: "United States",
+            locationText: "Remote, United States",
+            sourcePlatform: "greenhouse",
+            sourceJobId: "trace-keep-b",
+            sourceUrl: "https://example.com/jobs/trace-shared",
+            applyUrl: "https://example.com/jobs/trace-shared/apply",
+            canonicalUrl: "https://example.com/jobs/trace-shared",
+            discoveredAt: now.toISOString(),
+            rawSourceMetadata: {},
+          },
+        ],
+      };
+    });
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/openai",
+            token: "openai",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    try {
+      const result = await runSearchIngestionFromFilters(
+        {
+          title: "Software Engineer",
+          country: "United States",
+          platforms: ["greenhouse"],
+        },
+        {
+          repository,
+          providers: [provider],
+          discovery,
+          fetchImpl: vi.fn() as unknown as typeof fetch,
+          now,
+        },
+      );
+
+      expect(result.jobs).toHaveLength(1);
+
+      const tracePayload = (label: string) => {
+        const call = infoSpy.mock.calls.find(([actualLabel]) => actualLabel === label);
+        expect(call).toBeDefined();
+        const payload = call?.[1] as Record<string, unknown>;
+        expect(() => JSON.stringify(payload)).not.toThrow();
+        expect(payload).toMatchObject({
+          searchId: result.search._id,
+          crawlRunId: result.crawlRun._id,
+        });
+        return payload;
+      };
+
+      expect(tracePayload("[ingestion:trace:pipeline-start]")).toMatchObject({
+        searchSessionId: result.searchSession?._id,
+        selectedProviders: ["greenhouse"],
+        providerCount: 1,
+        crawlMode: "balanced",
+        targetJobCount: expect.any(Number),
+        providerTimeoutMs: expect.any(Number),
+        globalTimeoutMs: expect.any(Number),
+      });
+      expect(tracePayload("[ingestion:trace:discovery-result]")).toMatchObject({
+        discoveredSources: 1,
+        publicSources: 0,
+        publicJobs: 0,
+        sourcesAfterFiltering: 1,
+        platformCounts: { greenhouse: 1 },
+        sampleSourceUrls: ["https://boards.greenhouse.io/openai"],
+      });
+      expect(tracePayload("[ingestion:trace:provider-start]")).toMatchObject({
+        provider: "greenhouse",
+        sourceCount: 1,
+        sampleSources: [
+          expect.objectContaining({
+            platform: "greenhouse",
+            url: "https://boards.greenhouse.io/openai",
+          }),
+        ],
+      });
+      expect(tracePayload("[ingestion:trace:provider-result]")).toMatchObject({
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: 1,
+        fetchedCount: 4,
+        returnedJobSeedCount: 4,
+        warningCount: 0,
+        durationMs: expect.any(Number),
+      });
+      expect(tracePayload("[ingestion:trace:persist-start]")).toMatchObject({
+        batchLabel: "greenhouse",
+        provider: "greenhouse",
+        sourceCount: 1,
+        fetchedCount: 4,
+        seedCount: 4,
+      });
+      expect(tracePayload("[ingestion:trace:filter-result]")).toMatchObject({
+        batchLabel: "greenhouse",
+        provider: "greenhouse",
+        seedCount: 4,
+        matchedCount: 2,
+        excludedByTitle: 1,
+        excludedByLocation: 1,
+        excludedByExperience: 0,
+        sampleDroppedByTitle: [
+          expect.objectContaining({
+            sourceJobId: "trace-title-drop",
+            dropReason: expect.stringMatching(/^filter:title_/),
+          }),
+        ],
+        sampleDroppedByLocation: [
+          expect.objectContaining({
+            sourceJobId: "trace-location-drop",
+            dropReason: "filter:location_not_in_requested_country",
+          }),
+        ],
+      });
+      expect(tracePayload("[ingestion:trace:hydrate-result]")).toMatchObject({
+        batchLabel: "greenhouse",
+        provider: "greenhouse",
+        inputCount: 2,
+        hydratedCount: 2,
+        droppedCount: 0,
+        sampleDroppedReasons: [],
+      });
+      expect(tracePayload("[ingestion:trace:dedupe-result]")).toMatchObject({
+        batchLabel: "greenhouse",
+        provider: "greenhouse",
+        inputCount: 2,
+        outputCount: 1,
+        dedupedOutCount: 1,
+        sampleDedupeReasons: [
+          expect.objectContaining({
+            dropReason: "dedupe:canonical_url",
+          }),
+        ],
+      });
+      expect(tracePayload("[ingestion:trace:db-write-start]")).toMatchObject({
+        batchLabel: "greenhouse",
+        provider: "greenhouse",
+        jobCountToPersist: 1,
+        sampleCanonicalJobKeys: [expect.any(String)],
+        sampleSourceJobIds: [expect.any(String)],
+      });
+      expect(tracePayload("[ingestion:trace:db-write-result]")).toMatchObject({
+        batchLabel: "greenhouse",
+        provider: "greenhouse",
+        persistedJobCount: 1,
+        insertedCount: 1,
+        updatedCount: 0,
+        linkedToRunCount: 1,
+        indexedEventCount: 1,
+        newVisibleJobCount: 1,
+      });
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
   it("surfaces structured discovery funnel diagnostics when the discovery service provides them", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const now = new Date("2026-03-29T12:00:00.000Z");
