@@ -137,10 +137,10 @@ describe("ResultsTable", () => {
 
     expect(html).toContain('href="https://example.com/jobs/1"');
     expect(html).not.toContain('href="https://example.com/jobs/1/apply"');
-    expect(html).toContain("View Post");
+    expect(html).toContain("Apply");
   });
 
-  it("shows pending validation state for newly crawled unknown links", () => {
+  it("shows a product detail panel for newly indexed unknown links", () => {
     const html = renderToStaticMarkup(
       <ResultsTable
         jobs={[
@@ -155,8 +155,9 @@ describe("ResultsTable", () => {
       />,
     );
 
-    expect(html).toContain("Pending validation");
-    expect(html).toContain("Validate");
+    expect(html).toContain("About the job");
+    expect(html).toContain("Job metadata");
+    expect(html).toContain("Apply");
   });
 
   it("renders practical card metadata including source, posting date, and workplace tags", () => {
@@ -173,7 +174,7 @@ describe("ResultsTable", () => {
       />,
     );
 
-    expect(html).toContain("Source: Greenhouse");
+    expect(html).toContain("Greenhouse");
     expect(html).toContain(formatPostedDate("2026-03-20T00:00:00.000Z"));
     expect(html).toContain("Hybrid");
     expect(html).toContain("Selected job stays pinned on larger screens");

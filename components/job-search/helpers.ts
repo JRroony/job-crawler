@@ -7,11 +7,13 @@ import {
 } from "@/lib/experience";
 import type {
   ActiveCrawlerPlatform,
+  EmploymentType,
   ExperienceLevel,
   JobListing,
+  RemoteType,
   SearchFilters,
 } from "@/lib/types";
-import { activeCrawlerPlatforms, experienceLevels } from "@/lib/types";
+import { activeCrawlerPlatforms, employmentTypes, experienceLevels } from "@/lib/types";
 import { labelForCrawlerPlatform } from "@/components/job-crawler/ui-config";
 import { labelForExperience } from "@/lib/utils";
 import { parseGeoIntent } from "@/lib/geo/parse";
@@ -19,17 +21,27 @@ import { matchJobLocationAgainstGeoIntent } from "@/lib/geo/match";
 import { normalizeJobGeoLocation } from "@/lib/geo/location";
 
 export type PostedDateFilter = "any" | "24h" | "7d" | "30d";
+export type WorkplaceFilter = "any" | Extract<RemoteType, "onsite" | "hybrid" | "remote">;
+export type SponsorshipFilter = "any" | "supported" | "not_supported" | "unknown";
 
 export type ClientResultFilters = {
   remoteOnly: boolean;
   visaFriendlyOnly: boolean;
   postedDate: PostedDateFilter;
+  workplace?: WorkplaceFilter;
+  employmentTypes?: EmploymentType[];
+  sponsorship?: SponsorshipFilter;
+  company?: string;
 };
 
 export const defaultClientResultFilters: ClientResultFilters = {
   remoteOnly: false,
   visaFriendlyOnly: false,
   postedDate: "any",
+  workplace: "any",
+  employmentTypes: undefined,
+  sponsorship: "any",
+  company: "",
 };
 
 export const platformFilterOptions: Array<{
@@ -78,6 +90,60 @@ export const postedDateFilterOptions: Array<{
   {
     value: "30d",
     label: "30 days",
+  },
+];
+
+export const workplaceFilterOptions: Array<{
+  value: WorkplaceFilter;
+  label: string;
+}> = [
+  {
+    value: "any",
+    label: "Any",
+  },
+  {
+    value: "onsite",
+    label: "On-site",
+  },
+  {
+    value: "hybrid",
+    label: "Hybrid",
+  },
+  {
+    value: "remote",
+    label: "Remote",
+  },
+];
+
+export const employmentTypeFilterOptions: Array<{
+  value: EmploymentType;
+  label: string;
+}> = employmentTypes
+  .filter((type) => type !== "unknown")
+  .map((type) => ({
+    value: type,
+    label: labelForEmploymentType(type),
+  }));
+
+export const sponsorshipFilterOptions: Array<{
+  value: SponsorshipFilter;
+  label: string;
+}> = [
+  {
+    value: "any",
+    label: "Any",
+  },
+  {
+    value: "supported",
+    label: "Sponsorship available",
+  },
+  {
+    value: "not_supported",
+    label: "No sponsorship",
+  },
+  {
+    value: "unknown",
+    label: "Not specified",
   },
 ];
 
@@ -224,11 +290,19 @@ export function filterJobsForDisplay(
       }
     }
 
-    if (resultFilters.remoteOnly && !isRemoteJob(job)) {
+    if (!matchesWorkplaceFilter(job, resultFilters.workplace, resultFilters.remoteOnly)) {
       return false;
     }
 
-    if (resultFilters.visaFriendlyOnly && !isVisaFriendlyJob(job)) {
+    if (!matchesEmploymentTypeFilter(job, resultFilters.employmentTypes)) {
+      return false;
+    }
+
+    if (!matchesSponsorshipFilter(job, resultFilters.sponsorship, resultFilters.visaFriendlyOnly)) {
+      return false;
+    }
+
+    if (!matchesCompanyFilter(job, resultFilters.company)) {
       return false;
     }
 
@@ -331,10 +405,38 @@ export function getWorkplaceLabel(job: JobListing) {
   }
 
   if (job.remoteType === "onsite") {
-    return undefined;
+    return "On-site";
   }
 
   return isRemoteJob(job) ? "Remote" : undefined;
+}
+
+export function getSponsorshipLabel(job: JobListing) {
+  if (job.sponsorshipHint === "supported") {
+    return "Sponsorship available";
+  }
+
+  if (job.sponsorshipHint === "not_supported") {
+    return "No sponsorship";
+  }
+
+  return isVisaFriendlyJob(job) ? "Sponsorship likely" : "Sponsorship not specified";
+}
+
+export function labelForEmploymentType(type?: EmploymentType) {
+  const labels: Record<EmploymentType, string> = {
+    full_time: "Full-time",
+    part_time: "Part-time",
+    contract: "Contract",
+    temporary: "Temporary",
+    internship: "Internship",
+    apprenticeship: "Apprenticeship",
+    seasonal: "Seasonal",
+    freelance: "Freelance",
+    unknown: "Not specified",
+  };
+
+  return type ? labels[type] : labels.unknown;
 }
 
 export function getExperienceLabel(job: JobListing) {
@@ -415,6 +517,26 @@ export function matchesPostedDateFilter(
   return diffMs <= windowMs;
 }
 
+export function toggleEmploymentTypeSelection(
+  selectedTypes: ClientResultFilters["employmentTypes"],
+  type: EmploymentType,
+) {
+  const nextTypes = new Set(selectedTypes ?? []);
+
+  if (nextTypes.has(type)) {
+    nextTypes.delete(type);
+  } else {
+    nextTypes.add(type);
+  }
+
+  const normalized = employmentTypes.filter(
+    (candidate): candidate is EmploymentType =>
+      candidate !== "unknown" && nextTypes.has(candidate),
+  );
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 export function describeSelectedPlatforms(filters: SearchFilters) {
   const selected = filters.platforms?.length
     ? filters.platforms
@@ -450,6 +572,66 @@ function buildSearchableJobText(job: JobListing) {
   ]
     .filter(Boolean)
     .join(" ");
+}
+
+function matchesWorkplaceFilter(
+  job: JobListing,
+  workplace: WorkplaceFilter | undefined,
+  legacyRemoteOnly: boolean,
+) {
+  if (legacyRemoteOnly) {
+    return isRemoteJob(job);
+  }
+
+  if (!workplace || workplace === "any") {
+    return true;
+  }
+
+  if (workplace === "remote") {
+    return job.remoteType === "remote" || isRemoteJob(job);
+  }
+
+  return job.remoteType === workplace;
+}
+
+function matchesEmploymentTypeFilter(
+  job: JobListing,
+  selectedTypes: ClientResultFilters["employmentTypes"],
+) {
+  if (!selectedTypes?.length) {
+    return true;
+  }
+
+  return Boolean(job.employmentType && selectedTypes.includes(job.employmentType));
+}
+
+function matchesSponsorshipFilter(
+  job: JobListing,
+  sponsorship: SponsorshipFilter | undefined,
+  legacyVisaFriendlyOnly: boolean,
+) {
+  if (legacyVisaFriendlyOnly) {
+    return isVisaFriendlyJob(job);
+  }
+
+  if (!sponsorship || sponsorship === "any") {
+    return true;
+  }
+
+  if (sponsorship === "supported") {
+    return isVisaFriendlyJob(job);
+  }
+
+  return job.sponsorshipHint === sponsorship;
+}
+
+function matchesCompanyFilter(job: JobListing, company: string | undefined) {
+  const query = normalizeSearchText(company);
+  if (!query) {
+    return true;
+  }
+
+  return normalizeSearchText(job.normalizedCompany || job.company).includes(query);
 }
 
 function safeStringify(value: unknown) {

@@ -1383,6 +1383,15 @@ export class JobCrawlerRepository {
         lastFailureReason: merged.lastFailureReason,
         nextEligibleAt: merged.nextEligibleAt,
       });
+      if (hasOutcome && !succeeded) {
+        console.warn("[inventory:timeout-observation]", {
+          sourceId: observation.sourceId,
+          provider: merged.platform,
+          health: merged.health,
+          lastFailureReason: merged.lastFailureReason,
+          nextEligibleAt: merged.nextEligibleAt,
+        });
+      }
     }
 
     return this.listSourceInventory();

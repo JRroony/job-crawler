@@ -33,7 +33,7 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     return;
   }
 
-  await db.collection(collectionNames.searches).createIndexes([
+  await createIndexesWithBootstrapLog(db, collectionNames.searches, "search_indexes", [
     {
       key: { createdAt: -1 },
       name: "searches_createdAt_desc",
@@ -50,7 +50,7 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     },
   ]);
 
-  await db.collection(collectionNames.searchSessions).createIndexes([
+  await createIndexesWithBootstrapLog(db, collectionNames.searchSessions, "search_session_indexes", [
     {
       key: { searchId: 1, createdAt: -1 },
       name: "searchSessions_searchId_createdAt_desc",
@@ -67,7 +67,11 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
   ]);
 
   try {
-    const migration = await migrateLegacyJobsForCanonicalKey(db as never);
+    const migration = await runBootstrapIndexPhase(
+      collectionNames.jobs,
+      "legacy_canonical_job_key_migration",
+      () => migrateLegacyJobsForCanonicalKey(db as never),
+    );
     if (
       migration.rewrittenCount > 0 ||
       migration.deletedCount > 0 ||
@@ -92,8 +96,10 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
   }
 
   try {
-    await ensureCanonicalJobKeyIndex(db.collection(collectionNames.jobs));
-    await db.collection(collectionNames.jobs).createIndexes([
+    await runBootstrapIndexPhase(collectionNames.jobs, "canonical_job_key_index", () =>
+      ensureCanonicalJobKeyIndex(db.collection(collectionNames.jobs)),
+    );
+    await createIndexesWithBootstrapLog(db, collectionNames.jobs, "job_indexes", [
       {
         key: { crawlRunIds: 1, postedAt: -1, sourcePlatform: 1, title: 1 },
         name: "jobs_listing_by_run_and_sort",
@@ -211,7 +217,7 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     );
   }
 
-  await db.collection(collectionNames.crawlRuns).createIndexes([
+  await createIndexesWithBootstrapLog(db, collectionNames.crawlRuns, "crawl_run_indexes", [
     {
       key: { searchId: 1, startedAt: -1 },
       name: "crawlRuns_searchId_startedAt_desc",
@@ -231,7 +237,7 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     },
   ]);
 
-  await db.collection(collectionNames.crawlControls).createIndexes([
+  await createIndexesWithBootstrapLog(db, collectionNames.crawlControls, "crawl_control_indexes", [
     {
       key: { crawlRunId: 1 },
       name: "crawlControls_crawlRunId",
@@ -248,7 +254,7 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     },
   ]);
 
-  await db.collection(collectionNames.crawlQueue).createIndexes([
+  await createIndexesWithBootstrapLog(db, collectionNames.crawlQueue, "crawl_queue_indexes", [
     {
       key: { crawlRunId: 1 },
       name: "crawlQueue_crawlRunId",
@@ -265,7 +271,7 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     },
   ]);
 
-  await db.collection(collectionNames.crawlSourceResults).createIndexes([
+  await createIndexesWithBootstrapLog(db, collectionNames.crawlSourceResults, "crawl_source_result_indexes", [
     {
       key: { crawlRunId: 1, provider: 1 },
       name: "crawlSourceResults_run_provider",
@@ -276,7 +282,7 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     },
   ]);
 
-  await db.collection(collectionNames.crawlRunJobEvents).createIndexes([
+  await createIndexesWithBootstrapLog(db, collectionNames.crawlRunJobEvents, "crawl_run_job_event_indexes", [
     {
       key: { crawlRunId: 1, sequence: 1 },
       name: "crawlRunJobEvents_run_sequence",
@@ -288,7 +294,7 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     },
   ]);
 
-  await db.collection(collectionNames.searchSessionJobEvents).createIndexes([
+  await createIndexesWithBootstrapLog(db, collectionNames.searchSessionJobEvents, "search_session_job_event_indexes", [
     {
       key: { searchSessionId: 1, sequence: 1 },
       name: "searchSessionJobEvents_session_sequence",
@@ -304,7 +310,7 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     },
   ]);
 
-  await db.collection(collectionNames.indexedJobEvents).createIndexes([
+  await createIndexesWithBootstrapLog(db, collectionNames.indexedJobEvents, "indexed_job_event_indexes", [
     {
       key: { sequence: 1 },
       name: "indexedJobEvents_sequence",
@@ -320,7 +326,7 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     },
   ]);
 
-  await db.collection(collectionNames.linkValidations).createIndexes([
+  await createIndexesWithBootstrapLog(db, collectionNames.linkValidations, "link_validation_indexes", [
     {
       key: { jobId: 1, checkedAt: -1 },
       name: "linkValidations_job_checkedAt_desc",
@@ -331,7 +337,7 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     },
   ]);
 
-  await db.collection(collectionNames.sourceInventory).createIndexes([
+  await createIndexesWithBootstrapLog(db, collectionNames.sourceInventory, "source_inventory_indexes", [
     {
       key: { platform: 1, status: 1, crawlPriority: 1, companyHint: 1 },
       name: "sourceInventory_platform_status_priority_companyHint",
@@ -392,6 +398,37 @@ async function ensureCanonicalJobKeyIndex(collection: CollectionLike) {
   }
 
   await collection.createIndexes([canonicalJobKeyIndex]);
+}
+
+async function createIndexesWithBootstrapLog(
+  db: DatabaseLike,
+  collection: string,
+  phase: string,
+  indexes: IndexSpec[],
+) {
+  return runBootstrapIndexPhase(collection, phase, () =>
+    db.collection(collection).createIndexes(indexes),
+  );
+}
+
+async function runBootstrapIndexPhase<T>(
+  collection: string,
+  phase: string,
+  task: () => Promise<T>,
+) {
+  const startedMs = Date.now();
+  console.info("[db:bootstrap-index-start]", {
+    collection,
+    phase,
+  });
+
+  const result = await task();
+  console.info("[db:bootstrap-index-success]", {
+    collection,
+    phase,
+    durationMs: Date.now() - startedMs,
+  });
+  return result;
 }
 
 function isIncompatibleCanonicalJobKeyIndex(index: IndexSpec) {

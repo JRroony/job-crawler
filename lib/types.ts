@@ -600,7 +600,9 @@ export const crawlDiagnosticsSchema = z.object({
   backgroundBootstrap: z
     .object({
       blocked: z.boolean().default(false),
-      reason: nullableOptional(z.enum(["mongo_unavailable", "bootstrap_failed"])),
+      reason: nullableOptional(
+        z.enum(["mongo_unavailable", "mongo_transient", "bootstrap_running", "bootstrap_failed"]),
+      ),
       phase: nullableOptional(z.enum(["repository_resolution", "index_initialization"])),
       message: nullableOptional(z.string()),
     })
@@ -681,6 +683,8 @@ export const crawlDiagnosticsSchema = z.object({
             "already_active",
             "disabled",
             "mongo_unavailable",
+            "mongo_transient",
+            "bootstrap_running",
             "bootstrap_failed",
             "failed",
           ]),

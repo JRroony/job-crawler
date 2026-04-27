@@ -3,155 +3,120 @@
 import React from "react";
 
 import type { JobListing } from "@/lib/types";
-import { labelForLinkStatus, formatPostedDate, formatRelativeMoment, jobPostingUrl, cn } from "@/lib/utils";
+import { formatPostedDate, formatRelativeMoment, jobPostingUrl } from "@/lib/utils";
 import { labelForProviderPlatform } from "@/components/job-crawler/ui-config";
-import { getJobTags } from "@/components/job-search/helpers";
+import {
+  getExperienceLabel,
+  getSponsorshipLabel,
+  getWorkplaceLabel,
+  labelForEmploymentType,
+} from "@/components/job-search/helpers";
 
 type JobDetailPanelProps = {
   job?: JobListing;
-  isRevalidating: boolean;
-  onRevalidate: (jobId: string) => Promise<void>;
+  isRevalidating?: boolean;
+  onRevalidate?: (jobId: string) => Promise<void>;
 };
 
 export function JobDetailPanel(props: JobDetailPanelProps) {
   if (!props.job) {
     return (
-      <section className="rounded-[20px] border border-ink/10 bg-white p-6 shadow-sm">
-        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
-          Preview
-        </div>
-        <h3 className="mt-3 text-2xl font-semibold text-ink">Select a result to preview it.</h3>
+      <section className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+        <h2 className="text-lg font-semibold text-ink">Select a job to see details</h2>
         <p className="mt-2 text-sm leading-6 text-slate">
-          The full posting summary, source details, and validation state will appear here.
+          Job description, source, location, and application link will appear here.
         </p>
       </section>
     );
   }
 
   const job = props.job;
-  const tags = getJobTags(job);
   const postingUrl = jobPostingUrl(job);
+  const workplaceLabel = getWorkplaceLabel(job);
+  const postedLabel =
+    job.postingDate || job.postedAt
+      ? formatPostedDate(job.postingDate ?? job.postedAt)
+      : "Date unavailable";
 
   return (
-    <section className="rounded-[24px] border border-ink/10 bg-white/96 p-6 shadow-[0_18px_50px_rgba(15,23,42,0.07)] backdrop-blur">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
-            Job preview
+    <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+      <div className="border-b border-slate-200 p-5">
+        <div className="flex flex-col gap-4">
+          <div>
+            <h2 className="text-2xl font-semibold leading-tight text-ink">{job.title}</h2>
+            <p className="mt-2 text-base font-semibold text-slate">{job.company}</p>
+            <p className="mt-1 text-sm text-slate">
+              {job.locationRaw || job.locationText || "Location unavailable"}
+            </p>
           </div>
-          <h3 className="mt-2 text-[28px] font-semibold leading-tight text-ink">
-            {job.title}
-          </h3>
-          <div className="mt-1 text-lg text-slate">{job.company}</div>
-        </div>
 
-        <span className="rounded-full border border-ink/10 bg-mist/45 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate">
-          {labelForProviderPlatform(job.sourcePlatform)}
-        </span>
+          <a
+            href={postingUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex min-h-11 items-center justify-center rounded-md bg-[#0a66c2] px-5 text-sm font-semibold text-white transition hover:bg-[#004182]"
+          >
+            Apply
+          </a>
+        </div>
       </div>
 
-      {tags.length > 0 ? (
-        <div className="mt-4 flex flex-wrap gap-2">
-          {tags.map((tag, index) => (
-            <span
-              key={`${job._id}-tag-${index}`}
-              className="rounded-full border border-ink/8 bg-white px-3 py-1 text-[11px] font-medium uppercase tracking-[0.14em] text-slate"
-            >
-              {tag}
-            </span>
-          ))}
+      <div className="space-y-5 p-5">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+          <DetailItem label="Platform" value={labelForProviderPlatform(job.sourcePlatform)} />
+          <DetailItem label="Posted" value={postedLabel} />
+          <DetailItem
+            label="Last seen"
+            value={formatRelativeMoment(job.lastSeenAt ?? job.indexedAt)}
+          />
+          <DetailItem label="Workplace" value={workplaceLabel ?? "Not specified"} />
+          <DetailItem label="Employment type" value={labelForEmploymentType(job.employmentType)} />
+          <DetailItem label="Experience" value={getExperienceLabel(job) ?? "Not specified"} />
+          <DetailItem label="Sponsorship" value={getSponsorshipLabel(job)} />
         </div>
-      ) : null}
 
-      <div className="mt-5 grid gap-3 text-sm text-slate sm:grid-cols-2">
-        <DetailItem label="Location" value={job.locationRaw || job.locationText} />
-        <DetailItem label="Posted" value={formatPostedDate(job.postingDate ?? job.postedAt)} />
-        <DetailItem label="Source" value={labelForProviderPlatform(job.sourcePlatform)} />
-        <DetailItem label="Validation" value={labelForLinkStatus(job.linkStatus)} tone={job.linkStatus} />
-        <DetailItem
-          label="Last checked"
-          value={
-            job.lastValidatedAt
-              ? formatRelativeMoment(job.lastValidatedAt)
-              : "Pending validation"
-          }
-        />
-        <DetailItem label="Source host" value={formatSourceHost(postingUrl)} />
-      </div>
-
-      <div className="mt-6 flex flex-wrap gap-3">
-        <a
-          href={postingUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="rounded-[14px] bg-[#0a66c2] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[#004182]"
-        >
-          View Post
-        </a>
-        <button
-          type="button"
-          onClick={() => props.onRevalidate(job._id)}
-          disabled={props.isRevalidating}
-          className="rounded-[14px] border border-ink/10 px-5 py-3 text-sm font-medium text-ink transition hover:border-ink/25 hover:bg-mist/45 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {props.isRevalidating
-            ? "Checking..."
-            : job.lastValidatedAt
-              ? "Revalidate"
-              : "Validate"}
-        </button>
-      </div>
-
-      <div className="mt-6 rounded-[20px] border border-ink/8 bg-mist/30 px-5 py-5">
-        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
-          Summary
-        </div>
-        <p className="mt-3 text-sm leading-7 text-slate">
-          This posting links back to the original public source so you can review the live listing without breaking your search flow.
-          {job.sourceProvenance.length > 1
-            ? ` ${job.sourceProvenance.length} source records were merged into this result during dedupe.`
-            : ""}
-        </p>
-        {job.descriptionSnippet ? (
-          <p className="mt-3 text-sm leading-7 text-slate">
-            {job.descriptionSnippet}
+        <section>
+          <h3 className="text-base font-semibold text-ink">About the job</h3>
+          <p className="mt-3 whitespace-pre-line text-sm leading-7 text-slate">
+            {job.descriptionSnippet ||
+              "The original posting has the full job description and application details."}
           </p>
-        ) : null}
+        </section>
+
+        <section className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+          <h3 className="text-sm font-semibold text-ink">Job metadata</h3>
+          <dl className="mt-3 space-y-2 text-sm text-slate">
+            <MetadataRow label="Normalized title" value={job.normalizedTitle || job.titleNormalized} />
+            <MetadataRow
+              label="Normalized location"
+              value={job.normalizedLocation || job.locationNormalized}
+            />
+            <MetadataRow label="Job ID" value={job.sourceJobId} />
+          </dl>
+        </section>
       </div>
     </section>
   );
 }
 
-function DetailItem(props: {
-  label: string;
-  value: string;
-  tone?: JobListing["linkStatus"];
-}) {
+function DetailItem(props: { label: string; value?: string }) {
   return (
-    <div className="rounded-[22px] border border-ink/8 bg-white px-4 py-4">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
-        {props.label}
-      </div>
-      <div
-        className={cn(
-          "mt-2 text-sm font-medium",
-          props.tone === "valid" && "text-pine",
-          props.tone === "unknown" && "text-tide",
-          props.tone === "stale" && "text-amber-800",
-          props.tone === "invalid" && "text-red-700",
-          !props.tone && "text-ink",
-        )}
-      >
-        {props.value}
-      </div>
+    <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+      <div className="text-xs font-semibold text-slate/70">{props.label}</div>
+      <div className="mt-1 text-sm font-medium text-ink">{props.value || "Not specified"}</div>
     </div>
   );
 }
 
-function formatSourceHost(url: string) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, "");
-  } catch {
-    return url;
+function MetadataRow(props: { label: string; value?: string }) {
+  if (!props.value) {
+    return null;
   }
+
+  return (
+    <div className="grid gap-1 sm:grid-cols-[140px_minmax(0,1fr)]">
+      <dt className="font-medium text-slate/80">{props.label}</dt>
+      <dd className="min-w-0 break-words text-ink">{props.value}</dd>
+    </div>
+  );
 }

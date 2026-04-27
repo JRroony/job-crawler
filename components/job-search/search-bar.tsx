@@ -2,7 +2,7 @@
 
 import React, { type FormEventHandler } from "react";
 
-type SearchBarProps = {
+type JobSearchHeaderProps = {
   keyword: string;
   location: string;
   isLoading: boolean;
@@ -12,72 +12,62 @@ type SearchBarProps = {
   onReset: () => void;
 };
 
-export function SearchBar(props: SearchBarProps) {
+export function JobSearchHeader(props: JobSearchHeaderProps) {
   return (
-    <section className="rounded-[24px] border border-ink/10 bg-white/94 px-4 py-4 shadow-[0_18px_50px_rgba(15,23,42,0.06)] backdrop-blur sm:px-5">
-      <div className="flex flex-col gap-3 border-b border-ink/8 pb-4 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/60">
-            Job search
+    <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 shadow-sm backdrop-blur">
+      <div className="mx-auto flex max-w-[1440px] flex-col gap-3 px-4 py-3 sm:px-6 lg:flex-row lg:items-center lg:gap-5 lg:px-8">
+        <div className="flex shrink-0 items-center gap-2">
+          <div className="flex h-9 w-9 items-center justify-center rounded-md bg-[#0a66c2] text-sm font-bold text-white">
+            J
           </div>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-ink sm:text-[2rem]">
-            Find relevant roles quickly
-          </h1>
-          <p className="mt-1 text-sm text-slate">
-            Load saved matches first, keep refining with lightweight filters, and let background refresh expand coverage without interrupting the list.
-          </p>
+          <div className="text-lg font-semibold tracking-tight text-ink">JobSearch</div>
         </div>
-        <div className="rounded-full border border-ink/10 bg-mist/45 px-3 py-1.5 text-xs font-semibold text-slate">
-          Public listings only
-        </div>
-      </div>
 
-      <form
-        className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1.35fr)_minmax(250px,0.9fr)_auto]"
-        onSubmit={props.onSubmit}
-      >
-        <label className="rounded-[18px] border border-ink/10 bg-white px-4 py-3 shadow-sm ring-1 ring-transparent transition focus-within:border-[#0a66c2]/40 focus-within:ring-[#0a66c2]/20">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/55">
-            Role
-          </div>
-          <input
-            value={props.keyword}
-            onChange={(event) => props.onKeywordChange(event.target.value)}
-            placeholder="Title, keyword, or company"
-            className="mt-2 h-7 w-full border-none bg-transparent px-0 text-[15px] text-ink outline-none placeholder:text-slate/45"
-            autoComplete="off"
-          />
-        </label>
+        <form
+          className="grid flex-1 gap-2 lg:grid-cols-[minmax(220px,1fr)_minmax(220px,0.8fr)_auto_auto]"
+          onSubmit={props.onSubmit}
+        >
+          <label className="flex min-h-11 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm ring-1 ring-transparent transition focus-within:border-[#0a66c2] focus-within:ring-[#0a66c2]/20">
+            <span className="shrink-0 font-medium text-slate/70">Title</span>
+            <span className="sr-only">Job title, keywords, or company</span>
+            <input
+              value={props.keyword}
+              onChange={(event) => props.onKeywordChange(event.target.value)}
+              placeholder="Job title, keywords, or company"
+              className="h-10 w-full border-none bg-transparent px-0 text-sm text-ink outline-none placeholder:text-slate/55"
+              autoComplete="off"
+            />
+          </label>
 
-        <label className="rounded-[18px] border border-ink/10 bg-white px-4 py-3 shadow-sm ring-1 ring-transparent transition focus-within:border-[#0a66c2]/40 focus-within:ring-[#0a66c2]/20">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/55">
-            Location
-          </div>
-          <input
-            value={props.location}
-            onChange={(event) => props.onLocationChange(event.target.value)}
-            placeholder="City, state, country, or remote"
-            className="mt-2 h-7 w-full border-none bg-transparent px-0 text-[15px] text-ink outline-none placeholder:text-slate/45"
-            autoComplete="off"
-          />
-        </label>
+          <label className="flex min-h-11 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm ring-1 ring-transparent transition focus-within:border-[#0a66c2] focus-within:ring-[#0a66c2]/20">
+            <span className="shrink-0 font-medium text-slate/70">Location</span>
+            <span className="sr-only">City, state, country, or remote</span>
+            <input
+              value={props.location}
+              onChange={(event) => props.onLocationChange(event.target.value)}
+              placeholder="City, state, country, or remote"
+              className="h-10 w-full border-none bg-transparent px-0 text-sm text-ink outline-none placeholder:text-slate/55"
+              autoComplete="off"
+            />
+          </label>
 
-        <div className="flex gap-2 lg:self-stretch">
           <button
             type="submit"
-            className="min-h-[56px] min-w-[132px] rounded-[16px] bg-[#0a66c2] px-5 text-sm font-semibold text-white transition hover:bg-[#004182]"
+            className="min-h-11 rounded-md bg-[#0a66c2] px-6 text-sm font-semibold text-white transition hover:bg-[#004182]"
           >
             {props.isLoading ? "Searching..." : "Search"}
           </button>
           <button
             type="button"
             onClick={props.onReset}
-            className="min-h-[56px] rounded-[16px] border border-ink/10 bg-white px-4 text-sm font-medium text-slate transition hover:border-ink/25 hover:bg-mist/45"
+            className="min-h-11 rounded-md border border-slate-300 bg-white px-4 text-sm font-medium text-slate transition hover:border-slate-400 hover:bg-slate-50"
           >
-            Reset
+            Clear
           </button>
-        </div>
-      </form>
-    </section>
+        </form>
+      </div>
+    </header>
   );
 }
+
+export const SearchBar = JobSearchHeader;

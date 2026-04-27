@@ -2,142 +2,201 @@
 
 import React from "react";
 
-import type { SearchFilters } from "@/lib/types";
+import type { EmploymentType, SearchFilters } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import type { ClientResultFilters } from "@/components/job-search/helpers";
+import type {
+  ClientResultFilters,
+  SponsorshipFilter,
+  WorkplaceFilter,
+} from "@/components/job-search/helpers";
 import {
-  disabledPlatformFilterOptions,
+  employmentTypeFilterOptions,
   experienceFilterOptions,
   platformFilterOptions,
   postedDateFilterOptions,
+  sponsorshipFilterOptions,
+  workplaceFilterOptions,
 } from "@/components/job-search/helpers";
 
-type FilterBarProps = {
+type JobFilterSidebarProps = {
   filters: SearchFilters;
   resultFilters: ClientResultFilters;
+  mobileOpen?: boolean;
+  onCloseMobile?: () => void;
   onTogglePlatform: (platform: (typeof platformFilterOptions)[number]["value"]) => void;
   onToggleExperience: (level: (typeof experienceFilterOptions)[number]["value"]) => void;
-  onToggleRemoteOnly: () => void;
-  onToggleVisaFriendlyOnly: () => void;
+  onWorkplaceChange: (value: WorkplaceFilter) => void;
+  onToggleEmploymentType: (type: EmploymentType) => void;
+  onSponsorshipChange: (value: SponsorshipFilter) => void;
+  onCompanyChange: (value: string) => void;
   onPostedDateChange: (value: ClientResultFilters["postedDate"]) => void;
   onClear: () => void;
 };
 
-export function FilterBar(props: FilterBarProps) {
+export function JobFilterSidebar(props: JobFilterSidebarProps) {
+  const panel = (
+    <FilterPanel
+      filters={props.filters}
+      resultFilters={props.resultFilters}
+      onTogglePlatform={props.onTogglePlatform}
+      onToggleExperience={props.onToggleExperience}
+      onWorkplaceChange={props.onWorkplaceChange}
+      onToggleEmploymentType={props.onToggleEmploymentType}
+      onSponsorshipChange={props.onSponsorshipChange}
+      onCompanyChange={props.onCompanyChange}
+      onPostedDateChange={props.onPostedDateChange}
+      onClear={props.onClear}
+    />
+  );
+
+  return (
+    <>
+      <aside className="hidden lg:block">{panel}</aside>
+
+      {props.mobileOpen ? (
+        <div className="fixed inset-0 z-40 lg:hidden" role="dialog" aria-modal="true">
+          <button
+            type="button"
+            className="absolute inset-0 bg-ink/35"
+            aria-label="Close filters"
+            onClick={props.onCloseMobile}
+          />
+          <div className="absolute inset-x-0 bottom-0 max-h-[85vh] overflow-y-auto rounded-t-xl bg-white p-4 shadow-[0_-20px_60px_rgba(15,23,42,0.18)]">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-base font-semibold text-ink">Filters</h2>
+              <button
+                type="button"
+                onClick={props.onCloseMobile}
+                className="rounded-md border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate hover:bg-slate-50"
+              >
+                Done
+              </button>
+            </div>
+            {panel}
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function FilterPanel(props: Omit<JobFilterSidebarProps, "mobileOpen" | "onCloseMobile">) {
   const activePlatformSet = new Set(
     props.filters.platforms?.length
       ? props.filters.platforms
       : platformFilterOptions.map((option) => option.value),
   );
   const activeExperienceSet = new Set(props.filters.experienceLevels ?? []);
+  const activeEmploymentTypeSet = new Set(props.resultFilters.employmentTypes ?? []);
+  const activeWorkplace = props.resultFilters.workplace ?? "any";
+  const activeSponsorship = props.resultFilters.sponsorship ?? "any";
   const hasAnyFilter =
     Boolean(props.filters.platforms?.length) ||
     activeExperienceSet.size > 0 ||
-    props.resultFilters.remoteOnly ||
-    props.resultFilters.visaFriendlyOnly ||
+    activeEmploymentTypeSet.size > 0 ||
+    activeWorkplace !== "any" ||
+    activeSponsorship !== "any" ||
+    Boolean(props.resultFilters.company?.trim()) ||
     props.resultFilters.postedDate !== "any";
 
   return (
-    <section className="rounded-[20px] border border-ink/10 bg-white/92 px-4 py-4 shadow-sm sm:px-5">
-      <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate/70">
-              Filters
-            </h2>
-            <p className="mt-1 text-sm text-slate">
-              Keep the main list focused with quick filters. Open advanced filters only when you need extra control.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={props.onClear}
-            className={cn(
-              "self-start rounded-full px-3 py-1.5 text-sm font-medium transition",
-              hasAnyFilter
-                ? "border border-ink/10 text-slate hover:border-ink/25 hover:bg-mist/45"
-                : "cursor-default text-slate/45",
-            )}
-            disabled={!hasAnyFilter}
-          >
-            Clear filters
-          </button>
-        </div>
+    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm lg:sticky lg:top-24">
+      <div className="mb-4 flex items-center justify-between">
+        <h2 className="text-base font-semibold text-ink">Filters</h2>
+        <button
+          type="button"
+          onClick={props.onClear}
+          className={cn(
+            "rounded-md px-2.5 py-1.5 text-sm font-medium transition",
+            hasAnyFilter
+              ? "text-[#0a66c2] hover:bg-[#0a66c2]/10"
+              : "cursor-default text-slate/45",
+          )}
+          disabled={!hasAnyFilter}
+        >
+          Clear
+        </button>
+      </div>
 
-        <div className="grid gap-3 lg:grid-cols-[0.8fr_0.8fr_1fr]">
-          <FilterGroup label="Work style">
+      <div className="space-y-5">
+        <FilterGroup label="Date posted">
+          {postedDateFilterOptions.map((option) => (
             <FilterChip
-              label="Remote only"
-              selected={props.resultFilters.remoteOnly}
-              onClick={props.onToggleRemoteOnly}
+              key={option.value}
+              label={option.label}
+              selected={props.resultFilters.postedDate === option.value}
+              onClick={() => props.onPostedDateChange(option.value)}
             />
-          </FilterGroup>
+          ))}
+        </FilterGroup>
 
-          <FilterGroup label="Hiring support">
+        <FilterGroup label="Experience level">
+          {experienceFilterOptions.map((option) => (
             <FilterChip
-              label="Visa friendly"
-              selected={props.resultFilters.visaFriendlyOnly}
-              onClick={props.onToggleVisaFriendlyOnly}
+              key={option.value}
+              label={option.label}
+              selected={activeExperienceSet.has(option.value)}
+              onClick={() => props.onToggleExperience(option.value)}
             />
-          </FilterGroup>
+          ))}
+        </FilterGroup>
 
-          <FilterGroup label="Posted date">
-            {postedDateFilterOptions.map((option) => (
-              <FilterChip
-                key={option.value}
-                label={option.label}
-                selected={props.resultFilters.postedDate === option.value}
-                onClick={() => props.onPostedDateChange(option.value)}
-              />
-            ))}
-          </FilterGroup>
+        <FilterGroup label="Workplace">
+          {workplaceFilterOptions.map((option) => (
+            <FilterChip
+              key={option.value}
+              label={option.label}
+              selected={activeWorkplace === option.value}
+              onClick={() => props.onWorkplaceChange(option.value)}
+            />
+          ))}
+        </FilterGroup>
+
+        <FilterGroup label="Employment type">
+          {employmentTypeFilterOptions.map((option) => (
+            <FilterChip
+              key={option.value}
+              label={option.label}
+              selected={activeEmploymentTypeSet.has(option.value)}
+              onClick={() => props.onToggleEmploymentType(option.value)}
+            />
+          ))}
+        </FilterGroup>
+
+        <FilterGroup label="Platform">
+          {platformFilterOptions.map((option) => (
+            <FilterChip
+              key={option.value}
+              label={option.label}
+              selected={activePlatformSet.has(option.value)}
+              onClick={() => props.onTogglePlatform(option.value)}
+            />
+          ))}
+        </FilterGroup>
+
+        <FilterGroup label="Sponsorship">
+          {sponsorshipFilterOptions.map((option) => (
+            <FilterChip
+              key={option.value}
+              label={option.label}
+              selected={activeSponsorship === option.value}
+              onClick={() => props.onSponsorshipChange(option.value)}
+            />
+          ))}
+        </FilterGroup>
+
+        <div>
+          <label className="text-sm font-semibold text-ink" htmlFor="company-filter">
+            Company
+          </label>
+          <input
+            id="company-filter"
+            value={props.resultFilters.company ?? ""}
+            onChange={(event) => props.onCompanyChange(event.target.value)}
+            placeholder="Filter by company"
+            className="mt-2 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm text-ink outline-none transition placeholder:text-slate/50 focus:border-[#0a66c2] focus:ring-2 focus:ring-[#0a66c2]/15"
+          />
         </div>
-
-        <details className="group rounded-[18px] border border-ink/8 bg-mist/30 px-4 py-3">
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
-            <div>
-              <div className="text-sm font-semibold text-ink">Advanced filters</div>
-              <div className="mt-1 text-sm text-slate">
-                Narrow by platform and experience without turning the page into a control panel.
-              </div>
-            </div>
-            <span className="rounded-full border border-ink/10 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate">
-              More
-            </span>
-          </summary>
-
-          <div className="mt-4 grid gap-4 border-t border-ink/8 pt-4 xl:grid-cols-[1.1fr_1fr]">
-            <FilterGroup label="Platform">
-              {platformFilterOptions.map((option) => (
-                <FilterChip
-                  key={option.value}
-                  label={option.label}
-                  selected={activePlatformSet.has(option.value)}
-                  onClick={() => props.onTogglePlatform(option.value)}
-                />
-              ))}
-              {disabledPlatformFilterOptions.map((option) => (
-                <FilterChip
-                  key={option.label}
-                  label={`${option.label} · ${option.detail}`}
-                  selected={false}
-                  disabled
-                />
-              ))}
-            </FilterGroup>
-
-            <FilterGroup label="Experience">
-              {experienceFilterOptions.map((option) => (
-                <FilterChip
-                  key={option.value}
-                  label={option.label}
-                  selected={activeExperienceSet.has(option.value)}
-                  onClick={() => props.onToggleExperience(option.value)}
-                />
-              ))}
-            </FilterGroup>
-          </div>
-        </details>
       </div>
     </section>
   );
@@ -145,10 +204,8 @@ export function FilterBar(props: FilterBarProps) {
 
 function FilterGroup(props: { label: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-2">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate/60">
-        {props.label}
-      </div>
+    <div>
+      <div className="mb-2 text-sm font-semibold text-ink">{props.label}</div>
       <div className="flex flex-wrap gap-2">{props.children}</div>
     </div>
   );
@@ -167,17 +224,19 @@ function FilterChip(props: {
       disabled={props.disabled}
       aria-pressed={props.selected}
       className={cn(
-        "rounded-full border px-3.5 py-2 text-sm transition",
-        props.disabled && "cursor-not-allowed border-ink/8 bg-white text-slate/45",
+        "rounded-full border px-3 py-1.5 text-xs font-medium transition",
+        props.disabled && "cursor-not-allowed border-slate-200 bg-slate-50 text-slate/45",
         !props.disabled &&
           props.selected &&
-          "border-[#0a66c2] bg-[#0a66c2] text-white",
+          "border-[#0a66c2] bg-[#e7f3ff] text-[#0a66c2]",
         !props.disabled &&
           !props.selected &&
-          "border-ink/10 bg-white text-slate hover:border-ink/25 hover:bg-mist/45",
+          "border-slate-200 bg-white text-slate hover:border-[#0a66c2]/35 hover:bg-[#e7f3ff]/60",
       )}
     >
       {props.label}
     </button>
   );
 }
+
+export const FilterBar = JobFilterSidebar;

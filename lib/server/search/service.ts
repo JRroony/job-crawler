@@ -11,7 +11,10 @@ import {
   runSearchIngestionFromSession,
 } from "@/lib/server/ingestion/service";
 import { triggerRecurringBackgroundIngestion } from "@/lib/server/background/recurring-ingestion";
-import { analyzeTitle } from "@/lib/server/title-retrieval/analyze";
+import {
+  resolveIndexedCoveragePolicy,
+  type IndexedCoveragePolicy,
+} from "@/lib/server/search/coverage-policy";
 import {
   createSearchRerunSession,
   createSearchSession,
@@ -305,6 +308,25 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
       allowRequestTimeFreshnessRecovery,
     },
   );
+  console.info("[search:coverage-policy]", {
+    searchId: session.search._id,
+    searchSessionId: session.searchSession._id,
+    title: session.search.filters.title,
+    country: session.search.filters.country ?? null,
+    state: session.search.filters.state ?? null,
+    city: session.search.filters.city ?? null,
+    crawlMode: session.search.filters.crawlMode ?? "balanced",
+    indexedCandidateCount: supplementalDecision.indexedCandidateCount,
+    indexedMatchedCount: supplementalDecision.indexedJobCount,
+    coverageTarget: supplementalDecision.coverageTarget,
+    coveragePolicyReason: supplementalDecision.coveragePolicyReason,
+    isCoverageSufficient: supplementalDecision.coveragePolicy.isCoverageSufficient,
+    latestIndexedJobAgeMs: supplementalDecision.latestIndexedJobAgeMs ?? null,
+    titleBroadness: supplementalDecision.coveragePolicy.titleBroadness,
+    locationBroadness: supplementalDecision.coveragePolicy.locationBroadness,
+    highDemandRole: supplementalDecision.coveragePolicy.highDemandRole,
+    targetJobCount: supplementalDecision.targetJobCount,
+  });
   const activeTargetedQueueEntry =
     supplementalDecision.shouldQueueTargetedReplenishment
       ? await session.repository.getActiveCrawlQueueEntryForOwner(
@@ -319,6 +341,24 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     supplementalDecision.shouldQueue && !activeQueueAlreadyExists;
   const shouldRequestGenericBackgroundIngestion =
     supplementalDecision.requestBackgroundIngestion && !shouldQueueCurrentRun;
+  const indexedCoverageLowOrEmpty =
+    supplementalDecision.triggerReason !== "indexed_coverage_sufficient" &&
+    supplementalDecision.triggerReason !== "reused_completed_coverage";
+  if (indexedCoverageLowOrEmpty) {
+    console.info("[search:empty-or-low-index-fallback]", {
+      searchId: session.search._id,
+      searchSessionId: session.searchSession._id,
+      crawlRunId: session.crawlRun._id,
+      willReturnImmediately: true,
+      willQueueTargetedReplenishment:
+        supplementalDecision.shouldQueueTargetedReplenishment && !activeQueueAlreadyExists,
+      reason: supplementalDecision.triggerReason,
+      indexedCandidateCount: indexedSearch.candidateCount,
+      indexedMatchedCount: indexedJobs.length,
+      coverageTarget: supplementalDecision.coverageTarget,
+      activeQueueAlreadyExists,
+    });
+  }
   const backgroundIngestion = shouldRequestGenericBackgroundIngestion
     ? await requestBackgroundIngestionForIndexGap(runtime, session.now)
     : { status: "not_requested" as const };
@@ -507,6 +547,7 @@ type SupplementalDecision = {
   minimumIndexedCoverage: number;
   coverageTarget: number;
   coveragePolicyReason: string;
+  coveragePolicy: IndexedCoveragePolicy;
   targetJobCount: number;
   indexedCandidateCount: number;
   indexedRequestTimeEvaluationCount: number;
@@ -553,13 +594,14 @@ function resolveSupplementalCrawlDecision(
     filters,
     indexedSearch,
     env,
-    latestIndexedJobAgeMs,
+    { latestIndexedJobAgeMs },
   );
   const minimumIndexedCoverage = coveragePolicy.coverageTarget;
   const baseDecision = {
     minimumIndexedCoverage,
     coverageTarget: coveragePolicy.coverageTarget,
     coveragePolicyReason: coveragePolicy.reason,
+    coveragePolicy,
     targetJobCount: env.CRAWL_TARGET_JOB_COUNT,
     indexedCandidateCount: indexedSearch.candidateCount,
     indexedRequestTimeEvaluationCount: indexedSearch.requestTimeEvaluationCount,
@@ -588,7 +630,7 @@ function resolveSupplementalCrawlDecision(
     };
   }
 
-  if (indexedJobCount >= minimumIndexedCoverage) {
+  if (coveragePolicy.isCoverageSufficient) {
     return {
       ...baseDecision,
       shouldQueue: false,
@@ -679,98 +721,6 @@ function resolveSupplementalCrawlDecision(
     triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
     triggerExplanation: `Indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${coveragePolicy.reason} target, so a targeted replenishment run was queued for the current search filters.`,
   };
-}
-
-function resolveIndexedCoveragePolicy(
-  filters: ParsedSearchFilters,
-  indexedSearch: Awaited<ReturnType<typeof getIndexedJobsForSearch>>,
-  env: ReturnType<typeof getEnv>,
-  latestIndexedJobAgeMs?: number,
-) {
-  const mode = filters.crawlMode ?? "balanced";
-  const modeTargets = {
-    fast: env.SEARCH_MIN_COVERAGE_FAST,
-    balanced: env.SEARCH_MIN_COVERAGE_BALANCED,
-    deep: env.SEARCH_MIN_COVERAGE_DEEP,
-  } as const;
-  const titleAnalysis = analyzeTitle(filters.title);
-  const country = normalizeCoverageText(filters.country);
-  const state = normalizeCoverageText(filters.state);
-  const city = normalizeCoverageText(filters.city);
-  const isCountryWide = Boolean(country) && !state && !city;
-  const isCityLevel = Boolean(city);
-  const highDemandRole = isHighDemandRoleFamily(titleAnalysis.family);
-  const hasSenioritySpecificity = titleAnalysis.seniorityTokens.length > 0;
-  const meaningfulTokenCount = titleAnalysis.meaningfulTokens.length;
-  const titleBroadness = !hasSenioritySpecificity && meaningfulTokenCount <= 3
-    ? "broad"
-    : "specific";
-  const locationBroadness = isCityLevel
-    ? "city"
-    : isCountryWide
-      ? "country"
-      : state
-        ? "state"
-        : "unspecified";
-  const cityTargets = {
-    fast: 3,
-    balanced: 5,
-    deep: 8,
-  } as const;
-  let coverageTarget = isCityLevel
-    ? Math.min(modeTargets[mode], cityTargets[mode])
-    : modeTargets[mode];
-  const reasons = [`${mode}_mode_${locationBroadness}_search`];
-
-  if (isCountryWide) {
-    coverageTarget = Math.max(coverageTarget, env.SEARCH_BROAD_COUNTRY_MIN_COVERAGE);
-    reasons.push("broad_country_minimum");
-  }
-
-  if (isCountryWide && highDemandRole) {
-    coverageTarget = Math.max(coverageTarget, env.SEARCH_HIGH_DEMAND_ROLE_MIN_COVERAGE);
-    reasons.push("high_demand_role_country_minimum");
-  }
-
-  if (mode === "deep") {
-    coverageTarget = Math.max(coverageTarget, env.SEARCH_MIN_COVERAGE_DEEP);
-    reasons.push("deep_mode_highest_target");
-  }
-
-  if (titleBroadness === "specific" && isCityLevel) {
-    reasons.push("specific_title_city_scope");
-  } else {
-    reasons.push(`${titleBroadness}_title`);
-  }
-
-  if (typeof latestIndexedJobAgeMs === "number") {
-    reasons.push(`latest_age_ms:${latestIndexedJobAgeMs}`);
-  }
-
-  reasons.push(`candidates:${indexedSearch.candidateCount}`);
-  reasons.push(`matches:${indexedSearch.matches.length}`);
-
-  return {
-    coverageTarget,
-    reason: reasons.join("|"),
-    titleBroadness,
-    locationBroadness,
-    highDemandRole,
-  };
-}
-
-function isHighDemandRoleFamily(family: ReturnType<typeof analyzeTitle>["family"]) {
-  return (
-    family === "ai_ml_science" ||
-    family === "software_engineering" ||
-    family === "data_platform" ||
-    family === "data_analytics" ||
-    family === "product"
-  );
-}
-
-function normalizeCoverageText(value?: string) {
-  return value?.trim().toLowerCase() ?? "";
 }
 
 function buildTargetedReplenishmentOwnerKey(filters: ParsedSearchFilters) {
@@ -951,6 +901,22 @@ function mapBackgroundIngestionTriggerResult(
   if (result.status === "skipped-bootstrap-failed") {
     return {
       status: "bootstrap_failed",
+      reason: result.reason,
+      message: result.message,
+    };
+  }
+
+  if (result.status === "skipped-bootstrap-running") {
+    return {
+      status: "bootstrap_running",
+      reason: result.reason,
+      message: result.message,
+    };
+  }
+
+  if (result.status === "skipped-mongo-transient") {
+    return {
+      status: "mongo_transient",
       reason: result.reason,
       message: result.message,
     };

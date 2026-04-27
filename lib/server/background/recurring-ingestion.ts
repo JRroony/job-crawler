@@ -87,10 +87,12 @@ type BackgroundIngestionTriggerResult =
         | "skipped-disabled"
         | "skipped-active"
         | "skipped-no-mongo"
+        | "skipped-mongo-transient"
+        | "skipped-bootstrap-running"
         | "skipped-bootstrap-failed";
       searchId?: string;
       systemProfileId?: string;
-      reason?: "mongo_unavailable" | "bootstrap_failed";
+      reason?: "mongo_unavailable" | "mongo_transient" | "bootstrap_running" | "bootstrap_failed";
       phase?: "repository_resolution" | "index_initialization";
       message?: string;
     };
@@ -237,9 +239,13 @@ export async function triggerRecurringBackgroundIngestion(
   if (!repositoryResolution.repository) {
     const result = {
       status:
-        repositoryResolution.reason === "bootstrap_failed"
-          ? "skipped-bootstrap-failed"
-          : "skipped-no-mongo",
+        repositoryResolution.reason === "bootstrap_running"
+          ? "skipped-bootstrap-running"
+          : repositoryResolution.reason === "mongo_transient"
+            ? "skipped-mongo-transient"
+            : repositoryResolution.reason === "bootstrap_failed"
+              ? "skipped-bootstrap-failed"
+              : "skipped-no-mongo",
       reason: repositoryResolution.reason,
       phase: repositoryResolution.phase,
       message: repositoryResolution.message,
@@ -674,6 +680,15 @@ async function executeRecurringInventoryIngestion(
     skippedSlowProviders: providerSelection.skippedSlowProviders,
     reason: providerSelection.reason,
   });
+  console.info("[crawl:provider-tiering]", {
+    searchId: target.search._id,
+    crawlRunId: target.crawlRunId,
+    crawlMode: "deep",
+    selectedFastProviders: providerSelection.selectedFastProviders,
+    selectedSlowProviders: providerSelection.selectedSlowProviders,
+    skippedSlowProviders: providerSelection.skippedSlowProviders,
+    reason: providerSelection.reason,
+  });
   console.info("[crawl:timeout-policy]", {
     searchId: target.search._id,
     crawlRunId: target.crawlRunId,
@@ -1011,6 +1026,7 @@ async function executeRecurringInventoryIngestion(
         });
         console.info("[crawl:persistence-confirmed]", {
           searchId: target.search._id,
+          searchSessionId: target.searchSession._id,
           crawlRunId: target.crawlRunId,
           provider: provider.provider,
           insertedCount: persistence.insertedCount,
@@ -1511,7 +1527,7 @@ async function resolveDurableBackgroundRepository(runtime: BackgroundIngestionRu
   | { repository: JobCrawlerRepository; reason?: never; phase?: never; message?: never }
   | {
       repository: null;
-      reason: "mongo_unavailable" | "bootstrap_failed";
+      reason: "mongo_unavailable" | "mongo_transient" | "bootstrap_running" | "bootstrap_failed";
       phase: "repository_resolution" | "index_initialization";
       message: string;
     }
@@ -1525,36 +1541,57 @@ async function resolveDurableBackgroundRepository(runtime: BackgroundIngestionRu
       return { repository: await runtime.resolveRepository() };
     }
 
-    const [{ JobCrawlerRepository }, { getMongoDb }] = await Promise.all([
+    const [{ JobCrawlerRepository }, mongodb] = await Promise.all([
       import("@/lib/server/db/repository"),
       import("@/lib/server/mongodb"),
     ]);
 
-    return { repository: new JobCrawlerRepository((await getMongoDb()) as never) };
+    const bootstrapState = mongodb.getMongoBootstrapState();
+    if (bootstrapState.status === "running") {
+      return {
+        repository: null,
+        reason: "bootstrap_running",
+        phase: "index_initialization",
+        message: "MongoDB bootstrap/index initialization is already running.",
+      };
+    }
+
+    return {
+      repository: new JobCrawlerRepository(
+        (await mongodb.getMongoDb({ ensureIndexes: true, requireIndexes: true })) as never,
+      ),
+    };
   } catch (error) {
     const message =
       error instanceof Error
         ? error.message
         : "MongoDB is unavailable for recurring background ingestion.";
     const failure = classifyBackgroundRepositoryFailure(error);
-    console.warn(
+    const logLabel =
       failure.reason === "bootstrap_failed"
         ? "[background-ingestion:bootstrap-failed]"
-        : "[background-ingestion:mongo-unavailable]",
-      {
-        message,
-        reason: failure.reason,
-        phase: failure.phase,
-        bootstrapFailure: failure.reason === "bootstrap_failed",
-      },
-    );
+        : failure.reason === "mongo_transient"
+          ? "[background-ingestion:mongo-transient]"
+          : "[background-ingestion:mongo-unavailable]";
+    console.warn(logLabel, {
+      status:
+        failure.reason === "mongo_transient"
+          ? "skipped-mongo-transient"
+          : failure.reason === "bootstrap_failed"
+            ? "skipped-bootstrap-failed"
+            : "skipped-no-mongo",
+      message,
+      reason: failure.reason,
+      phase: failure.phase,
+      bootstrapFailure: failure.reason === "bootstrap_failed",
+    });
     return failure;
   }
 }
 
 export function classifyBackgroundRepositoryFailure(error: unknown): {
   repository: null;
-  reason: "mongo_unavailable" | "bootstrap_failed";
+  reason: "mongo_unavailable" | "mongo_transient" | "bootstrap_running" | "bootstrap_failed";
   phase: "repository_resolution" | "index_initialization";
   message: string;
 } {
@@ -1562,13 +1599,22 @@ export function classifyBackgroundRepositoryFailure(error: unknown): {
     error instanceof Error
       ? error.message
       : "MongoDB is unavailable for recurring background ingestion.";
+  const bootstrapError = parseMongoBootstrapErrorLike(error);
   const reason =
-    /bootstrap failed|migration|index initialization|index init|jobs_canonical_job_key/i.test(
-      message,
-    )
-      ? "bootstrap_failed"
-      : "mongo_unavailable";
-  const phase = reason === "bootstrap_failed" ? "index_initialization" : "repository_resolution";
+    bootstrapError?.reason ??
+    (/bootstrap already running|bootstrap\/index initialization is already running/i.test(message)
+      ? "bootstrap_running"
+      : /connection pool|server selection|timed out|pool cleared|cooldown after a recent failure/i.test(message)
+        ? "mongo_transient"
+        : /bootstrap failed|migration|index initialization|index init|jobs_canonical_job_key/i.test(
+              message,
+            )
+          ? "bootstrap_failed"
+          : "mongo_unavailable");
+  const phase =
+    reason === "bootstrap_failed" || reason === "bootstrap_running" || reason === "mongo_transient"
+      ? "index_initialization"
+      : "repository_resolution";
 
   return {
     repository: null,
@@ -1576,6 +1622,29 @@ export function classifyBackgroundRepositoryFailure(error: unknown): {
     phase,
     message,
   };
+}
+
+function parseMongoBootstrapErrorLike(error: unknown):
+  | { reason: "mongo_transient" | "bootstrap_running" | "bootstrap_failed" }
+  | undefined {
+  if (!error || typeof error !== "object") {
+    return undefined;
+  }
+
+  const record = error as Record<string, unknown>;
+  if (record.name !== "MongoBootstrapError") {
+    return undefined;
+  }
+
+  if (
+    record.reason === "mongo_transient" ||
+    record.reason === "bootstrap_running" ||
+    record.reason === "bootstrap_failed"
+  ) {
+    return { reason: record.reason };
+  }
+
+  return undefined;
 }
 
 async function recoverStaleBackgroundRunIfNeeded(

@@ -771,10 +771,28 @@ describe("recurring background ingestion", () => {
     const bootstrapError = new Error(
       "Mongo bootstrap failed during index initialization for jobs_canonical_job_key.",
     );
+    const transientBootstrapError = Object.assign(
+      new Error(
+        'MongoDB bootstrap failed during migration/index initialization: Connection pool for 127.0.0.1:27017 was cleared because another operation failed with: "connection <monitor> to 127.0.0.1:27017 timed out"',
+      ),
+      { name: "MongoBootstrapError", reason: "mongo_transient" },
+    );
+    const runningBootstrapError = Object.assign(
+      new Error("MongoDB bootstrap/index initialization is already running."),
+      { name: "MongoBootstrapError", reason: "bootstrap_running" },
+    );
     const genericError = new Error("MongoServerSelectionError: connection refused");
 
     expect(classifyBackgroundRepositoryFailure(bootstrapError)).toMatchObject({
       reason: "bootstrap_failed",
+      phase: "index_initialization",
+    });
+    expect(classifyBackgroundRepositoryFailure(transientBootstrapError)).toMatchObject({
+      reason: "mongo_transient",
+      phase: "index_initialization",
+    });
+    expect(classifyBackgroundRepositoryFailure(runningBootstrapError)).toMatchObject({
+      reason: "bootstrap_running",
       phase: "index_initialization",
     });
     expect(classifyBackgroundRepositoryFailure(genericError)).toMatchObject({
@@ -803,6 +821,83 @@ describe("recurring background ingestion", () => {
         message: bootstrapError.message,
       }),
     );
+  });
+
+  it("skips transient Mongo bootstrap timeouts without permanently poisoning later ingestion", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const transientBootstrapError = Object.assign(
+      new Error(
+        'MongoDB bootstrap failed during migration/index initialization: Connection pool for 127.0.0.1:27017 was cleared because another operation failed with: "connection <monitor> to 127.0.0.1:27017 timed out"',
+      ),
+      { name: "MongoBootstrapError", reason: "mongo_transient" },
+    );
+
+    const skipped = await triggerRecurringBackgroundIngestion({
+      resolveRepository: async () => {
+        throw transientBootstrapError;
+      },
+    });
+
+    expect(skipped).toMatchObject({
+      status: "skipped-mongo-transient",
+      reason: "mongo_transient",
+      phase: "index_initialization",
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[background-ingestion:trigger]",
+      expect.objectContaining({
+        status: "skipped-mongo-transient",
+        reason: "mongo_transient",
+      }),
+    );
+
+    const db = new MongoLikeNullDb();
+    const repository = new JobCrawlerRepository(db);
+    const now = new Date("2026-04-15T12:00:00.000Z");
+    await repository.upsertSourceInventory([
+      createInventoryRecord({
+        token: "acme",
+        companyHint: "Acme",
+        lastCrawledAt: undefined,
+      }),
+    ]);
+
+    const provider = createStubProvider("greenhouse", async () => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: 1,
+      fetchedCount: 1,
+      matchedCount: 1,
+      warningCount: 0,
+      jobs: [
+        createProviderJob({
+          title: "Software Engineer",
+          sourceJobId: "post-bootstrap-role",
+          company: "Acme",
+        }),
+      ],
+    }));
+
+    const started = await triggerRecurringBackgroundIngestion({
+      resolveRepository: async () => repository,
+      providers: [provider],
+      now,
+      maxSources: 1,
+      schedulingIntervalMs: 60_000,
+      runTimeoutMs: 2_000,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+    });
+
+    expect(started.status).toBe("started");
+    if (started.status !== "started") {
+      throw new Error("Expected background ingestion to start after a later successful bootstrap.");
+    }
+
+    const crawlRun = await waitForRunCompletion(repository, started.crawlRunId);
+    const jobs = await repository.getJobsByCrawlRun(started.crawlRunId);
+
+    expect(crawlRun.status).toBe("completed");
+    expect(jobs.map((job) => job.sourceJobId)).toContain("post-bootstrap-role");
   });
 
   it("repairs legacy canonicalJobKey data during bootstrap and then starts background ingestion", async () => {

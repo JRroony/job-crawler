@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
+import { collectionNames } from "@/lib/server/db/collections";
+import { JobCrawlerRepository } from "@/lib/server/db/repository";
+import { getIndexedJobsForSearch } from "@/lib/server/search/indexed-jobs";
 import { buildSearchIndexBackfillRepair } from "@/lib/server/search/search-index-backfill";
+import { FakeDb } from "@/tests/helpers/fake-db";
 
 describe("search index backfill repair", () => {
   it("generates United States location keys for a legacy Seattle, WA job", () => {
@@ -195,4 +199,122 @@ describe("search index backfill repair", () => {
     expect(repair.update.searchIndex.locationSearchKeys).toContain("country:france");
     expect(repair.update.searchIndex.locationSearchKeys).not.toContain("country:fr");
   });
+
+  it("backfills searchable title and location keys across multiple role families", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const legacyJobs = [
+      createLegacyJob({
+        _id: "legacy-applied-scientist",
+        title: "Applied Scientist",
+        locationText: "Seattle, WA",
+        state: "Washington",
+        city: "Seattle",
+      }),
+      createLegacyJob({
+        _id: "legacy-machine-learning-engineer",
+        title: "Machine Learning Engineer",
+        locationText: "San Francisco, CA",
+        state: "California",
+        city: "San Francisco",
+      }),
+      createLegacyJob({
+        _id: "legacy-data-analyst",
+        title: "Data Analyst",
+        country: "Canada",
+        locationText: "Toronto, ON",
+        state: "Ontario",
+        city: "Toronto",
+      }),
+      createLegacyJob({
+        _id: "legacy-product-manager",
+        title: "Product Manager",
+        locationText: "New York, NY",
+        state: "New York",
+        city: "New York",
+      }),
+    ];
+
+    for (const job of legacyJobs) {
+      await db.collection(collectionNames.jobs).insertOne(job);
+      const repair = buildSearchIndexBackfillRepair(job);
+      await db.collection(collectionNames.jobs).updateOne(
+        { _id: job._id },
+        { $set: repair.update },
+      );
+    }
+
+    await expectIndexedSourceJobIds(repository, {
+      title: "applied scientist",
+      country: "United States",
+    }, ["legacy-applied-scientist"]);
+    await expectIndexedSourceJobIds(repository, {
+      title: "machine learning engineer",
+      country: "United States",
+    }, ["legacy-applied-scientist", "legacy-machine-learning-engineer"]);
+    await expectIndexedSourceJobIds(repository, {
+      title: "data analyst",
+      country: "Canada",
+    }, ["legacy-data-analyst"]);
+    await expectIndexedSourceJobIds(repository, {
+      title: "product manager",
+      country: "United States",
+    }, ["legacy-product-manager"]);
+  });
 });
+
+function createLegacyJob(input: {
+  _id: string;
+  title: string;
+  locationText: string;
+  country?: string;
+  state?: string;
+  city?: string;
+}) {
+  const sourceJobId = input._id;
+  const canonicalUrl = `https://example.com/jobs/${sourceJobId}`;
+
+  return {
+    _id: input._id,
+    title: input.title,
+    company: "Acme",
+    country: input.country ?? "United States",
+    state: input.state,
+    city: input.city,
+    locationText: input.locationText,
+    sourcePlatform: "greenhouse" as const,
+    sourceCompanySlug: "acme",
+    sourceJobId,
+    sourceUrl: canonicalUrl,
+    applyUrl: `${canonicalUrl}/apply`,
+    canonicalUrl,
+    discoveredAt: "2026-04-01T00:00:00.000Z",
+    crawledAt: "2026-04-01T00:00:00.000Z",
+    firstSeenAt: "2026-04-01T00:00:00.000Z",
+    lastSeenAt: "2026-04-01T00:00:00.000Z",
+    indexedAt: "2026-04-01T00:00:00.000Z",
+    isActive: true,
+    linkStatus: "unknown" as const,
+    rawSourceMetadata: {},
+    sourceLookupKeys: [`greenhouse:${sourceJobId}`],
+    sourceProvenance: [],
+    crawlRunIds: ["legacy-backfill-run"],
+    canonicalJobKey: `platform:greenhouse:acme:${sourceJobId}`,
+    companyNormalized: "acme",
+    normalizedCompany: "acme",
+    dedupeFingerprint: `dedupe:${sourceJobId}`,
+    contentFingerprint: `content:${sourceJobId}`,
+    contentHash: `content-hash:${sourceJobId}`,
+  };
+}
+
+async function expectIndexedSourceJobIds(
+  repository: JobCrawlerRepository,
+  filters: { title: string; country: string },
+  expectedIds: string[],
+) {
+  const result = await getIndexedJobsForSearch(repository, filters);
+  const ids = result.matches.map(({ job }) => job.sourceJobId);
+
+  expect(ids).toEqual(expect.arrayContaining(expectedIds));
+}

@@ -405,17 +405,23 @@ describe("crawl performance optimizations", () => {
         sourcesBeforeTruncation: 60,
         sourcesAfterTruncation: 40,
       });
-    });
+    }, 10_000);
 
-    it("returns an early visible batch before the crawl fully finishes and preserves delta delivery", async () => {
+    it("returns immediately on empty indexed coverage and preserves delta delivery", async () => {
       const repository = new JobCrawlerRepository(new FakeDb());
       const now = new Date("2026-04-13T13:30:00.000Z");
+      let releaseEarlyBatch: (() => void) | undefined;
       let releaseFinalBatch: (() => void) | undefined;
+      const earlyBatchGate = new Promise<void>((resolve) => {
+        releaseEarlyBatch = resolve;
+      });
       const finalBatchGate = new Promise<void>((resolve) => {
         releaseFinalBatch = resolve;
       });
 
       const provider = createStubProvider("greenhouse", async (context, sources) => {
+        await earlyBatchGate;
+
         await context.onBatch?.({
           provider: "greenhouse",
           fetchedCount: 1,
@@ -478,16 +484,28 @@ describe("crawl performance optimizations", () => {
       );
 
       expect(started.result.crawlRun.status).toBe("running");
-      expect(started.result.jobs.map((job) => job.title)).toEqual([
+      expect(started.result.jobs).toHaveLength(0);
+      expect(started.result.delivery?.cursor ?? 0).toBe(0);
+      expect(started.result.diagnostics.session?.supplementalQueued).toBe(true);
+
+      releaseEarlyBatch?.();
+      const earlyDelta = await waitForDeltaJobs(
+        started.result.search._id,
+        repository,
+        0,
+        3,
+      );
+
+      expect(earlyDelta.jobs.map((job) => job.title)).toEqual([
         "Software Engineer",
         "Software Engineer II",
         "Software Engineer III",
       ]);
-      expect(started.result.delivery?.cursor).toBe(3);
+      expect(earlyDelta.delivery.cursor).toBe(3);
 
       const noDeltaYet = await getSearchJobDeltas(
         started.result.search._id,
-        started.result.delivery?.cursor ?? 0,
+        earlyDelta.delivery.cursor,
         { repository },
       );
       expect(noDeltaYet.jobs).toHaveLength(0);
@@ -497,7 +515,7 @@ describe("crawl performance optimizations", () => {
       const lateDelta = await waitForDeltaJobs(
         started.result.search._id,
         repository,
-        started.result.delivery?.cursor ?? 0,
+        earlyDelta.delivery.cursor,
         2,
       );
 
@@ -510,22 +528,26 @@ describe("crawl performance optimizations", () => {
       expect(lateDelta.delivery.previousCursor).toBe(3);
       expect(lateDelta.delivery.cursor).toBe(5);
 
-      await waitForBackgroundRunToSettle();
-
-      const finalResult = await getSearchDetails(started.result.search._id, { repository });
+      const finalResult = await waitForSearchToFinish(started.result.search._id, repository);
       expect(finalResult.crawlRun.status).toBe("completed");
       expect(finalResult.jobs).toHaveLength(5);
     });
 
-    it("returns the first saved jobs quickly even when the early visible target is still unmet", async () => {
+    it("returns immediately on empty indexed coverage while later jobs stream as deltas", async () => {
       const repository = new JobCrawlerRepository(new FakeDb());
       const now = new Date("2026-04-13T13:45:00.000Z");
+      let releaseFirstBatch: (() => void) | undefined;
       let releaseSlowTail: (() => void) | undefined;
+      const firstBatchGate = new Promise<void>((resolve) => {
+        releaseFirstBatch = resolve;
+      });
       const slowTailGate = new Promise<void>((resolve) => {
         releaseSlowTail = resolve;
       });
 
       const provider = createStubProvider("greenhouse", async (context, sources) => {
+        await firstBatchGate;
+
         await context.onBatch?.({
           provider: "greenhouse",
           fetchedCount: 1,
@@ -581,14 +603,25 @@ describe("crawl performance optimizations", () => {
       // Allow some variance on Windows/CI, original 400ms
       expect(elapsedMs).toBeLessThan(500);
       expect(started.result.crawlRun.status).toBe("running");
-      expect(started.result.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
-      expect(started.result.delivery?.cursor).toBe(1);
+      expect(started.result.jobs).toHaveLength(0);
+      expect(started.result.delivery?.cursor ?? 0).toBe(0);
+      expect(started.result.diagnostics.session?.supplementalQueued).toBe(true);
+
+      releaseFirstBatch?.();
+      const firstDelta = await waitForDeltaJobs(
+        started.result.search._id,
+        repository,
+        0,
+        1,
+      );
+      expect(firstDelta.jobs.map((job) => job.title)).toEqual(["Software Engineer"]);
+      expect(firstDelta.delivery.cursor).toBe(1);
 
       releaseSlowTail?.();
       const delta = await waitForDeltaJobs(
         started.result.search._id,
         repository,
-        started.result.delivery?.cursor ?? 0,
+        firstDelta.delivery.cursor,
         2,
       );
 
@@ -678,4 +711,19 @@ async function waitForDeltaJobs(
   }
 
   throw new Error(`Timed out waiting for ${expectedCount} delta job(s) after cursor ${afterCursor}.`);
+}
+
+async function waitForSearchToFinish(searchId: string, repository: JobCrawlerRepository) {
+  const deadline = Date.now() + 2_000;
+
+  while (Date.now() < deadline) {
+    const result = await getSearchDetails(searchId, { repository });
+    if (result.crawlRun.status !== "running") {
+      return result;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error(`Timed out waiting for search ${searchId} to finish.`);
 }

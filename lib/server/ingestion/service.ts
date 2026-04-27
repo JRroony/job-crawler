@@ -12,6 +12,7 @@ import {
 } from "@/lib/server/crawler/link-validation";
 import { createDiscoveryService } from "@/lib/server/discovery/service";
 import { createDefaultProviders } from "@/lib/server/providers";
+import { selectProvidersForTieredCrawl } from "@/lib/server/providers/tiers";
 import type { CrawlRun, JobListing, SearchDocument, SearchSessionDocument } from "@/lib/types";
 import { resolveRepository, type JobCrawlerRuntime } from "@/lib/server/services/runtime";
 
@@ -72,6 +73,13 @@ export async function queueSearchIngestion(
 ) {
   const context = await buildSearchIngestionContext(runtime);
   const ownerKey = normalizeRequestOwnerKey(runtime.requestOwnerKey);
+  const crawlMode = target.search.filters.crawlMode ?? "balanced";
+  const providerSelection = selectProvidersForTieredCrawl({
+    providers: context.providers,
+    selectedPlatforms: target.search.filters.platforms,
+    crawlMode,
+    includeSlowProviders: crawlMode === "deep",
+  });
   const queuedResult = await queueSearchRun(
     target.search._id,
     context.repository,
@@ -118,8 +126,12 @@ export async function queueSearchIngestion(
     searchId: target.search._id,
     searchSessionId: target.searchSession._id,
     crawlRunId: target.crawlRun._id,
+    filters: target.search.filters,
+    selectedProviders: providerSelection.selectedProviders.map((provider) => provider.provider),
+    skippedSlowProviders: providerSelection.skippedSlowProviders,
     ownerKey: ownerKey ?? null,
     queued,
+    activeQueueAlreadyExists: !queuedResult && isSearchRunPendingResult,
     reason: runtime.ingestionQueueReason ?? null,
   });
 

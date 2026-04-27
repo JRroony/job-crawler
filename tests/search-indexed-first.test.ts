@@ -187,6 +187,63 @@ function createDiscovery(): DiscoveryService {
   };
 }
 
+function createDiscoveryFromSources(sources: DiscoveredSource[]): DiscoveryService {
+  return {
+    async discover() {
+      return sources;
+    },
+  };
+}
+
+function createSourceForPlatform(
+  platform: "greenhouse" | "workday" | "company_page",
+): DiscoveredSource {
+  if (platform === "greenhouse") {
+    return classifySourceCandidate({
+      url: "https://boards.greenhouse.io/acme",
+      token: "acme",
+      confidence: "high",
+      discoveryMethod: "configured_env",
+    });
+  }
+
+  if (platform === "workday") {
+    return classifySourceCandidate({
+      url: "https://acme.wd1.myworkdayjobs.com/en-US/acme",
+      token: "acme",
+      confidence: "high",
+      discoveryMethod: "future_search",
+    });
+  }
+
+  return classifySourceCandidate({
+    url: "https://www.acme.example/careers",
+    token: "acme",
+    companyHint: "Acme",
+    confidence: "medium",
+    discoveryMethod: "future_search",
+  });
+}
+
+async function raceSearchStart<T>(
+  startPromise: Promise<T>,
+  timeoutMs: number,
+) {
+  const raced = await Promise.race([
+    startPromise.then((result) => ({ type: "result" as const, result })),
+    new Promise<{ type: "timeout" }>((resolve) =>
+      setTimeout(() => resolve({ type: "timeout" }), timeoutMs),
+    ),
+  ]);
+
+  if (raced.type === "timeout") {
+    await startPromise.catch(() => undefined);
+    throw new Error(`Search did not return within ${timeoutMs}ms.`);
+  }
+
+  return raced.result;
+}
+
 async function seedIndexedJobs(
   repository: JobCrawlerRepository,
   jobs: readonly PersistableTestJob[],
@@ -615,6 +672,215 @@ describe("jobs-first indexed search", () => {
       }
       infoSpy.mockRestore();
     }
+  });
+
+  it("returns immediately with zero jobs and queues fast targeted replenishment when applied scientist United States has empty indexed coverage", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const calls: CrawlProvider["provider"][] = [];
+    const providerDelayMs = 300;
+    const greenhouse = createStubProvider("greenhouse", async () => {
+      calls.push("greenhouse");
+      await new Promise((resolve) => setTimeout(resolve, providerDelayMs));
+      return {
+        provider: "greenhouse" as const,
+        status: "success" as const,
+        sourceCount: 1,
+        fetchedCount: 0,
+        matchedCount: 0,
+        warningCount: 0,
+        jobs: [],
+      };
+    });
+    const workday = createStubProvider("workday", async () => {
+      calls.push("workday");
+      return {
+        provider: "workday" as const,
+        status: "success" as const,
+        sourceCount: 1,
+        fetchedCount: 0,
+        matchedCount: 0,
+        warningCount: 0,
+        jobs: [],
+      };
+    });
+    const companyPage = createStubProvider("company_page", async () => {
+      calls.push("company_page");
+      return {
+        provider: "company_page" as const,
+        status: "success" as const,
+        sourceCount: 1,
+        fetchedCount: 0,
+        matchedCount: 0,
+        warningCount: 0,
+        jobs: [],
+      };
+    });
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    let searchId: string | undefined;
+
+    try {
+      const startPromise = startSearchFromFilters(
+        {
+          title: "applied scientist",
+          country: "United States",
+          platforms: ["greenhouse", "workday", "company_page"],
+        },
+        {
+          repository,
+          providers: [greenhouse, workday, companyPage],
+          discovery: createDiscoveryFromSources([
+            createSourceForPlatform("greenhouse"),
+            createSourceForPlatform("workday"),
+            createSourceForPlatform("company_page"),
+          ]),
+          fetchImpl: vi.fn() as unknown as typeof fetch,
+          now: new Date("2026-04-15T12:00:00.000Z"),
+        },
+      );
+      const started = await raceSearchStart(startPromise, 150);
+      searchId = started.result.search._id;
+
+      expect(started.queued).toBe(true);
+      expect(started.result.jobs).toEqual([]);
+      expect(started.result.crawlRun.status).toBe("running");
+      expect(started.result.diagnostics.session).toMatchObject({
+        indexedResultsCount: 0,
+        totalVisibleResultsCount: 0,
+        supplementalQueued: true,
+        supplementalRunning: true,
+        targetedReplenishmentQueued: true,
+        triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
+      });
+      expect(started.result.diagnostics.session?.coverageTarget).toBeGreaterThan(0);
+
+      await waitForQueueToSettle(repository, searchId);
+      expect(calls).toEqual(["greenhouse"]);
+      expect(infoSpy).toHaveBeenCalledWith(
+        "[search:empty-or-low-index-fallback]",
+        expect.objectContaining({
+          searchId,
+          willReturnImmediately: true,
+          willQueueTargetedReplenishment: true,
+          reason: "insufficient_indexed_coverage_targeted_replenishment",
+          indexedMatchedCount: 0,
+        }),
+      );
+      expect(infoSpy).toHaveBeenCalledWith(
+        "[ingestion:targeted-queue]",
+        expect.objectContaining({
+          searchId,
+          filters: expect.objectContaining({
+            title: "applied scientist",
+            country: "United States",
+            platforms: ["greenhouse", "workday", "company_page"],
+          }),
+          selectedProviders: ["greenhouse"],
+          skippedSlowProviders: ["workday", "company_page"],
+          queued: true,
+        }),
+      );
+      expect(infoSpy).toHaveBeenCalledWith(
+        "[crawl:provider-tiering]",
+        expect.objectContaining({
+          searchId,
+          selectedFastProviders: ["greenhouse"],
+          selectedSlowProviders: [],
+          skippedSlowProviders: ["workday", "company_page"],
+        }),
+      );
+    } finally {
+      if (searchId) {
+        await waitForQueueToSettle(repository, searchId).catch(() => undefined);
+      }
+      infoSpy.mockRestore();
+    }
+  });
+
+  it("applies the same low-index targeted replenishment policy to data analyst Canada and product manager United States", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const scenarios = [
+      {
+        title: "data analyst",
+        country: "Canada",
+        indexedTitle: "Data Analyst",
+        locationText: "Toronto, ON",
+        state: "Ontario",
+        city: "Toronto",
+        sourcePrefix: "generic-da-canada",
+      },
+      {
+        title: "product manager",
+        country: "United States",
+        indexedTitle: "Product Manager",
+        locationText: "Remote - United States",
+        state: undefined,
+        city: undefined,
+        sourcePrefix: "generic-pm-us",
+      },
+    ];
+    const crawlSources: CrawlProvider["crawlSources"] = vi.fn(async () => ({
+      provider: "greenhouse" as const,
+      status: "success" as const,
+      sourceCount: 1,
+      fetchedCount: 0,
+      matchedCount: 0,
+      warningCount: 0,
+      jobs: [],
+    }));
+    const provider = createStubProvider("greenhouse", crawlSources);
+
+    for (const scenario of scenarios) {
+      await seedIndexedJobs(
+        repository,
+        Array.from({ length: 5 }, (_, index) => {
+          const sourceJobId = `${scenario.sourcePrefix}-${index + 1}`;
+          const canonicalUrl = `https://example.com/jobs/${sourceJobId}`;
+          return createPersistableJob({
+            title: scenario.indexedTitle,
+            country: scenario.country,
+            state: scenario.state,
+            city: scenario.city,
+            locationText: scenario.locationText,
+            sourceJobId,
+            canonicalUrl,
+            applyUrl: `${canonicalUrl}/apply`,
+            sourceUrl: canonicalUrl,
+            dedupeFingerprint: `dedupe:${sourceJobId}`,
+            contentFingerprint: `content:${sourceJobId}`,
+            contentHash: `content-hash:${sourceJobId}`,
+          });
+        }),
+      );
+
+      const started = await startSearchFromFilters(
+        {
+          title: scenario.title,
+          country: scenario.country,
+          platforms: ["greenhouse"],
+        },
+        {
+          repository,
+          providers: [provider],
+          discovery: createDiscovery(),
+          fetchImpl: vi.fn() as unknown as typeof fetch,
+          now: new Date("2026-04-15T12:00:00.000Z"),
+          initialVisibleWaitMs: 0,
+        },
+      );
+
+      expect(started.queued).toBe(true);
+      expect(started.result.jobs).toHaveLength(5);
+      expect(started.result.diagnostics.session).toMatchObject({
+        indexedResultsCount: 5,
+        supplementalQueued: true,
+        targetedReplenishmentQueued: true,
+        triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
+      });
+      expect(started.result.diagnostics.session?.coverageTarget).toBeGreaterThan(5);
+      await waitForQueueToSettle(repository, started.result.search._id);
+    }
+
+    expect(crawlSources).toHaveBeenCalledTimes(scenarios.length);
   });
 
   it("does not enqueue a duplicate targeted replenishment for the same normalized filters", async () => {

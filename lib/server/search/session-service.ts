@@ -20,6 +20,7 @@ import {
   crawlDiagnosticsSchema,
   crawlDeltaResponseSchema,
   crawlResponseSchema,
+  type CrawlRun,
   type CrawlDiagnostics,
   type JobListing,
   type SearchDocument,
@@ -203,7 +204,8 @@ export async function getInitialSearchResult(
   if (
     initialResult.jobs.length > 0 ||
     initialResult.crawlRun.status !== "running" ||
-    Boolean(initialResult.crawlRun.finishedAt)
+    Boolean(initialResult.crawlRun.finishedAt) ||
+    shouldReturnEmptyIndexedSessionImmediately(initialResult)
   ) {
     return initialResult;
   }
@@ -244,6 +246,24 @@ export async function getInitialSearchResult(
     pageSize: runtime.pageSize,
     searchSessionId: runtime.searchSessionId,
   });
+}
+
+function shouldReturnEmptyIndexedSessionImmediately(initialResult: {
+  jobs: unknown[];
+  crawlRun: Pick<CrawlRun, "status" | "finishedAt">;
+  diagnostics: CrawlDiagnostics;
+}) {
+  const session = initialResult.diagnostics.session;
+
+  return (
+    initialResult.jobs.length === 0 &&
+    initialResult.crawlRun.status === "running" &&
+    !initialResult.crawlRun.finishedAt &&
+    (session?.initialIndexedResultsCount ?? session?.indexedResultsCount ?? 0) === 0 &&
+    (session?.targetedReplenishmentActive === true ||
+      session?.targetedReplenishmentQueued === true ||
+      session?.supplementalQueued === true)
+  );
 }
 
 export async function getSearchDetails(searchId: string, runtime: SearchDetailsRuntime = {}) {

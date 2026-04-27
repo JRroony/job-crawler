@@ -141,6 +141,6 @@ describe("Greenhouse end-to-end regression", () => {
     expect(resolveViewState(apiResponse)).toBe("success");
     expect(html).toContain("Software Engineer");
     expect(html).toContain("OpenAI");
-    expect(html).toContain("View Post");
+    expect(html).toContain("Apply");
   });
 });

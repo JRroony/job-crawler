@@ -1,32 +1,23 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-import {
-  BackgroundSupplementIndicator,
-  LoadingPanel,
-  MessageBanner,
-  StatePanel,
-} from "@/components/job-crawler/status-panels";
-import {
-  describeValidationMode,
-  isPassiveLimitedProvider,
-  labelForCrawlerPlatform,
-  resolveCrawlMode,
-  resolveRequestedPlatforms,
-  resolveSelectedPlatforms,
-  togglePlatformSelection,
-} from "@/components/job-crawler/ui-config";
-import { FilterBar } from "@/components/job-search/filter-bar";
+import { togglePlatformSelection } from "@/components/job-crawler/ui-config";
+import { JobFilterSidebar } from "@/components/job-search/filter-bar";
 import { DiagnosticsDrawer } from "@/components/job-search/diagnostics-drawer";
+import { JobDetailPanel } from "@/components/job-search/job-detail-panel";
+import { JobEmptyState } from "@/components/job-search/job-empty-state";
+import { JobLoadingSkeleton } from "@/components/job-search/job-loading-skeleton";
+import { JobResultsList } from "@/components/job-search/job-results-list";
 import {
   buildLocationInputValue,
+  buildStableJobRenderKeys,
   defaultClientResultFilters,
   filterJobsForDisplay,
   parseLocationInput,
+  toggleEmploymentTypeSelection,
 } from "@/components/job-search/helpers";
-import { SearchBar } from "@/components/job-search/search-bar";
-import { buildResultsExportFilename, ResultsTable } from "@/components/results-table";
+import { JobSearchHeader } from "@/components/job-search/search-bar";
 import { buildStableJobRenderIdentity } from "@/lib/job-identity";
 import type {
   CrawlDeltaResponse,
@@ -37,7 +28,6 @@ import type {
   SearchFilters,
 } from "@/lib/types";
 import {
-  activeCrawlerPlatforms,
   crawlModes,
   crawlerPlatforms,
   experienceLevels,
@@ -48,7 +38,6 @@ import {
   sanitizeSearchFiltersInput,
   searchFiltersSchema,
 } from "@/lib/types";
-import { formatRelativeMoment, labelForExperience } from "@/lib/utils";
 
 type JobCrawlerAppProps = {
   initialSearches: SearchDocument[];
@@ -145,6 +134,11 @@ export function JobCrawlerApp({
   );
   const [isLoadingMoreResults, setIsLoadingMoreResults] = useState(false);
   const [revalidatingIds, setRevalidatingIds] = useState<string[]>([]);
+  const [selectedJobKey, setSelectedJobKey] = useState<string | undefined>();
+  const [isFilterDrawerOpen, setIsFilterDrawerOpen] = useState(false);
+  const [debugAvailable, setDebugAvailable] = useState(false);
+  const [debugEnabled, setDebugEnabled] = useState(false);
+  const hydratedUrlSearchRef = useRef(false);
   const pollSequenceRef = useRef(0);
   const loadMoreSequenceRef = useRef(0);
   const activeDeliveryCursorRef = useRef(0);
@@ -182,6 +176,47 @@ export function JobCrawlerApp({
     };
   }, [initialSearches.length]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const debugRequested = params.get("debug") === "1";
+    const localHost =
+      window.location.hostname === "localhost" ||
+      window.location.hostname === "127.0.0.1" ||
+      window.location.hostname === "";
+    const storedDebugEnabled = window.localStorage.getItem("job-search-debug") === "1";
+
+    setDebugAvailable(debugRequested || localHost || storedDebugEnabled);
+    setDebugEnabled(debugRequested || storedDebugEnabled);
+  }, []);
+
+  useEffect(() => {
+    if (hydratedUrlSearchRef.current || typeof window === "undefined") {
+      return;
+    }
+
+    hydratedUrlSearchRef.current = true;
+    const params = new URLSearchParams(window.location.search);
+    const title = params.get("title")?.trim() ?? "";
+
+    if (!title) {
+      return;
+    }
+
+    const location = params.get("location")?.trim() ?? "";
+    const nextFilters = normalizeSearchFiltersForClient({
+      ...initialFilters,
+      title,
+      ...parseLocationInput(location),
+    });
+
+    hydrateSearchForm(nextFilters);
+    void submitSearch(nextFilters, { updateUrl: false });
+  }, []);
+
   function buildLiveFilters(baseFilters: SearchFilters = filters) {
     return normalizeSearchFiltersForClient({
       ...baseFilters,
@@ -201,6 +236,9 @@ export function JobCrawlerApp({
     setClientResultFilters(defaultClientResultFilters);
     setMessage("");
     setErrorKind(null);
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", "/jobs");
+    }
   }
 
   function clearBrowseFilters() {
@@ -210,6 +248,25 @@ export function JobCrawlerApp({
       experienceLevels: undefined,
     }));
     setClientResultFilters(defaultClientResultFilters);
+  }
+
+  function syncSearchUrl(nextFilters: SearchFilters) {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const params = new URLSearchParams();
+    if (nextFilters.title.trim()) {
+      params.set("title", nextFilters.title.trim());
+    }
+
+    const location = buildLocationInputValue(nextFilters);
+    if (location) {
+      params.set("location", location);
+    }
+
+    const url = params.toString() ? `/jobs?${params.toString()}` : "/jobs";
+    window.history.pushState(null, "", url);
   }
 
   function refreshRecentSearch(search: SearchDocument) {
@@ -303,12 +360,15 @@ export function JobCrawlerApp({
     }
 
     setMessage(
-      "The crawl is still running in the background. Leave this page open or reopen the search from Recent searches in a moment.",
+      "We're updating results in the background. New matching jobs may appear shortly.",
     );
     setErrorKind(null);
   }
 
-  async function submitSearch(nextFilters: SearchFilters) {
+  async function submitSearch(
+    nextFilters: SearchFilters,
+    options: { updateUrl?: boolean } = {},
+  ) {
     const pollToken = ++pollSequenceRef.current;
     const requestController = replaceActiveRequestController();
     const payloadResult = buildSearchRequestPayload(nextFilters);
@@ -327,6 +387,10 @@ export function JobCrawlerApp({
     setActiveResult(null);
     activeDeliveryCursorRef.current = 0;
     activeIndexedDeliveryCursorRef.current = 0;
+    setSelectedJobKey(undefined);
+    if (options.updateUrl !== false) {
+      syncSearchUrl(nextFilters);
+    }
 
     try {
       const response = await fetch("/api/searches", {
@@ -359,7 +423,7 @@ export function JobCrawlerApp({
 
         throw createClassifiedClientError(
           "runtime",
-          payload.error ?? "The crawl request failed.",
+          payload.error ?? "The search request failed.",
         );
       }
 
@@ -388,7 +452,7 @@ export function JobCrawlerApp({
       }
       setViewState("error");
       setErrorKind(resolveErrorKind(error));
-      setMessage(error instanceof Error ? error.message : "The crawl request failed.");
+      setMessage(error instanceof Error ? error.message : "The search request failed.");
     }
   }
 
@@ -593,7 +657,7 @@ export function JobCrawlerApp({
       if (!response.ok) {
         throw createClassifiedClientError(
           "runtime",
-          payload.error ?? "The crawl could not be stopped.",
+          payload.error ?? "The background update could not be stopped.",
         );
       }
 
@@ -611,7 +675,7 @@ export function JobCrawlerApp({
 
       setViewState("error");
       setErrorKind(resolveErrorKind(error));
-      setMessage(error instanceof Error ? error.message : "The crawl could not be stopped.");
+      setMessage(error instanceof Error ? error.message : "The background update could not be stopped.");
     }
   }
 
@@ -687,9 +751,6 @@ export function JobCrawlerApp({
   }
 
   async function startNewSearch() {
-    const runningSearchId =
-      activeResult?.crawlRun.status === "running" ? activeResult.search._id : null;
-
     activeRequestControllerRef.current?.abort();
     activeRequestControllerRef.current = null;
     cancelLoadMoreRequest();
@@ -700,15 +761,8 @@ export function JobCrawlerApp({
     pollSequenceRef.current += 1;
     activeDeliveryCursorRef.current = 0;
     activeIndexedDeliveryCursorRef.current = 0;
+    setSelectedJobKey(undefined);
     clearSearchForm();
-
-    if (runningSearchId) {
-      void fetch(`/api/searches/${runningSearchId}`, {
-        method: "DELETE",
-      }).catch(() => {
-        // Best-effort: keep the new search flow unblocked even if cancellation races.
-      });
-    }
   }
 
   const visibleJobs = useMemo(
@@ -718,8 +772,10 @@ export function JobCrawlerApp({
         : [],
     [activeResult, clientResultFilters, filters],
   );
+  const jobRenderKeys = useMemo(() => buildStableJobRenderKeys(visibleJobs), [visibleJobs]);
   const totalMatchedCount = activeResult ? resolveTotalMatchedCount(activeResult) : 0;
   const loadedResultCount = activeResult?.jobs.length ?? 0;
+  const returnedCount = activeResult?.returnedCount ?? loadedResultCount;
   const isBlockingSearchLoad = shouldShowBlockingSearchLoad(viewState, activeResult);
   const isRefreshingVisibleSession = isSupplementingSearchSession(activeResult);
   const zeroResultState =
@@ -734,279 +790,208 @@ export function JobCrawlerApp({
   const resultsLocation = activeResult
     ? buildLocationInputValue(activeResult.search.filters) || "All locations"
     : buildLocationInputValue(buildLiveFilters()) || "All locations";
-  const activeSearchBadges = activeResult
-    ? buildFilterBadges(activeResult.search.filters).slice(0, 4)
-    : [];
+  const selectedJobKeyForRender = resolveVisibleJobSelection(selectedJobKey, jobRenderKeys);
+  const selectedJobIndex = selectedJobKeyForRender
+    ? jobRenderKeys.findIndex((key) => key === selectedJobKeyForRender)
+    : -1;
+  const selectedJob = selectedJobIndex === -1 ? undefined : visibleJobs[selectedJobIndex];
+
+  useEffect(() => {
+    setSelectedJobKey((current) => resolveVisibleJobSelection(current, jobRenderKeys));
+  }, [jobRenderKeys]);
 
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top,#ffffff_0%,#f4f7fb_40%,#edf2f7_100%)] text-ink">
-      <div className="mx-auto max-w-[1360px] px-4 py-5 sm:px-6 lg:px-8">
-        <div className="space-y-3">
-          <SearchBar
-            keyword={keywordInput}
-            location={locationInput}
-            isLoading={isBlockingSearchLoad}
-            onKeywordChange={setKeywordInput}
-            onLocationChange={setLocationInput}
-            onSubmit={(event) => {
-              event.preventDefault();
-              const nextFilters = buildLiveFilters();
-              hydrateSearchForm(nextFilters);
-              void submitSearch(nextFilters);
-            }}
-            onReset={clearSearchForm}
-          />
+    <main className="min-h-screen bg-[#f3f2ef] text-ink">
+      <JobSearchHeader
+        keyword={keywordInput}
+        location={locationInput}
+        isLoading={isBlockingSearchLoad}
+        onKeywordChange={setKeywordInput}
+        onLocationChange={setLocationInput}
+        onSubmit={(event) => {
+          event.preventDefault();
+          const nextFilters = buildLiveFilters();
+          hydrateSearchForm(nextFilters);
+          void submitSearch(nextFilters);
+        }}
+        onReset={() => void startNewSearch()}
+      />
 
-          <FilterBar
-            filters={filters}
-            resultFilters={clientResultFilters}
-            onTogglePlatform={(platform) =>
-              setFilters((current) => ({
-                ...current,
-                platforms: togglePlatformSelection(current.platforms, platform),
-              }))
-            }
-            onToggleExperience={(level) =>
-              setFilters((current) => ({
-                ...current,
-                experienceLevels: toggleExperienceLevel(current.experienceLevels, level),
-              }))
-            }
-            onToggleRemoteOnly={() =>
-              setClientResultFilters((current) => ({
-                ...current,
-                remoteOnly: !current.remoteOnly,
-              }))
-            }
-            onToggleVisaFriendlyOnly={() =>
-              setClientResultFilters((current) => ({
-                ...current,
-                visaFriendlyOnly: !current.visaFriendlyOnly,
-              }))
-            }
-            onPostedDateChange={(postedDate) =>
-              setClientResultFilters((current) => ({
-                ...current,
-                postedDate,
-              }))
-            }
-            onClear={clearBrowseFilters}
-          />
+      <div className="mx-auto grid max-w-[1440px] gap-4 px-4 py-4 sm:px-6 lg:grid-cols-[280px_minmax(0,1fr)] lg:px-8 xl:grid-cols-[280px_minmax(0,1fr)_420px]">
+        <JobFilterSidebar
+          filters={filters}
+          resultFilters={clientResultFilters}
+          mobileOpen={isFilterDrawerOpen}
+          onCloseMobile={() => setIsFilterDrawerOpen(false)}
+          onTogglePlatform={(platform) =>
+            setFilters((current) => ({
+              ...current,
+              platforms: togglePlatformSelection(current.platforms, platform),
+            }))
+          }
+          onToggleExperience={(level) =>
+            setFilters((current) => ({
+              ...current,
+              experienceLevels: toggleExperienceLevel(current.experienceLevels, level),
+            }))
+          }
+          onWorkplaceChange={(workplace) =>
+            setClientResultFilters((current) => ({
+              ...current,
+              workplace,
+              remoteOnly: false,
+            }))
+          }
+          onToggleEmploymentType={(employmentType) =>
+            setClientResultFilters((current) => ({
+              ...current,
+              employmentTypes: toggleEmploymentTypeSelection(
+                current.employmentTypes,
+                employmentType,
+              ),
+            }))
+          }
+          onSponsorshipChange={(sponsorship) =>
+            setClientResultFilters((current) => ({
+              ...current,
+              sponsorship,
+              visaFriendlyOnly: false,
+            }))
+          }
+          onCompanyChange={(company) =>
+            setClientResultFilters((current) => ({
+              ...current,
+              company,
+            }))
+          }
+          onPostedDateChange={(postedDate) =>
+            setClientResultFilters((current) => ({
+              ...current,
+              postedDate,
+            }))
+          }
+          onClear={clearBrowseFilters}
+        />
 
-          {message && !blockingErrorState ? (
-            <MessageBanner
-              message={message}
-              tone={errorKind ? "error" : "info"}
-            />
-          ) : null}
-        </div>
-
-        <div className="mt-4 space-y-4">
-          {isBlockingSearchLoad ? (
-            <LoadingPanel
-              stage={activeResult?.crawlRun.stage}
-              foundCount={activeResult?.jobs.length}
-              fetchedCount={activeResult?.crawlRun.totalFetchedJobs}
-              matchedCount={activeResult?.crawlRun.totalMatchedJobs}
-              providerSummary={activeResult?.crawlRun.providerSummary}
-              stopButton={
-                activeResult?.crawlRun.status === "running" && activeResult?.search._id ? (
-                  <button
-                    type="button"
-                    onClick={() => void stopActiveSearch(activeResult.search._id)}
-                    className="inline-flex items-center justify-center rounded-full border border-ink/15 bg-white px-3 py-1.5 text-xs font-semibold text-ink transition hover:border-red-300 hover:bg-red-50"
-                  >
-                    Stop
-                  </button>
-                ) : undefined
-              }
-              actionButton={
-                <button
-                  type="button"
-                  onClick={() => void startNewSearch()}
-                  className="inline-flex items-center justify-center rounded-full border border-ink/15 bg-white px-3 py-1.5 text-xs font-semibold text-ink transition hover:border-sand hover:bg-sand/20"
-                >
-                  New Search
-                </button>
-              }
-            />
-          ) : null}
-
-          {isRefreshingVisibleSession && activeResult ? (
-            <div className="flex items-center justify-between gap-3">
-              <BackgroundSupplementIndicator
-                stage={activeResult.crawlRun.stage}
-                foundCount={activeResult.jobs.length}
-                onStop={() => void stopActiveSearch(activeResult.search._id)}
-              />
-              <button
-                type="button"
-                onClick={() => void startNewSearch()}
-                className="inline-flex items-center justify-center rounded-full border border-ink/15 bg-white px-3 py-1.5 text-xs font-semibold text-ink transition hover:border-sand hover:bg-sand/20"
-              >
-                New Search
-              </button>
-            </div>
-          ) : null}
+        <section className="min-w-0 space-y-3">
+          <div className="flex items-center justify-between gap-3 lg:hidden">
+            <button
+              type="button"
+              onClick={() => setIsFilterDrawerOpen(true)}
+              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-ink shadow-sm"
+            >
+              Filters
+            </button>
+          </div>
 
           {viewState === "idle" ? (
-            <StatePanel
-              title="Search by role and location"
-              description="Start with a role and location to load saved matches quickly, then let background refresh improve coverage without taking over the page."
-              tone="neutral"
+            <section className="rounded-lg border border-slate-200 bg-white px-6 py-10 shadow-sm">
+              <h1 className="text-2xl font-semibold text-ink">Search jobs by role and location</h1>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-slate">
+                Enter a title and location above to review matching jobs from the indexed database.
+              </p>
+            </section>
+          ) : null}
+
+          {message && !blockingErrorState ? (
+            <StatusBanner message={message} tone={errorKind ? "error" : "info"} />
+          ) : null}
+
+          {isRefreshingVisibleSession ? (
+            <StatusBanner
+              message="We're updating results in the background."
+              tone="info"
             />
+          ) : null}
+
+          {resultNotice ? (
+            <StatusBanner message={resultNotice.description} tone="info" />
           ) : null}
 
           {viewState === "error" && !activeResult ? (
-            <StatePanel
-              title={blockingErrorState?.title ?? "The crawl could not complete"}
+            <BlockingState
+              title={blockingErrorState?.title ?? "Search could not complete"}
               description={
                 blockingErrorState?.description ??
-                "The crawl could not complete. Please retry."
+                "Some sources could not be refreshed. Try again in a moment."
               }
               actionLabel={blockingErrorState?.actionLabel}
               onAction={
                 blockingErrorState?.actionType === "reload"
                   ? () => window.location.reload()
                   : blockingErrorState?.actionType === "retry"
-                    ? () => void rerunActiveSearch()
+                    ? () => void submitSearch(buildLiveFilters())
                     : undefined
               }
-              tone="red"
             />
           ) : null}
 
+          {isBlockingSearchLoad ? <JobLoadingSkeleton /> : null}
+
           {zeroResultState && viewState !== "loading" ? (
-            <StatePanel
-              title={zeroResultState.title}
-              description={zeroResultState.description}
-              highlights={zeroResultState.highlights}
-              actionLabel="Rerun crawl"
-              onAction={() => void rerunActiveSearch()}
-              tone="amber"
-            />
+            <JobEmptyState backgroundUpdating={activeResult?.crawlRun.status === "running"} />
           ) : null}
 
           {activeResult && activeResult.jobs.length > 0 ? (
             <>
-              <section className="rounded-[20px] border border-ink/10 bg-white/94 px-5 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur">
-                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <section className="rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
                   <div>
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate/65">
-                      Search results
-                    </div>
-                    <h2 className="mt-1 text-xl font-semibold tracking-tight text-ink">
+                    <h1 className="text-xl font-semibold text-ink">
                       {activeResult.search.filters.title}
-                    </h2>
-                    <p className="mt-1 text-sm text-slate">
-                      {resultsLocation} • updated {formatRelativeMoment(activeResult.search.updatedAt)}
-                    </p>
-                    <p className="mt-2 text-sm text-slate">
-                      {isRefreshingVisibleSession
-                        ? "Saved matches are ready now. Background refresh is still adding coverage for this session."
-                        : "Saved matches for this session are ready to review and refine."}
-                    </p>
-                    {activeSearchBadges.length > 0 ? (
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {activeSearchBadges.map((badge, index) => (
-                          <span
-                            key={`active-search-badge-${index}`}
-                            className="rounded-full border border-ink/10 bg-mist/35 px-3 py-1.5 text-xs text-slate"
-                          >
-                            {badge}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
+                    </h1>
+                    <p className="mt-1 text-sm text-slate">{resultsLocation}</p>
                   </div>
-                  <div className="space-y-3 lg:min-w-[320px]">
-                    {/* Stop button only shown while supplemental work is running */}
-                    {activeResult.crawlRun.status === "running" ? (
-                      <button
-                        type="button"
-                        onClick={() => void stopActiveSearch(activeResult.search._id)}
-                        className="inline-flex w-full items-center justify-center rounded-full border border-ink/15 bg-white px-4 py-2 text-sm font-semibold text-ink transition hover:border-red-300 hover:bg-red-50"
-                      >
-                        Stop background work
-                      </button>
-                    ) : null}
-                    {/* New Search always available in results view */}
-                    <button
-                      type="button"
-                      onClick={() => void startNewSearch()}
-                      className="inline-flex w-full items-center justify-center rounded-full border border-ink/15 bg-white px-4 py-2 text-sm font-semibold text-ink transition hover:border-sand hover:bg-sand/20"
-                    >
-                      New Search
-                    </button>
-                    <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="rounded-[18px] border border-ink/8 bg-mist/30 px-4 py-3">
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate/60">
-                        Visible results
-                      </div>
-                      <div className="mt-1 text-base font-semibold text-ink">
-                        {visibleJobs.length === loadedResultCount
-                          ? `${loadedResultCount} of ${totalMatchedCount} jobs`
-                          : `${visibleJobs.length} of ${loadedResultCount} loaded`}
-                      </div>
-                    </div>
-                    <div className="rounded-[18px] border border-ink/8 bg-mist/30 px-4 py-3">
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate/60">
-                        Source scope
-                      </div>
-                      <div className="mt-1 text-base font-semibold text-ink">
-                        {describePlatformScope(activeResult.search.filters.platforms)}
-                      </div>
-                    </div>
-                  </div>
-                  </div>
+                  <p className="text-sm text-slate">
+                    {visibleJobs.length === loadedResultCount
+                      ? `${loadedResultCount} jobs indexed`
+                      : `${visibleJobs.length} visible from ${loadedResultCount} indexed`}
+                  </p>
                 </div>
               </section>
 
-              {resultNotice ? (
-                <section className="rounded-[18px] border border-ink/10 bg-white/92 px-5 py-4 shadow-sm">
-                  <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
-                    <div>
-                      <div className="text-sm font-semibold text-ink">{resultNotice.title}</div>
-                      <p className="mt-1 text-sm text-slate">{resultNotice.description}</p>
-                    </div>
-                    <div className="flex flex-wrap gap-2 text-sm text-slate">
-                      {(resultNotice.highlights ?? []).slice(0, 2).map((highlight, index) => (
-                        <span
-                          key={`result-notice-${index}`}
-                          className="rounded-full border border-ink/10 bg-mist/40 px-3 py-1.5"
-                        >
-                          {highlight}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </section>
-              ) : null}
+              {visibleJobs.length > 0 ? (
+                <JobResultsList
+                  jobs={visibleJobs}
+                  jobRenderKeys={jobRenderKeys}
+                  selectedJobKey={selectedJobKeyForRender}
+                  totalMatchedCount={totalMatchedCount}
+                  returnedCount={returnedCount}
+                  pageSize={activeResult.pageSize}
+                  hasMore={activeResult.hasMore}
+                  isLoadingMore={isLoadingMoreResults}
+                  onSelect={setSelectedJobKey}
+                  onLoadMore={() => void loadMoreResults()}
+                />
+              ) : (
+                <JobEmptyState backgroundUpdating={isRefreshingVisibleSession} />
+              )}
 
-              <ResultsTable
-                jobs={visibleJobs}
-                totalJobs={totalMatchedCount}
-                exportFilename={buildResultsExportFilename(activeResult.search.filters)}
-                emptyMessage="No jobs match the current browse filters. Clear a few filters or rerun the search."
-                onRevalidate={revalidateSingleJob}
-                revalidatingIds={revalidatingIds}
-              />
-              {activeResult.hasMore ? (
-                <div className="flex justify-center">
-                  <button
-                    type="button"
-                    onClick={() => void loadMoreResults()}
-                    disabled={isLoadingMoreResults}
-                    className="inline-flex items-center justify-center rounded-full border border-ink/15 bg-white px-5 py-2 text-sm font-semibold text-ink transition hover:border-[#0a66c2]/40 hover:text-[#0a66c2] disabled:cursor-not-allowed disabled:border-ink/8 disabled:bg-mist/35 disabled:text-slate/45"
-                  >
-                    {isLoadingMoreResults ? "Loading..." : "Load More"}
-                  </button>
-                </div>
-              ) : null}
+              <div className="xl:hidden">
+                <JobDetailPanel job={selectedJob} />
+              </div>
             </>
           ) : null}
 
-          {activeResult || recentSearches.length > 0 ? (
+          {debugAvailable ? (
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const nextEnabled = !debugEnabled;
+                  setDebugEnabled(nextEnabled);
+                  if (typeof window !== "undefined") {
+                    window.localStorage.setItem("job-search-debug", nextEnabled ? "1" : "0");
+                  }
+                }}
+                className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate shadow-sm hover:bg-slate-50"
+              >
+                Developer {debugEnabled ? "on" : "off"}
+              </button>
+            </div>
+          ) : null}
+
+          {debugEnabled && (activeResult || recentSearches.length > 0) ? (
             <DiagnosticsDrawer
               activeResult={activeResult}
               recentSearches={recentSearches}
@@ -1040,9 +1025,52 @@ export function JobCrawlerApp({
               }
             />
           ) : null}
-        </div>
+        </section>
+
+        <aside className="hidden min-w-0 xl:block">
+          <div className="sticky top-24">
+            <JobDetailPanel job={selectedJob} />
+          </div>
+        </aside>
       </div>
     </main>
+  );
+}
+
+function StatusBanner(props: { message: string; tone: "info" | "error" }) {
+  return (
+    <div
+      className={
+        props.tone === "error"
+          ? "rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"
+          : "rounded-lg border border-[#0a66c2]/20 bg-[#e7f3ff] px-4 py-3 text-sm text-[#004182]"
+      }
+    >
+      {props.message}
+    </div>
+  );
+}
+
+function BlockingState(props: {
+  title: string;
+  description: string;
+  actionLabel?: string;
+  onAction?: () => void;
+}) {
+  return (
+    <section className="rounded-lg border border-red-200 bg-white px-6 py-10 text-center shadow-sm">
+      <h2 className="text-xl font-semibold text-ink">{props.title}</h2>
+      <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-slate">{props.description}</p>
+      {props.actionLabel && props.onAction ? (
+        <button
+          type="button"
+          onClick={props.onAction}
+          className="mt-5 rounded-md bg-[#0a66c2] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#004182]"
+        >
+          {props.actionLabel}
+        </button>
+      ) : null}
+    </section>
   );
 }
 
@@ -1086,36 +1114,36 @@ export function describeZeroResultState(result: CrawlResponse): ZeroResultState 
 
   if (result.crawlRun.status === "aborted") {
     return {
-      title: "The crawl was stopped before more jobs were saved",
+      title: "The update stopped before more jobs were indexed",
       description:
-        "This run was canceled before completion, so the saved result set may be incomplete.",
+        "The current result set may still be incomplete. Try a broader title or location.",
       highlights: buildOperationalHighlights(diagnostics, { includeFilters: false }),
     };
   }
 
   if (diagnostics.discoveredSources === 0) {
     return {
-      title: "No runnable sources were discovered",
+      title: "No matching jobs found yet",
       description:
-        "The crawler did not find any registry-backed or publicly discovered sources for the selected platform scope.",
+        "Try a broader title or location while results continue to refresh in the background.",
       highlights: buildOperationalHighlights(diagnostics, { includeFilters: false }),
     };
   }
 
   if (diagnostics.providerFailures > 0 && result.crawlRun.status === "failed") {
     return {
-      title: "Providers failed before jobs could be saved",
+      title: "Some sources could not be refreshed",
       description:
-        "The run encountered provider-side failures and never reached a usable saved result set.",
+        "No indexed jobs are available for this search yet. Try again or broaden the filters.",
       highlights: buildOperationalHighlights(diagnostics),
     };
   }
 
   if (diagnostics.providerFailures > 0) {
     return {
-      title: "Provider issues left the run with no saved jobs",
+      title: "Some sources could not be refreshed",
       description:
-        "One or more providers failed, and the remaining source coverage did not produce any saved jobs. Retry the crawl or broaden the filters.",
+        "No indexed jobs are available for this search yet. Try a broader title or location.",
       highlights: buildOperationalHighlights(diagnostics),
     };
   }
@@ -1126,32 +1154,43 @@ export function describeZeroResultState(result: CrawlResponse): ZeroResultState 
     diagnostics.excludedByExperience > 0
   ) {
     return {
-      title: "Filters were too narrow for the fetched jobs",
+      title: "No matching jobs found yet",
       description:
-        "The crawler found public jobs, but the current title, location, or experience policy removed them before save.",
+        "The current title, location, or filters are too narrow for the available indexed jobs.",
       highlights: buildOperationalHighlights(diagnostics),
     };
   }
 
   if (diagnostics.dedupedOut > 0) {
     return {
-      title: "Matched jobs were merged away during dedupe",
+      title: "No matching jobs found yet",
       description:
-        "The crawl found overlapping matches, but dedupe collapsed them before any new jobs were saved.",
+        "The available matches were duplicates of jobs already represented in the index.",
       highlights: buildOperationalHighlights(diagnostics),
     };
   }
 
   return {
-    title: "The crawl completed but nothing was saved",
+    title: "No matching jobs found yet",
     description:
-      "The run finished without provider failure, but no deduped jobs remained to persist for this search.",
+      "Try a broader title or location while results continue to refresh in the background.",
     highlights: buildOperationalHighlights(diagnostics),
   };
 }
 
 export function isLatestClientRequest(requestToken: number, currentToken: number) {
   return requestToken === currentToken;
+}
+
+export function resolveVisibleJobSelection(
+  selectedJobKey: string | undefined,
+  visibleJobKeys: string[],
+) {
+  if (selectedJobKey && visibleJobKeys.includes(selectedJobKey)) {
+    return selectedJobKey;
+  }
+
+  return visibleJobKeys[0];
 }
 
 export function shouldApplyQueuedResultImmediately(result: ProgressiveSearchSnapshot) {
@@ -1180,29 +1219,20 @@ export function describeResultNotice(result: CrawlResponse): ResultNotice | null
   const diagnostics = result.diagnostics;
 
   if (result.crawlRun.status === "running" && result.jobs.length > 0) {
-    const crawlMode = resolveCrawlMode(result.search.filters.crawlMode);
-    const modeHighlight =
-      crawlMode === "fast"
-        ? "Fast mode shows your first results quickly while refinement continues."
-        : crawlMode === "balanced"
-          ? "Balanced mode refines results in the background while you review what's already visible."
-          : "Deep mode keeps exploring more sources while your current results stay available.";
-
     return {
-      title: "Results are arriving while background work continues",
+      title: "Updating results",
       description:
-        "Browse these jobs now — more may appear as the search finishes exploring additional sources.",
+        "Matching jobs are ready now. More may appear as background refresh finishes.",
       tone: "tide",
       highlights: [
-        modeHighlight,
-        `${result.jobs.length} job${result.jobs.length === 1 ? "" : "s"} saved so far.`,
+        `${result.jobs.length} job${result.jobs.length === 1 ? "" : "s"} indexed so far.`,
       ],
     };
   }
 
   if (result.crawlRun.status === "aborted") {
     return {
-      title: "This search was stopped before refinement finished",
+      title: "Update stopped",
       description:
         "Your visible results are preserved. Some potential matches may not have been explored yet.",
       tone: "amber",
@@ -1212,22 +1242,21 @@ export function describeResultNotice(result: CrawlResponse): ResultNotice | null
 
   if (result.jobs.length > 0 && diagnostics.validationDeferred > 0) {
     return {
-      title: "Validation is still deferred for some saved jobs",
+      title: "Some links are still being checked",
       description:
-        "The saved result set is ready to review, but not every link has been checked inline for redirects or stale pages yet.",
+        "The result set is ready to review while link freshness updates continue.",
       tone: "tide",
       highlights: [
-        `${diagnostics.validationDeferred} saved job${diagnostics.validationDeferred === 1 ? "" : "s"} still rely on deferred validation.`,
-        `This run used ${describeValidationMode(result.search.filters.crawlMode).toLowerCase()}.`,
+        `${diagnostics.validationDeferred} job${diagnostics.validationDeferred === 1 ? "" : "s"} still need link freshness checks.`,
       ],
     };
   }
 
   if (result.crawlRun.status === "partial" && result.jobs.length > 0) {
     return {
-      title: "Partial result set: some jobs were saved, but coverage was degraded",
+      title: "Some sources could not be refreshed",
       description:
-        "Review the provider cards and diagnostics before rerunning so you can tell whether the gap came from provider issues or tighter filters.",
+        "The indexed results are available, but a few sources could not be updated.",
       tone: "amber",
       highlights: buildOperationalHighlights(diagnostics),
     };
@@ -1505,104 +1534,6 @@ export function mergeCrawlDeltaIntoResult(
       indexedCursor: payload.delivery.indexedCursor ?? current?.delivery?.indexedCursor,
     },
   };
-}
-
-function buildFilterBadges(filters: SearchFilters) {
-  const badges: string[] = [];
-
-  if (filters.title.trim()) {
-    badges.push(`Role: ${filters.title.trim()}`);
-  }
-
-  const location = [filters.city, filters.state, filters.country].filter(Boolean).join(", ");
-  if (location) {
-    badges.push(`Location: ${location}`);
-  }
-
-  const levels = describeExperienceLevels(filters.experienceLevels);
-  if (levels) {
-    badges.push(`Levels: ${levels}`);
-  }
-
-  badges.push(`Experience mode: ${filters.experienceMatchMode ?? "Balanced"}`);
-
-  if (filters.includeUnspecifiedExperience || filters.experienceMatchMode === "broad") {
-    badges.push("Unspecified levels included");
-  }
-
-  badges.push(`Crawl mode: ${resolveCrawlMode(filters.crawlMode)}`);
-
-  badges.push(`Platforms: ${describePlatformScope(filters.platforms)}`);
-
-  return badges;
-}
-
-function describeSearchMeta(filters: SearchFilters) {
-  const parts: string[] = [];
-  const location = [filters.city, filters.state, filters.country].filter(Boolean).join(", ");
-  const levels = describeExperienceLevels(filters.experienceLevels);
-  const requestedPlatforms = resolveRequestedPlatforms(filters.platforms);
-  const selectedPlatforms = resolveSelectedPlatforms(filters.platforms);
-
-  parts.push(location || "Any location");
-  parts.push(levels || "Any level");
-  parts.push(filters.experienceMatchMode ?? "balanced");
-  parts.push(resolveCrawlMode(filters.crawlMode));
-
-  if (filters.platforms) {
-    if (selectedPlatforms.length === 0) {
-      parts.push(
-        `${requestedPlatforms.map((platform) => labelForCrawlerPlatform(platform)).join(", ")} disabled`,
-      );
-    } else if (selectedPlatforms.length < activeCrawlerPlatforms.length) {
-      parts.push(`${selectedPlatforms.length} active platform${selectedPlatforms.length === 1 ? "" : "s"}`);
-    }
-  }
-
-  return parts.join(" • ");
-}
-
-function describePlatformScope(platforms: SearchFilters["platforms"]) {
-  if (!platforms) {
-    return "All enabled paths";
-  }
-
-  const requestedPlatforms = resolveRequestedPlatforms(platforms);
-  const labels = requestedPlatforms.map((platform) =>
-    activeCrawlerPlatforms.includes(platform as (typeof activeCrawlerPlatforms)[number])
-      ? labelForCrawlerPlatform(platform)
-      : `${labelForCrawlerPlatform(platform)} (disabled)`,
-  );
-
-  return labels.join(", ");
-}
-
-function describeExperienceLevels(
-  levels: SearchFilters["experienceLevels"],
-  format: "default" | "lowercase" = "default",
-) {
-  if (!levels?.length) {
-    return undefined;
-  }
-
-  const labels = levels.map((level) => {
-    const label = labelForExperience(level);
-    return format === "lowercase" ? label.toLowerCase() : label;
-  });
-
-  if (labels.length === 1) {
-    return labels[0];
-  }
-
-  if (labels.length === 2) {
-    return `${labels[0]} or ${labels[1]}`;
-  }
-
-  return `${labels.slice(0, -1).join(", ")}, or ${labels[labels.length - 1]}`;
-}
-
-function filterOperationalSourceResults(sourceResults: CrawlResponse["sourceResults"]) {
-  return sourceResults.filter((sourceResult) => !isPassiveLimitedProvider(sourceResult.provider));
 }
 
 function dedupeSearches(searches: SearchDocument[]) {
@@ -1894,7 +1825,7 @@ function describeBlockingErrorState(
 
   if (errorKind === "initial_load") {
     return {
-      title: "The crawler could not load",
+      title: "Job search could not load",
       description:
         message || "Check that MongoDB is available, then reload the page and try again.",
       actionLabel: "Reload page",
@@ -1903,9 +1834,9 @@ function describeBlockingErrorState(
   }
 
   return {
-    title: "The crawl could not complete",
+    title: "Search could not complete",
     description:
-      message || "The crawl request failed before results could be returned.",
+      message || "Some sources could not be refreshed before results were returned.",
     actionLabel: "Retry",
     actionType: "retry",
   };

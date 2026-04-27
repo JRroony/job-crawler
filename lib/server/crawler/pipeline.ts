@@ -312,6 +312,15 @@ export async function executeCrawlPipeline(
     skippedSlowProviders: providerSelection.skippedSlowProviders,
     reason: providerSelection.reason,
   });
+  console.info("[crawl:provider-tiering]", {
+    searchId: search._id,
+    crawlRunId: crawlRun._id,
+    crawlMode,
+    selectedFastProviders: providerSelection.selectedFastProviders,
+    selectedSlowProviders: providerSelection.selectedSlowProviders,
+    skippedSlowProviders: providerSelection.skippedSlowProviders,
+    reason: providerSelection.reason,
+  });
   console.info("[crawl:timeout-policy]", {
     searchId: search._id,
     crawlRunId: crawlRun._id,
@@ -700,6 +709,7 @@ export async function executeCrawlPipeline(
         });
         console.info("[crawl:persistence-confirmed]", {
           searchId: search._id,
+          searchSessionId: searchSession._id,
           crawlRunId: crawlRun._id,
           provider: traceProvider,
           insertedCount: persistence.insertedCount,
@@ -1887,6 +1897,7 @@ function buildSourceInventoryObservations(
     health: input.health,
     lastFailureReason: input.lastFailureReason,
     succeeded: input.succeeded,
+    nextEligibleAt: input.nextEligibleAt,
   }));
 }
 

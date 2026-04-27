@@ -1,6 +1,9 @@
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import {
+  JobCrawlerApp,
   buildSearchRequestPayload,
   describeResultNotice,
   describeZeroResultState,
@@ -152,6 +155,19 @@ function createTestJob(jobId: string): CrawlResponse["jobs"][number] {
 }
 
 describe("job crawler app result state", () => {
+  it("renders the normal surface as job search without crawler wording", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(JobCrawlerApp, { initialSearches: [] }),
+    );
+
+    expect(html).toContain("JobSearch");
+    expect(html).toContain("Job title, keywords, or company");
+    expect(html).toContain("Search jobs by role and location");
+    expect(html).not.toMatch(/\bcrawl(?:er|ing|ed|s)?\b/i);
+    expect(html).not.toContain("Run crawl");
+    expect(html).not.toContain("Provider summary");
+  });
+
   it("strips nullable optional filters and legacy experienceClassification from the submit payload", () => {
     const result = buildSearchRequestPayload({
       title: "Software Engineer",
@@ -198,25 +214,25 @@ describe("job crawler app result state", () => {
     });
   });
 
-  it("treats failed zero-job crawls as provider failures", () => {
+  it("treats failed zero-job searches as refresh failures", () => {
     const result = createResult("failed");
 
     expect(resolveViewState(result)).toBe("error");
     expect(describeZeroResultState(result)).toMatchObject({
-      title: "Providers failed before jobs could be saved",
+      title: "Some sources could not be refreshed",
       description:
-        "The run encountered provider-side failures and never reached a usable saved result set.",
+        "No indexed jobs are available for this search yet. Try again or broaden the filters.",
     });
   });
 
-  it("treats partial zero-job crawls as provider issues instead of no matches", () => {
+  it("treats partial zero-job searches as refresh issues instead of no matches", () => {
     const result = createResult("partial");
 
     expect(resolveViewState(result)).toBe("partial");
     expect(describeZeroResultState(result)).toMatchObject({
-      title: "Provider issues left the run with no saved jobs",
+      title: "Some sources could not be refreshed",
       description:
-        "One or more providers failed, and the remaining source coverage did not produce any saved jobs. Retry the crawl or broaden the filters.",
+        "No indexed jobs are available for this search yet. Try a broader title or location.",
     });
   });
 
@@ -229,9 +245,9 @@ describe("job crawler app result state", () => {
 
     expect(resolveViewState(result)).toBe("empty");
     expect(describeZeroResultState(result)).toMatchObject({
-      title: "Filters were too narrow for the fetched jobs",
+      title: "No matching jobs found yet",
       description:
-        "The crawler found public jobs, but the current title, location, or experience policy removed them before save.",
+        "The current title, location, or filters are too narrow for the available indexed jobs.",
     });
   });
 
@@ -243,9 +259,9 @@ describe("job crawler app result state", () => {
     });
 
     expect(describeZeroResultState(result)).toMatchObject({
-      title: "No runnable sources were discovered",
+      title: "No matching jobs found yet",
       description:
-        "The crawler did not find any registry-backed or publicly discovered sources for the selected platform scope.",
+        "Try a broader title or location while results continue to refresh in the background.",
     });
   });
 
@@ -274,7 +290,7 @@ describe("job crawler app result state", () => {
 
     expect(resolveViewState(result)).toBe("empty");
     expect(describeZeroResultState(result)).toMatchObject({
-      title: "The crawl was stopped before more jobs were saved",
+      title: "The update stopped before more jobs were indexed",
     });
   });
 
@@ -492,11 +508,9 @@ describe("job crawler app result state", () => {
     } satisfies CrawlResponse;
 
     const notice = describeResultNotice(result);
-    expect(notice?.title).toBe("Results are arriving while background work continues");
-    expect(notice?.description).toContain("Browse these jobs now");
-    expect(notice?.highlights).toContain(
-      "Fast mode shows your first results quickly while refinement continues.",
-    );
+    expect(notice?.title).toBe("Updating results");
+    expect(notice?.description).toContain("Matching jobs are ready now");
+    expect(notice?.highlights).toContain("1 job indexed so far.");
   });
 
   it("explains that stopping preserves visible results", () => {
@@ -506,7 +520,7 @@ describe("job crawler app result state", () => {
     } satisfies CrawlResponse;
 
     const notice = describeResultNotice(result);
-    expect(notice?.title).toBe("This search was stopped before refinement finished");
+    expect(notice?.title).toBe("Update stopped");
     expect(notice?.description).toContain("Your visible results are preserved");
   });
 });
@@ -635,11 +649,9 @@ describe("Progressive index-first search UI behavior", () => {
     } satisfies CrawlResponse;
 
     const notice = describeResultNotice(result);
-    expect(notice?.title).toBe("Results are arriving while background work continues");
-    expect(notice?.description).toContain("Browse these jobs now");
-    expect(notice?.highlights).toContain(
-      "Balanced mode refines results in the background while you review what's already visible.",
-    );
+    expect(notice?.title).toBe("Updating results");
+    expect(notice?.description).toContain("Matching jobs are ready now");
+    expect(notice?.highlights).toContain("1 job indexed so far.");
   });
 
   it("describeResultNotice for aborted state emphasizes preserved results", () => {
