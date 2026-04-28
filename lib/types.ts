@@ -652,6 +652,8 @@ export const crawlDiagnosticsSchema = z.object({
       targetedReplenishmentQueued: z.boolean().default(false),
       targetedReplenishmentActive: z.boolean().default(false),
       activeQueueAlreadyExists: z.boolean().default(false),
+      backgroundRefreshSuggested: z.boolean().default(false),
+      backgroundRefreshQueued: z.boolean().default(false),
       triggerReason: z
         .enum([
           "indexed_coverage_sufficient",

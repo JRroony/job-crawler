@@ -54,12 +54,19 @@ export async function startSearchFromFilters(
   rawFilters: unknown,
   runtime: JobCrawlerRuntime = {},
 ) {
+  const startedAt = Date.now();
   const traceId = createSearchTraceId();
   const filters = parseSearchFilters(rawFilters);
   console.info("[crawl:normalized-filters]", filters);
+  console.info("[search:db-only-start]", {
+    traceId,
+    rawFilters,
+    normalizedFilters: filters,
+  });
 
   await abortSupersededSearch("__new-search__", runtime, {
     defaultReason: "The crawl was superseded by a newer search request.",
+    awaitCompletion: runtime.allowRequestTimeSupplementalCrawl === true,
   });
 
   const session = await createSearchSession(filters, runtime);
@@ -95,14 +102,16 @@ export async function startSearchFromFilters(
 
   return {
     queued,
-    result: attachSearchTraceResponse(result, traceId),
+    result: attachSearchTraceResponse(result, traceId, Date.now() - startedAt),
   };
 }
 
 export async function startSearchRerun(searchId: string, runtime: JobCrawlerRuntime = {}) {
+  const startedAt = Date.now();
   const traceId = createSearchTraceId();
   await abortSupersededSearch(searchId, runtime, {
     defaultReason: "The crawl was superseded by a rerun request.",
+    awaitCompletion: runtime.allowRequestTimeSupplementalCrawl === true,
   });
 
   const session = await createSearchRerunSession(searchId, runtime);
@@ -130,7 +139,7 @@ export async function startSearchRerun(searchId: string, runtime: JobCrawlerRunt
 
   return {
     queued,
-    result: attachSearchTraceResponse(result, traceId),
+    result: attachSearchTraceResponse(result, traceId, Date.now() - startedAt),
   };
 }
 
@@ -236,8 +245,8 @@ function attachSearchTraceResponse<
     diagnostics: CrawlDiagnostics;
     crawlRun: { diagnostics: CrawlDiagnostics };
   },
->(result: TResult, traceId: string): TResult {
-  const responseTrace = emitSearchTraceStage("response", {
+>(result: TResult, traceId: string, durationMs?: number): TResult {
+  const responsePayload = {
     traceId,
     returnedCount: result.returnedCount ?? result.jobs.length,
     totalMatchedCount:
@@ -247,9 +256,14 @@ function attachSearchTraceResponse<
     pageSize: result.pageSize,
     nextCursor: result.nextCursor,
     hasMore: result.hasMore,
+    durationMs,
     searchId: result.search._id,
     searchSessionId: result.searchSession?._id,
+  };
+  const responseTrace = emitSearchTraceStage("response", {
+    ...responsePayload,
   });
+  console.info("[search:response]", responsePayload);
   const diagnostics = {
     ...result.diagnostics,
     searchTrace: attachSearchTraceStage(
@@ -293,8 +307,7 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
 
   const allowRequestTimeSupplementalCrawl =
     runtime.allowRequestTimeSupplementalCrawl === true;
-  const allowRequestTimeFreshnessRecovery =
-    (runtime.providers?.length ?? 1) > 0 && Boolean(runtime.discovery ?? true);
+  const allowRequestTimeFreshnessRecovery = allowRequestTimeSupplementalCrawl;
   const targetedReplenishmentOwnerKey = buildTargetedReplenishmentOwnerKey(
     session.search.filters,
   );
@@ -339,8 +352,11 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
   );
   const shouldQueueCurrentRun =
     supplementalDecision.shouldQueue && !activeQueueAlreadyExists;
-  const shouldRequestGenericBackgroundIngestion =
-    supplementalDecision.requestBackgroundIngestion && !shouldQueueCurrentRun;
+  const shouldRequestGenericBackgroundIngestion = false;
+  const backgroundRefreshSuggested =
+    supplementalDecision.requestBackgroundIngestion ||
+    supplementalDecision.shouldQueueTargetedReplenishment ||
+    supplementalDecision.shouldQueue;
   const indexedCoverageLowOrEmpty =
     supplementalDecision.triggerReason !== "indexed_coverage_sufficient" &&
     supplementalDecision.triggerReason !== "reused_completed_coverage";
@@ -359,9 +375,7 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
       activeQueueAlreadyExists,
     });
   }
-  const backgroundIngestion = shouldRequestGenericBackgroundIngestion
-    ? await requestBackgroundIngestionForIndexGap(runtime, session.now)
-    : { status: "not_requested" as const };
+  const backgroundIngestion = { status: "not_requested" as const };
   const ingestionDecisionLog = {
     searchId: session.search._id,
     searchSessionId: session.searchSession._id,
@@ -378,6 +392,8 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     shouldQueueTargetedReplenishment:
       supplementalDecision.shouldQueueTargetedReplenishment && !activeQueueAlreadyExists,
     shouldRequestGenericBackgroundIngestion,
+    backgroundRefreshSuggested,
+    backgroundRefreshQueued: shouldQueueCurrentRun,
     shouldRunRequestTimeCrawl: supplementalDecision.shouldRunRequestTimeCrawl,
     activeQueueAlreadyExists,
     shouldQueue: shouldQueueCurrentRun,
@@ -402,6 +418,8 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     requestBackgroundIngestion: shouldRequestGenericBackgroundIngestion,
     backgroundIngestionStatus: backgroundIngestion.status,
     backgroundIngestion,
+    backgroundRefreshSuggested,
+    backgroundRefreshQueued: shouldQueueCurrentRun,
     activeQueueAlreadyExists,
     crawlMode: session.search.filters.crawlMode ?? "balanced",
   });
@@ -444,6 +462,8 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
         supplementalDecision.shouldQueueTargetedReplenishment &&
         (activeQueueAlreadyExists || shouldQueueCurrentRun),
       activeQueueAlreadyExists,
+      backgroundRefreshSuggested,
+      backgroundRefreshQueued: shouldQueueCurrentRun,
     },
   );
   session.crawlRun = {
@@ -618,18 +638,6 @@ function resolveSupplementalCrawlDecision(
     latestIndexedJobAgeMs,
   };
 
-  if (options.allowRequestTimeSupplementalCrawl && indexedJobCount < minimumIndexedCoverage) {
-    return {
-      ...baseDecision,
-      shouldQueue: true,
-      shouldQueueTargetedReplenishment: false,
-      shouldRunRequestTimeCrawl: true,
-      requestBackgroundIngestion: false,
-      triggerReason: "explicit_request_time_recovery",
-      triggerExplanation: `An explicit request-time supplemental recovery opt-in was provided and indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${coveragePolicy.reason} target.`,
-    };
-  }
-
   if (coveragePolicy.isCoverageSufficient) {
     return {
       ...baseDecision,
@@ -692,6 +700,18 @@ function resolveSupplementalCrawlDecision(
       requestBackgroundIngestion: false,
       triggerReason: "freshness_recovery",
       triggerExplanation: `Deep mode explicitly requested broader retrieval and indexed coverage is below the ${minimumIndexedCoverage}-job target with stale matches, so a bounded supplemental freshness recovery was queued.`,
+    };
+  }
+
+  if (options.allowRequestTimeSupplementalCrawl && indexedJobCount < minimumIndexedCoverage) {
+    return {
+      ...baseDecision,
+      shouldQueue: true,
+      shouldQueueTargetedReplenishment: false,
+      shouldRunRequestTimeCrawl: true,
+      requestBackgroundIngestion: false,
+      triggerReason: "explicit_request_time_recovery",
+      triggerExplanation: `An explicit request-time supplemental recovery opt-in was provided and indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${coveragePolicy.reason} target.`,
     };
   }
 
@@ -766,6 +786,8 @@ function buildPrimedSessionDiagnostics(
     targetedReplenishmentQueued: boolean;
     targetedReplenishmentActive: boolean;
     activeQueueAlreadyExists: boolean;
+    backgroundRefreshSuggested: boolean;
+    backgroundRefreshQueued: boolean;
   },
 ): CrawlDiagnostics {
   return {
@@ -800,6 +822,8 @@ function buildPrimedSessionDiagnostics(
       targetedReplenishmentQueued: queueState.targetedReplenishmentQueued,
       targetedReplenishmentActive: queueState.targetedReplenishmentActive,
       activeQueueAlreadyExists: queueState.activeQueueAlreadyExists,
+      backgroundRefreshSuggested: queueState.backgroundRefreshSuggested,
+      backgroundRefreshQueued: queueState.backgroundRefreshQueued,
       triggerReason: decision.triggerReason,
       triggerExplanation: decision.triggerExplanation,
       reusedExistingSearch: decision.reusedExistingSearch,

@@ -76,6 +76,7 @@ export type IndexedJobCandidateChannel = {
     titleRoleGroup?: string;
     locationSearchKeys?: string[];
     usesRegexFallback?: boolean;
+    requiresLocation?: boolean;
   };
 };
 
@@ -94,6 +95,11 @@ export type IndexedJobCandidateQuery = {
     exactTitleTerms: string[];
     aliasTitleTerms: string[];
     locationSearchKeys: string[];
+    hasLocationFilter: boolean;
+    hasTitleFilter: boolean;
+    queryShape: string;
+    channelNames: IndexedJobCandidateChannelName[];
+    titleChannelsRequireLocation: boolean;
     channelLimits: Record<IndexedJobCandidateChannelName, number>;
     candidateChannelBreakdown?: IndexedJobCandidateChannelBreakdown;
     usedPlatformPrefilter: boolean;
@@ -471,17 +477,75 @@ function normalizeSearchKey(value?: string) {
 function buildSearchReadyLocationCandidateClause(filters: SearchFilters) {
   const geoIntent = parseGeoIntentFromFilters(filters);
   const searchReadyKeys = geoIntent.searchKeys;
+  const resolvedLocationClause = buildResolvedLocationCandidateClause(filters);
+  const clauses = [
+    ...(searchReadyKeys.length > 0
+      ? [
+          { "searchIndex.locationSearchKeys": { $in: searchReadyKeys } },
+          { "geoLocation.searchKeys": { $in: searchReadyKeys } },
+        ]
+      : []),
+    ...(resolvedLocationClause ? [resolvedLocationClause] : []),
+  ];
 
-  if (searchReadyKeys.length === 0) {
+  if (clauses.length === 0) {
     return undefined;
   }
 
   return {
-    $or: [
-      { "searchIndex.locationSearchKeys": { $in: searchReadyKeys } },
-      { "geoLocation.searchKeys": { $in: searchReadyKeys } },
-    ],
+    $or: clauses,
   };
+}
+
+function buildResolvedLocationCandidateClause(filters: SearchFilters) {
+  const geoIntent = parseGeoIntentFromFilters(filters);
+  const clauses: Record<string, unknown>[] = [];
+
+  if (geoIntent.country) {
+    const countryAliases = dedupeStrings([
+      geoIntent.country.name,
+      geoIntent.country.code,
+      ...geoIntent.country.aliases,
+    ]);
+    clauses.push(
+      { "resolvedLocation.country": { $in: countryAliases } },
+      { country: { $in: countryAliases } },
+    );
+
+    if (isUnitedStatesValue(geoIntent.country.name) || isUnitedStatesValue(geoIntent.country.code)) {
+      clauses.push({ "resolvedLocation.isUnitedStates": true });
+    }
+  }
+
+  if (geoIntent.region) {
+    const regionAliases = dedupeStrings([
+      geoIntent.region.name,
+      geoIntent.region.code,
+      ...geoIntent.region.aliases,
+    ]);
+    clauses.push(
+      { "resolvedLocation.state": { $in: regionAliases } },
+      { "resolvedLocation.stateCode": { $in: regionAliases } },
+      { state: { $in: regionAliases } },
+    );
+  }
+
+  if (geoIntent.city) {
+    const cityAliases = dedupeStrings([
+      geoIntent.city.name,
+      ...geoIntent.city.aliases,
+    ]);
+    clauses.push(
+      { "resolvedLocation.city": { $in: cityAliases } },
+      { city: { $in: cityAliases } },
+    );
+  }
+
+  if (clauses.length === 0) {
+    return undefined;
+  }
+
+  return { $or: clauses };
 }
 
 function buildLegacyLocationFallbackClause(filters: SearchFilters) {
@@ -631,6 +695,9 @@ export function buildIndexedJobCandidateQuery(
     ? resolveOperationalCrawlerPlatforms(filters.platforms)
     : undefined;
   const titleAnalysis = analyzeTitle(filters.title);
+  const geoIntent = parseGeoIntentFromFilters(filters);
+  const hasLocationFilter = geoIntent.scope !== "none";
+  const hasTitleFilter = normalizeTitleText(filters.title).length > 0;
   const exactTitleTerms = buildExactTitleTerms(filters.title);
   const aliasTitleTerms = buildAliasTitleTerms(filters.title);
   const titleConceptIds = buildTitleConceptIds(filters.title);
@@ -638,7 +705,8 @@ export function buildIndexedJobCandidateQuery(
   const titleSearchKeys = buildFilterTitleSearchKeys(filters.title);
   const normalizedTitleRegex = buildNormalizedPhraseRegex(titleSearchTerms);
   const familyRoleFallback = buildFamilyRoleFallbackClause(filters.title);
-  const geoLocationClause = buildSearchReadyLocationCandidateClause(filters);
+  const locationCandidateClause = buildLocationCandidateClause(filters);
+  const searchReadyLocationClause = buildSearchReadyLocationCandidateClause(filters);
   const legacyLocationFallbackClause = buildLegacyLocationFallbackClause(filters);
   const experienceClause = buildExperienceCandidateClause(filters);
   const limits = resolveIndexedCandidateLimits();
@@ -661,73 +729,74 @@ export function buildIndexedJobCandidateQuery(
     baseClauses.push(experienceClause);
   }
 
+  const titleChannelBaseClauses = locationCandidateClause
+    ? [...baseClauses, locationCandidateClause]
+    : baseClauses;
+  const titleChannelsRequireLocation = hasLocationFilter && Boolean(locationCandidateClause);
   const channels = [
     buildCandidateChannel({
       name: "exactTitleChannel",
-      baseClauses,
+      baseClauses: titleChannelBaseClauses,
       channelClause: buildExactTitleChannelClause(exactTitleTerms),
       limit: limits.channelLimits.exactTitleChannel,
       diagnostics: {
         titleTerms: exactTitleTerms,
+        locationSearchKeys: geoIntent.searchKeys,
+        requiresLocation: titleChannelsRequireLocation,
       },
     }),
     buildCandidateChannel({
       name: "aliasTitleChannel",
-      baseClauses,
+      baseClauses: titleChannelBaseClauses,
       channelClause: buildAliasTitleChannelClause(aliasTitleTerms),
       limit: limits.channelLimits.aliasTitleChannel,
       diagnostics: {
         titleTerms: aliasTitleTerms,
+        locationSearchKeys: geoIntent.searchKeys,
+        requiresLocation: titleChannelsRequireLocation,
       },
     }),
     buildCandidateChannel({
       name: "conceptChannel",
-      baseClauses,
+      baseClauses: titleChannelBaseClauses,
       channelClause: buildConceptChannelClause(titleConceptIds),
       limit: limits.channelLimits.conceptChannel,
       diagnostics: {
         titleConceptIds,
+        locationSearchKeys: geoIntent.searchKeys,
+        requiresLocation: titleChannelsRequireLocation,
       },
     }),
     buildCandidateChannel({
       name: "familyChannel",
-      baseClauses,
+      baseClauses: titleChannelBaseClauses,
       channelClause: familyRoleFallback,
       limit: limits.channelLimits.familyChannel,
       diagnostics: {
         titleFamily: titleAnalysis.family,
         titleRoleGroup: titleAnalysis.roleGroup,
-      },
-    }),
-    buildCandidateChannel({
-      name: "geoChannel",
-      baseClauses,
-      channelClause: geoLocationClause,
-      limit: limits.channelLimits.geoChannel,
-      diagnostics: {
-        locationSearchKeys: parseGeoIntentFromFilters(filters).searchKeys,
+        locationSearchKeys: geoIntent.searchKeys,
+        requiresLocation: titleChannelsRequireLocation,
       },
     }),
     buildCandidateChannel({
       name: "legacyTitleFallbackChannel",
-      baseClauses,
+      baseClauses: titleChannelBaseClauses,
       channelClause: buildLegacyTitleFallbackClause(normalizedTitleRegex),
       limit: limits.channelLimits.legacyTitleFallbackChannel,
       diagnostics: {
         titleTerms: titleSearchTerms,
+        locationSearchKeys: geoIntent.searchKeys,
         usesRegexFallback: true,
-      },
-    }),
-    buildCandidateChannel({
-      name: "legacyLocationFallbackChannel",
-      baseClauses,
-      channelClause: legacyLocationFallbackClause,
-      limit: limits.channelLimits.legacyLocationFallbackChannel,
-      diagnostics: {
-        usesRegexFallback: true,
+        requiresLocation: titleChannelsRequireLocation,
       },
     }),
   ].filter((channel): channel is IndexedJobCandidateChannel => Boolean(channel));
+  const channelNames = channels.map((channel) => channel.name);
+  const queryShape =
+    hasLocationFilter && locationCandidateClause
+      ? "base AND locationConstraint AND titleChannel"
+      : "base AND titleChannel";
 
   const filter =
     channels.length === 0
@@ -750,16 +819,21 @@ export function buildIndexedJobCandidateQuery(
       titleSearchTerms,
       exactTitleTerms,
       aliasTitleTerms,
-      locationSearchKeys: parseGeoIntentFromFilters(filters).searchKeys,
+      locationSearchKeys: geoIntent.searchKeys,
+      hasLocationFilter,
+      hasTitleFilter,
+      queryShape,
+      channelNames,
+      titleChannelsRequireLocation,
       channelLimits: limits.channelLimits,
       usedPlatformPrefilter: Boolean(allowedPlatforms?.length),
-      usedLocationPrefilter: Boolean(geoLocationClause || legacyLocationFallbackClause),
+      usedLocationPrefilter: Boolean(locationCandidateClause),
       usedLocationTextFallback: Boolean(legacyLocationFallbackClause),
       usedExperiencePrefilter: Boolean(experienceClause),
       usedNormalizedTitleRegex: Boolean(normalizedTitleRegex),
       usedFamilyRoleFallback: Boolean(familyRoleFallback),
       usedSearchReadyTitleKeys: titleSearchKeys.length > 0,
-      usedSearchReadyLocationKeys: parseGeoIntentFromFilters(filters).searchKeys.length > 0,
+      usedSearchReadyLocationKeys: Boolean(searchReadyLocationClause),
       usedSearchReadyExperienceKeys: Boolean(filters.experienceLevels?.length),
     },
   };

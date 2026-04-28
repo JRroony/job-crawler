@@ -6,6 +6,7 @@ import type { CrawlProvider } from "@/lib/server/providers/types";
 
 export type JobCrawlerRuntime = {
   repository?: JobCrawlerRepository;
+  ensureIndexes?: boolean;
   providers?: CrawlProvider[];
   discovery?: DiscoveryService;
   fetchImpl?: typeof fetch;
@@ -23,6 +24,11 @@ export type JobCrawlerRuntime = {
   signal?: AbortSignal;
 };
 
-export async function resolveRepository(repository?: JobCrawlerRepository) {
-  return repository ?? getRepository();
+export async function resolveRepository(
+  repository?: JobCrawlerRepository,
+  options: { ensureIndexes?: boolean } = {},
+) {
+  return repository ?? getRepository(undefined, {
+    ensureIndexes: options.ensureIndexes,
+  });
 }

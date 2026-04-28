@@ -18,6 +18,7 @@ import {
   resolveViewState,
   shouldShowBlockingSearchLoad,
   shouldApplyQueuedResultImmediately,
+  shouldIgnoreStaleSearchPayload,
 } from "@/components/job-crawler-app";
 import { BackgroundSupplementIndicator } from "@/components/job-crawler/status-panels";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
@@ -786,21 +787,21 @@ describe("Progressive index-first search UI behavior", () => {
     expect(merged.delivery?.indexedCursor).toBe(8);
   });
 
-  it("mergeCrawlDeltaIntoResult clears stale Japan jobs and rejects them for a Canada search", () => {
-    const japanResult = {
+  it("mergeCrawlDeltaIntoResult ignores stale Canada deltas after a United States search starts", () => {
+    const unitedStatesResult = {
       ...createResult("running"),
       search: {
         ...createResult("running").search,
-        _id: "search-japan",
+        _id: "search-us",
         filters: {
-          title: "machine learning engineer",
-          country: "Japan",
+          title: "software engineer",
+          country: "United States",
         },
-        latestSearchSessionId: "session-japan",
+        latestSearchSessionId: "session-us",
       },
       searchSession: {
-        _id: "session-japan",
-        searchId: "search-japan",
+        _id: "session-us",
+        searchId: "search-us",
         latestCrawlRunId: "run-1",
         status: "running" as const,
         createdAt: "2026-03-30T12:00:00.000Z",
@@ -809,61 +810,38 @@ describe("Progressive index-first search UI behavior", () => {
       },
       jobs: [
         {
-          ...createTestJob("tokyo-ai"),
-          title: "Applied AI Engineer",
-          normalizedTitle: "applied ai engineer",
-          titleNormalized: "applied ai engineer",
-          country: "Japan",
-          state: undefined,
-          city: "Tokyo",
-          locationRaw: "Tokyo, Japan",
-          locationText: "Tokyo, Japan",
-          normalizedLocation: "tokyo japan",
-          locationNormalized: "tokyo japan",
+          ...createTestJob("seattle-se"),
+          locationRaw: "Seattle, WA",
+          locationText: "Seattle, WA",
+          normalizedLocation: "seattle wa",
+          locationNormalized: "seattle wa",
         },
       ],
     } satisfies CrawlResponse;
-    const canadaFilters: SearchFilters = {
-      title: "machine learning engineer",
-      country: "Canada",
-    };
     const canadaDelta = {
       search: {
-        ...japanResult.search,
+        ...unitedStatesResult.search,
         _id: "search-canada",
-        filters: canadaFilters,
+        filters: {
+          title: "software engineer",
+          country: "Canada",
+        },
         latestSearchSessionId: "session-canada",
       },
       searchSession: {
-        ...japanResult.searchSession!,
+        ...unitedStatesResult.searchSession!,
         _id: "session-canada",
         searchId: "search-canada",
       },
       crawlRun: {
-        ...japanResult.crawlRun,
+        ...unitedStatesResult.crawlRun,
         searchId: "search-canada",
       },
       sourceResults: [],
-      diagnostics: japanResult.diagnostics,
+      diagnostics: unitedStatesResult.diagnostics,
       jobs: [
         {
-          ...createTestJob("stale-tokyo"),
-          title: "Applied AI Engineer",
-          normalizedTitle: "applied ai engineer",
-          titleNormalized: "applied ai engineer",
-          country: "Japan",
-          state: undefined,
-          city: "Tokyo",
-          locationRaw: "Tokyo, Japan",
-          locationText: "Tokyo, Japan",
-          normalizedLocation: "tokyo japan",
-          locationNormalized: "tokyo japan",
-        },
-        {
           ...createTestJob("toronto-mle"),
-          title: "Machine Learning Engineer",
-          normalizedTitle: "machine learning engineer",
-          titleNormalized: "machine learning engineer",
           country: "Canada",
           state: "Ontario",
           city: "Toronto",
@@ -880,10 +858,21 @@ describe("Progressive index-first search UI behavior", () => {
       },
     } satisfies CrawlDeltaResponse;
 
-    const merged = mergeCrawlDeltaIntoResult(japanResult, canadaDelta, canadaFilters);
+    const merged = mergeCrawlDeltaIntoResult(
+      unitedStatesResult,
+      canadaDelta,
+      unitedStatesResult.search.filters,
+    );
 
-    expect(merged.jobs.map((job) => job._id)).toEqual(["toronto-mle"]);
-    expect(merged.jobs.map((job) => job.locationText)).not.toContain("Tokyo, Japan");
+    expect(shouldIgnoreStaleSearchPayload(
+      {
+        searchId: unitedStatesResult.search._id,
+        searchSessionId: unitedStatesResult.searchSession?._id,
+      },
+      canadaDelta,
+    )).toBe(true);
+    expect(merged.jobs.map((job) => job._id)).toEqual(["seattle-se"]);
+    expect(merged.jobs.map((job) => job.locationText)).not.toContain("Toronto, Canada");
   });
 
   it("shouldApplyQueuedResultImmediately returns true when jobs are visible during running state", () => {

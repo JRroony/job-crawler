@@ -61,7 +61,9 @@ export async function createSearchSession(
   filters: SearchDocument["filters"],
   runtime: JobCrawlerRuntime = {},
 ) {
-  const repository = await resolveRepository(runtime.repository);
+  const repository = await resolveRepository(runtime.repository, {
+    ensureIndexes: runtime.ensureIndexes ?? false,
+  });
   const now = runtime.now ?? new Date();
   const nowIso = now.toISOString();
   const resolvedSearch = await resolveSearchForNewSession(filters, repository, nowIso);
@@ -99,7 +101,9 @@ export async function createSearchRerunSession(
   searchId: string,
   runtime: JobCrawlerRuntime = {},
 ) {
-  const repository = await resolveRepository(runtime.repository);
+  const repository = await resolveRepository(runtime.repository, {
+    ensureIndexes: runtime.ensureIndexes ?? false,
+  });
   const search = await repository.getSearch(searchId);
 
   if (!search) {
@@ -145,22 +149,26 @@ export async function abortSupersededSearch(
   runtime: JobCrawlerRuntime = {},
   options: {
     defaultReason: string;
+    awaitCompletion?: boolean;
   },
 ) {
-  const repository = await resolveRepository(runtime.repository);
+  const repository = await resolveRepository(runtime.repository, {
+    ensureIndexes: runtime.ensureIndexes ?? false,
+  });
   const requestOwnerKey = normalizeRequestOwnerKey(runtime.requestOwnerKey);
+  const awaitCompletion = options.awaitCompletion === true;
 
   if (requestOwnerKey) {
     await abortOwnerSearchRun(requestOwnerKey, repository, {
       reason: "The crawl was superseded by a newer search request.",
-      awaitCompletion: true,
+      awaitCompletion,
     });
     return;
   }
 
   await requestSearchCancellation(searchId, repository, {
     reason: options.defaultReason,
-    awaitCompletion: true,
+    awaitCompletion,
   });
 }
 
@@ -172,7 +180,9 @@ export async function monitorSearchRequestAbort(
     return;
   }
 
-  const repository = await resolveRepository(runtime.repository);
+  const repository = await resolveRepository(runtime.repository, {
+    ensureIndexes: false,
+  });
   const onAbort = () => {
     void requestSearchCancellation(searchId, repository, {
       reason: "The client disconnected before the crawl completed.",
@@ -191,7 +201,9 @@ export async function getInitialSearchResult(
   > &
     SearchPaginationOptions = {},
 ) {
-  const repository = await resolveRepository(runtime.repository);
+  const repository = await resolveRepository(runtime.repository, {
+    ensureIndexes: false,
+  });
   const initialResult = await getSearchDetails(searchId, {
     repository,
     fetchImpl: runtime.fetchImpl ?? fetch,
@@ -267,7 +279,9 @@ function shouldReturnEmptyIndexedSessionImmediately(initialResult: {
 }
 
 export async function getSearchDetails(searchId: string, runtime: SearchDetailsRuntime = {}) {
-  const repository = await resolveRepository(runtime.repository);
+  const repository = await resolveRepository(runtime.repository, {
+    ensureIndexes: runtime.ensureIndexes ?? false,
+  });
   const resolved = await loadSearchState(searchId, repository);
   const indexedCursor = await repository.getIndexedJobDeliveryCursor();
 
@@ -372,7 +386,9 @@ export async function getSearchJobDeltas(
     afterIndexedCursor?: number;
   } = {},
 ) {
-  const repository = await resolveRepository(runtime.repository);
+  const repository = await resolveRepository(runtime.repository, {
+    ensureIndexes: runtime.ensureIndexes ?? false,
+  });
   const resolved = await loadSearchState(searchId, repository);
   const afterIndexedCursor = Math.max(0, Math.floor(runtime.afterIndexedCursor ?? afterCursor));
   const indexedDelta = await getIndexedJobDeltasForSearch(
@@ -446,7 +462,7 @@ export async function getSearchJobDeltas(
       resolved.search.filters.title,
       runtime.now ?? new Date(),
     ),
-  diagnostics,
+    diagnostics,
     delivery: {
       mode: "delta",
       previousCursor: afterCursor,
@@ -458,7 +474,9 @@ export async function getSearchJobDeltas(
 }
 
 export async function abortSearch(searchId: string, runtime: JobCrawlerRuntime = {}) {
-  const repository = await resolveRepository(runtime.repository);
+  const repository = await resolveRepository(runtime.repository, {
+    ensureIndexes: runtime.ensureIndexes ?? false,
+  });
   const search = await repository.getSearch(searchId);
 
   if (!search) {
@@ -477,7 +495,9 @@ export async function abortSearch(searchId: string, runtime: JobCrawlerRuntime =
 }
 
 export async function listRecentSearches(runtime: JobCrawlerRuntime = {}) {
-  const repository = await resolveRepository(runtime.repository);
+  const repository = await resolveRepository(runtime.repository, {
+    ensureIndexes: runtime.ensureIndexes ?? false,
+  });
   return repository.listRecentSearches();
 }
 
@@ -925,6 +945,10 @@ function attachSessionDiagnostics(
         baseDiagnostics.session?.targetedReplenishmentActive ?? false,
       activeQueueAlreadyExists:
         baseDiagnostics.session?.activeQueueAlreadyExists ?? false,
+      backgroundRefreshSuggested:
+        baseDiagnostics.session?.backgroundRefreshSuggested ?? false,
+      backgroundRefreshQueued:
+        baseDiagnostics.session?.backgroundRefreshQueued ?? false,
       triggerReason: baseDiagnostics.session?.triggerReason,
       triggerExplanation: baseDiagnostics.session?.triggerExplanation,
       reusedExistingSearch: baseDiagnostics.session?.reusedExistingSearch,

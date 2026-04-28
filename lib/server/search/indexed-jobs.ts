@@ -77,6 +77,12 @@ export async function getIndexedJobsForSearch(
     traceId: options.traceId,
   });
   const candidateLoadedAt = Date.now();
+  console.info("[search:candidate-result]", {
+    traceId: options.traceId,
+    candidateCount: candidateResult.jobs.length,
+    sampleTitles: sampleCandidateTitles(candidateResult.jobs),
+    sampleLocations: sampleCandidateLocations(candidateResult.jobs),
+  });
   const candidateDbResultTrace = options.traceId
     ? emitSearchTraceStage("candidate-db-result", {
         traceId: options.traceId,
@@ -108,6 +114,15 @@ export async function getIndexedJobsForSearch(
         candidateChannelBreakdown,
       })
     : undefined;
+  console.info("[search:final-filter]", {
+    traceId: options.traceId,
+    evaluatedCount: matchResult.finalFilter.evaluatedCount,
+    matchedCount: matchResult.finalFilter.matchedCount,
+    excludedByTitle: matchResult.finalFilter.excludedByTitle,
+    excludedByLocation: matchResult.finalFilter.excludedByLocation,
+    excludedByActive: matchResult.finalFilter.excludedByActive,
+    sampleLocationExclusions: matchResult.finalFilter.sampleLocationExclusions,
+  });
   const finishedAt = Date.now();
   const candidateQueryTrace = options.traceId
     ? toJsonSafeRecord({

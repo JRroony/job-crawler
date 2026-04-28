@@ -1088,6 +1088,15 @@ export class JobCrawlerRepository {
         diagnostics: candidateQuery.diagnostics,
       });
     }
+    console.info("[search:candidate-query]", {
+      traceId: options.traceId,
+      hasLocationFilter: candidateQuery.diagnostics.hasLocationFilter,
+      hasTitleFilter: candidateQuery.diagnostics.hasTitleFilter,
+      queryShape: candidateQuery.diagnostics.queryShape,
+      channelNames: candidateQuery.diagnostics.channelNames,
+      titleChannelsRequireLocation: candidateQuery.diagnostics.titleChannelsRequireLocation,
+      limit: candidateQuery.limit,
+    });
     const channelResults = await Promise.all(
       candidateQuery.channels.map(async (channel) => ({
         channel,
@@ -1584,14 +1593,19 @@ export class JobCrawlerRepository {
   }
 }
 
-export async function getRepository(db?: DatabaseAdapter | Db) {
+export async function getRepository(
+  db?: DatabaseAdapter | Db,
+  options: { ensureIndexes?: boolean } = {},
+) {
   if (db) {
     return new JobCrawlerRepository(db as DatabaseAdapter);
   }
 
   try {
     const { getMongoDb } = await import("@/lib/server/mongodb");
-    return new JobCrawlerRepository((await getMongoDb()) as DatabaseAdapter);
+    return new JobCrawlerRepository(
+      (await getMongoDb({ ensureIndexes: options.ensureIndexes ?? true })) as DatabaseAdapter,
+    );
   } catch (error) {
     if (!hasWarnedMemoryFallback) {
       hasWarnedMemoryFallback = true;

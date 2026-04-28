@@ -264,6 +264,34 @@ async function seedIndexedJobs(
   return { search, crawlRun };
 }
 
+function legacyLocationOnlyJob(sourceJobId: string, locationText: string) {
+  const canonicalUrl = `https://example.com/jobs/${sourceJobId}`;
+  const base = createPersistableJob({
+    title: "Software Engineer",
+    locationText,
+    sourceJobId,
+    canonicalUrl,
+    applyUrl: `${canonicalUrl}/apply`,
+    sourceUrl: canonicalUrl,
+    dedupeFingerprint: `dedupe:${sourceJobId}`,
+    contentFingerprint: `content:${sourceJobId}`,
+    contentHash: `content-hash:${sourceJobId}`,
+  });
+  const {
+    country: _country,
+    state: _state,
+    city: _city,
+    resolvedLocation: _resolvedLocation,
+    ...legacy
+  } = base;
+
+  return {
+    _id: sourceJobId,
+    ...legacy,
+    crawlRunIds: [],
+  };
+}
+
 async function createActiveSearchState(
   repository: JobCrawlerRepository,
   filters: {
@@ -322,6 +350,8 @@ const expectedIngestionDecisionLogKeys = [
   "triggerReason",
   "shouldQueueTargetedReplenishment",
   "shouldRequestGenericBackgroundIngestion",
+  "backgroundRefreshSuggested",
+  "backgroundRefreshQueued",
   "shouldRunRequestTimeCrawl",
   "activeQueueAlreadyExists",
   "shouldQueue",
@@ -456,6 +486,8 @@ describe("jobs-first indexed search", () => {
         triggerReason: "indexed_coverage_sufficient",
         shouldQueueTargetedReplenishment: false,
         shouldRequestGenericBackgroundIngestion: false,
+        backgroundRefreshSuggested: false,
+        backgroundRefreshQueued: false,
         shouldRunRequestTimeCrawl: false,
         activeQueueAlreadyExists: false,
         shouldQueue: false,
@@ -553,6 +585,8 @@ describe("jobs-first indexed search", () => {
         triggerReason: "explicit_request_time_recovery",
         shouldQueueTargetedReplenishment: false,
         shouldRequestGenericBackgroundIngestion: false,
+        backgroundRefreshSuggested: true,
+        backgroundRefreshQueued: true,
         shouldRunRequestTimeCrawl: true,
         activeQueueAlreadyExists: false,
         shouldQueue: true,
@@ -579,7 +613,7 @@ describe("jobs-first indexed search", () => {
     }
   });
 
-  it("queues targeted replenishment when machine learning engineer United States has only 34 indexed matches", async () => {
+  it("flags a background refresh without request-time crawling when machine learning engineer United States has only 34 indexed matches", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     await seedIndexedJobs(
       repository,
@@ -611,7 +645,6 @@ describe("jobs-first indexed search", () => {
     }));
     const provider = createStubProvider("greenhouse", crawlSources);
     const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
-    let searchId: string | undefined;
 
     try {
       const started = await startSearchFromFilters(
@@ -629,52 +662,46 @@ describe("jobs-first indexed search", () => {
           initialVisibleWaitMs: 0,
         },
       );
-      searchId = started.result.search._id;
-      await waitForQueueToSettle(repository, searchId);
 
-      expect(started.queued).toBe(true);
+      expect(started.queued).toBe(false);
       expect(started.result.jobs).toHaveLength(34);
       expect(started.result.diagnostics.session).toMatchObject({
         indexedResultsCount: 34,
-        supplementalQueued: true,
-        targetedReplenishmentQueued: true,
-        triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
+        supplementalQueued: false,
+        targetedReplenishmentQueued: false,
+        backgroundRefreshSuggested: true,
+        backgroundRefreshQueued: false,
+        triggerReason: "stale_indexed_coverage_background_requested",
       });
       expect(started.result.diagnostics.session?.coverageTarget).toBeGreaterThan(34);
-      expect(crawlSources).toHaveBeenCalled();
+      expect(crawlSources).not.toHaveBeenCalled();
 
       const decisionCall = infoSpy.mock.calls.find(
         ([actualLabel]) => actualLabel === "[ingestion:decision]",
       ) as [string, Record<string, unknown>] | undefined;
-      const targetedQueueCall = infoSpy.mock.calls.find(
-        ([actualLabel]) => actualLabel === "[ingestion:targeted-queue]",
-      ) as [string, Record<string, unknown>] | undefined;
 
       expect(decisionCall?.[1]).toMatchObject({
         indexedMatchedCount: 34,
-        triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
-        shouldQueueTargetedReplenishment: true,
+        triggerReason: "stale_indexed_coverage_background_requested",
+        shouldQueueTargetedReplenishment: false,
         shouldRequestGenericBackgroundIngestion: false,
+        backgroundRefreshSuggested: true,
+        backgroundRefreshQueued: false,
         shouldRunRequestTimeCrawl: false,
         activeQueueAlreadyExists: false,
       });
       expect(decisionCall?.[1]).not.toMatchObject({
         triggerReason: "indexed_coverage_sufficient",
       });
-      expect(targetedQueueCall?.[1]).toMatchObject({
-        searchId,
-        queued: true,
-        reason: "insufficient_indexed_coverage_targeted_replenishment",
-      });
+      expect(
+        infoSpy.mock.calls.find(([actualLabel]) => actualLabel === "[ingestion:targeted-queue]"),
+      ).toBeUndefined();
     } finally {
-      if (searchId) {
-        await waitForQueueToSettle(repository, searchId).catch(() => undefined);
-      }
       infoSpy.mockRestore();
     }
-  });
+  }, 10_000);
 
-  it("returns immediately with zero jobs and queues fast targeted replenishment when applied scientist United States has empty indexed coverage", async () => {
+  it("returns immediately with zero jobs and suggests background refresh when applied scientist United States has empty indexed coverage", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const calls: CrawlProvider["provider"][] = [];
     const providerDelayMs = 300;
@@ -740,54 +767,38 @@ describe("jobs-first indexed search", () => {
       const started = await raceSearchStart(startPromise, 150);
       searchId = started.result.search._id;
 
-      expect(started.queued).toBe(true);
+      expect(started.queued).toBe(false);
       expect(started.result.jobs).toEqual([]);
-      expect(started.result.crawlRun.status).toBe("running");
+      expect(started.result.crawlRun.status).toBe("completed");
       expect(started.result.diagnostics.session).toMatchObject({
         indexedResultsCount: 0,
         totalVisibleResultsCount: 0,
-        supplementalQueued: true,
-        supplementalRunning: true,
-        targetedReplenishmentQueued: true,
-        triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
+        supplementalQueued: false,
+        supplementalRunning: false,
+        targetedReplenishmentQueued: false,
+        backgroundRefreshSuggested: true,
+        backgroundRefreshQueued: false,
+        triggerReason: "indexed_empty_background_requested",
       });
       expect(started.result.diagnostics.session?.coverageTarget).toBeGreaterThan(0);
 
-      await waitForQueueToSettle(repository, searchId);
-      expect(calls).toEqual(["greenhouse"]);
+      expect(calls).toEqual([]);
       expect(infoSpy).toHaveBeenCalledWith(
         "[search:empty-or-low-index-fallback]",
         expect.objectContaining({
           searchId,
           willReturnImmediately: true,
-          willQueueTargetedReplenishment: true,
-          reason: "insufficient_indexed_coverage_targeted_replenishment",
+          willQueueTargetedReplenishment: false,
+          reason: "indexed_empty_background_requested",
           indexedMatchedCount: 0,
         }),
       );
-      expect(infoSpy).toHaveBeenCalledWith(
-        "[ingestion:targeted-queue]",
-        expect.objectContaining({
-          searchId,
-          filters: expect.objectContaining({
-            title: "applied scientist",
-            country: "United States",
-            platforms: ["greenhouse", "workday", "company_page"],
-          }),
-          selectedProviders: ["greenhouse"],
-          skippedSlowProviders: ["workday", "company_page"],
-          queued: true,
-        }),
-      );
-      expect(infoSpy).toHaveBeenCalledWith(
-        "[crawl:provider-tiering]",
-        expect.objectContaining({
-          searchId,
-          selectedFastProviders: ["greenhouse"],
-          selectedSlowProviders: [],
-          skippedSlowProviders: ["workday", "company_page"],
-        }),
-      );
+      expect(
+        infoSpy.mock.calls.find(([actualLabel]) => actualLabel === "[ingestion:targeted-queue]"),
+      ).toBeUndefined();
+      expect(
+        infoSpy.mock.calls.find(([actualLabel]) => actualLabel === "[crawl:provider-tiering]"),
+      ).toBeUndefined();
     } finally {
       if (searchId) {
         await waitForQueueToSettle(repository, searchId).catch(() => undefined);
@@ -796,7 +807,7 @@ describe("jobs-first indexed search", () => {
     }
   });
 
-  it("applies the same low-index targeted replenishment policy to data analyst Canada and product manager United States", async () => {
+  it("applies the same low-index background-refresh diagnostics to data analyst Canada and product manager United States", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const scenarios = [
       {
@@ -868,22 +879,23 @@ describe("jobs-first indexed search", () => {
         },
       );
 
-      expect(started.queued).toBe(true);
+      expect(started.queued).toBe(false);
       expect(started.result.jobs).toHaveLength(5);
       expect(started.result.diagnostics.session).toMatchObject({
         indexedResultsCount: 5,
-        supplementalQueued: true,
-        targetedReplenishmentQueued: true,
-        triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
+        supplementalQueued: false,
+        targetedReplenishmentQueued: false,
+        backgroundRefreshSuggested: true,
+        backgroundRefreshQueued: false,
+        triggerReason: "stale_indexed_coverage_background_requested",
       });
       expect(started.result.diagnostics.session?.coverageTarget).toBeGreaterThan(5);
-      await waitForQueueToSettle(repository, started.result.search._id);
     }
 
-    expect(crawlSources).toHaveBeenCalledTimes(scenarios.length);
+    expect(crawlSources).not.toHaveBeenCalled();
   });
 
-  it("does not enqueue a duplicate targeted replenishment for the same normalized filters", async () => {
+  it("does not enqueue duplicate request-time work for the same normalized filters during normal search", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     await seedIndexedJobs(
       repository,
@@ -918,8 +930,6 @@ describe("jobs-first indexed search", () => {
     });
     const provider = createStubProvider("greenhouse", crawlSources);
     const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
-    let firstSearchId: string | undefined;
-    let secondSearchId: string | undefined;
 
     try {
       const first = await startSearchFromFilters(
@@ -937,8 +947,7 @@ describe("jobs-first indexed search", () => {
           initialVisibleWaitMs: 0,
         },
       );
-      firstSearchId = first.result.search._id;
-      expect(first.queued).toBe(true);
+      expect(first.queued).toBe(false);
 
       const second = await startSearchFromFilters(
         {
@@ -955,34 +964,30 @@ describe("jobs-first indexed search", () => {
           initialVisibleWaitMs: 0,
         },
       );
-      secondSearchId = second.result.search._id;
 
       expect(second.queued).toBe(false);
       expect(second.result.diagnostics.session).toMatchObject({
-        supplementalQueued: true,
+        supplementalQueued: false,
         targetedReplenishmentQueued: false,
-        targetedReplenishmentActive: true,
-        activeQueueAlreadyExists: true,
-        triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
+        targetedReplenishmentActive: false,
+        activeQueueAlreadyExists: false,
+        backgroundRefreshSuggested: true,
+        backgroundRefreshQueued: false,
+        triggerReason: "stale_indexed_coverage_background_requested",
       });
-      expect(crawlSources).toHaveBeenCalledTimes(1);
+      expect(crawlSources).not.toHaveBeenCalled();
       const duplicateDecision = infoSpy.mock.calls
         .filter(([actualLabel]) => actualLabel === "[ingestion:decision]")
         .at(-1)?.[1] as Record<string, unknown> | undefined;
       expect(duplicateDecision).toMatchObject({
-        activeQueueAlreadyExists: true,
+        activeQueueAlreadyExists: false,
         shouldQueueTargetedReplenishment: false,
+        shouldQueue: false,
       });
     } finally {
-      if (firstSearchId) {
-        await waitForQueueToSettle(repository, firstSearchId).catch(() => undefined);
-      }
-      if (secondSearchId) {
-        await waitForQueueToSettle(repository, secondSearchId).catch(() => undefined);
-      }
       infoSpy.mockRestore();
     }
-  });
+  }, 10_000);
 
   it("does not apply broad-country coverage targets to reasonable narrow city searches", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
@@ -1045,7 +1050,7 @@ describe("jobs-first indexed search", () => {
     expect(started.result.diagnostics.session?.coveragePolicyReason).toContain("city_search");
   });
 
-  it("persists jobs and logs db write counts when targeted replenishment runs", async () => {
+  it("persists jobs and logs db write counts when explicit supplemental recovery runs", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     await seedIndexedJobs(
       repository,
@@ -1099,6 +1104,7 @@ describe("jobs-first indexed search", () => {
           discovery: createDiscovery(),
           fetchImpl: vi.fn() as unknown as typeof fetch,
           now: new Date("2026-04-15T12:00:00.000Z"),
+          allowRequestTimeSupplementalCrawl: true,
           initialVisibleWaitMs: 0,
         },
       );
@@ -1197,8 +1203,10 @@ describe("jobs-first indexed search", () => {
       supplementalQueued: false,
       supplementalRunning: false,
       triggerReason: "insufficient_indexed_coverage_background_requested",
+      backgroundRefreshSuggested: true,
+      backgroundRefreshQueued: false,
       backgroundIngestion: expect.objectContaining({
-        status: expect.stringMatching(/^(started|already_active)$/),
+        status: "not_requested",
       }),
     });
     expect(discover).not.toHaveBeenCalled();
@@ -1322,22 +1330,24 @@ describe("jobs-first indexed search", () => {
     );
 
     expect(providerResolved).toBe(false);
-    expect(started.queued).toBe(true);
+    expect(started.queued).toBe(false);
     expect(started.result.jobs).toHaveLength(1);
     expect(started.result.jobs[0]?.title).toBe("Software Engineer");
     expect(started.result.jobs[0]?.rawSourceMetadata.indexedSearch).toMatchObject({
       source: "jobs_collection",
     });
     expect(started.result.delivery?.cursor).toBe(1);
-    expect(await repository.hasActiveCrawlQueueEntryForSearch(started.result.search._id)).toBe(true);
+    expect(await repository.hasActiveCrawlQueueEntryForSearch(started.result.search._id)).toBe(false);
     expect(started.result.diagnostics.session).toMatchObject({
       indexedResultsCount: 1,
       supplementalResultsCount: 0,
       totalVisibleResultsCount: 1,
-      supplementalQueued: true,
-      supplementalRunning: true,
-      targetedReplenishmentQueued: true,
-      triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
+      supplementalQueued: false,
+      supplementalRunning: false,
+      targetedReplenishmentQueued: false,
+      backgroundRefreshSuggested: true,
+      backgroundRefreshQueued: false,
+      triggerReason: "insufficient_indexed_coverage_background_requested",
     });
 
     const initialDelta = await getSearchJobDeltas(started.result.search._id, 1, {
@@ -1347,7 +1357,6 @@ describe("jobs-first indexed search", () => {
 
     expect(initialDelta.jobs).toEqual([]);
     expect(initialDelta.delivery.cursor).toBe(1);
-    await waitForQueueToSettle(repository, started.result.search._id);
   });
 
   it("skips supplemental crawling when indexed coverage is already sufficient for the session", async () => {
@@ -1980,16 +1989,16 @@ describe("jobs-first indexed search", () => {
       aliasTitleCount: expect.any(Number),
       conceptCount: expect.any(Number),
       familyCount: expect.any(Number),
-      geoCount: expect.any(Number),
+      geoCount: 0,
       legacyTitleFallbackCount: expect.any(Number),
-      legacyLocationFallbackCount: expect.any(Number),
+      legacyLocationFallbackCount: 0,
       mergedCandidateCount: indexed.candidateCount,
       finalMatchedCount: indexed.matchedCount,
       returnedCount: indexed.matches.length,
     });
     expect(indexed.candidateChannelBreakdown.aliasTitleCount).toBeGreaterThan(0);
-    expect(indexed.candidateChannelBreakdown.geoCount).toBeGreaterThan(0);
-    expect(indexed.excludedByLocationCount).toBeGreaterThan(0);
+    expect(indexed.candidateQuery.titleChannelsRequireLocation).toBe(true);
+    expect(indexed.excludedByLocationCount).toBe(0);
   });
 
   it("dedupes overlapping session and indexed deltas when background and active-session writes converge on the same job", async () => {
@@ -2078,9 +2087,10 @@ describe("jobs-first indexed search", () => {
       supplementalQueued: false,
       supplementalRunning: false,
       triggerReason: "indexed_empty_background_requested",
+      backgroundRefreshSuggested: true,
+      backgroundRefreshQueued: false,
       backgroundIngestion: expect.objectContaining({
-        status: expect.stringMatching(/^(started|already_active)$/),
-        systemProfileId: expect.any(String),
+        status: "not_requested",
       }),
     });
     expect(discover).not.toHaveBeenCalled();
@@ -2130,20 +2140,22 @@ describe("jobs-first indexed search", () => {
       },
     );
 
-    expect(started.queued).toBe(true);
-    expect(await repository.hasActiveCrawlQueueEntryForSearch(started.result.search._id)).toBe(true);
+    expect(started.queued).toBe(false);
+    expect(await repository.hasActiveCrawlQueueEntryForSearch(started.result.search._id)).toBe(false);
     expect(started.result.jobs.map((job) => job.title)).toEqual(["Data Analyst"]);
     expect(started.result.diagnostics.session).toMatchObject({
       indexedResultsCount: 1,
       supplementalResultsCount: 0,
       totalVisibleResultsCount: 1,
-      supplementalQueued: true,
-      supplementalRunning: true,
-      targetedReplenishmentQueued: true,
-      triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
+      supplementalQueued: false,
+      supplementalRunning: false,
+      targetedReplenishmentQueued: false,
+      backgroundRefreshSuggested: true,
+      backgroundRefreshQueued: false,
+      triggerReason: "stale_indexed_coverage_background_requested",
     });
     expect(started.result.diagnostics.session?.latestIndexedJobAgeMs).toBeGreaterThan(0);
-    await waitForQueueToSettle(repository, started.result.search._id);
+    expect(crawlSources).not.toHaveBeenCalled();
   });
 
   it("triggers bounded supplemental freshness recovery only when deep mode explicitly asks for it", async () => {
@@ -2203,6 +2215,7 @@ describe("jobs-first indexed search", () => {
         discovery: createDiscovery(),
         fetchImpl: vi.fn() as unknown as typeof fetch,
         now: new Date("2026-04-15T12:00:00.000Z"),
+        allowRequestTimeSupplementalCrawl: true,
         requestOwnerKey: "stale-data-analyst-recovery",
       },
     );
@@ -2238,7 +2251,7 @@ describe("jobs-first indexed search", () => {
     });
   });
 
-  it("serves representative United States searches from the index first and queues targeted replenishment below policy target", async () => {
+  it("serves representative United States searches from the index without request-time crawl", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const scenarios = [
       {
@@ -2439,7 +2452,7 @@ describe("jobs-first indexed search", () => {
         },
       );
 
-      expect(started.queued).toBe(true);
+      expect(started.queued).toBe(false);
       expect(started.result.jobs.length).toBeGreaterThanOrEqual(3);
       expect(
         started.result.jobs.every(
@@ -2450,15 +2463,14 @@ describe("jobs-first indexed search", () => {
         indexedResultsCount: expect.any(Number),
         supplementalResultsCount: 0,
         totalVisibleResultsCount: expect.any(Number),
-        supplementalQueued: true,
-        supplementalRunning: true,
-        targetedReplenishmentQueued: true,
-        triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
+        supplementalQueued: false,
+        supplementalRunning: false,
+        targetedReplenishmentQueued: false,
+        backgroundRefreshQueued: false,
       });
-      await waitForQueueToSettle(repository, started.result.search._id);
     }
 
-    expect(crawlSources).toHaveBeenCalled();
+    expect(crawlSources).not.toHaveBeenCalled();
   });
 
   it("serves requested role-family and country scenarios from indexed jobs using resolved location evidence", async () => {
@@ -2808,7 +2820,7 @@ describe("jobs-first indexed search", () => {
         },
       );
 
-      expect(started.queued).toBe(true);
+      expect(started.queued).toBe(false);
       expect(started.result.jobs.map((job) => job.title)).toEqual(
         expect.arrayContaining(scenario.expectedTitles),
       );
@@ -2823,12 +2835,11 @@ describe("jobs-first indexed search", () => {
         indexedResultsCount: expect.any(Number),
         supplementalResultsCount: 0,
         totalVisibleResultsCount: expect.any(Number),
-        supplementalQueued: true,
-        supplementalRunning: true,
-        targetedReplenishmentQueued: true,
-        triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
+        supplementalQueued: false,
+        supplementalRunning: false,
+        targetedReplenishmentQueued: false,
+        backgroundRefreshQueued: false,
       });
-      await waitForQueueToSettle(repository, started.result.search._id);
       expect(started.result.jobs[0]?.rawSourceMetadata.indexedSearch).toMatchObject({
         candidateQuery: expect.objectContaining({
           strategy: "coarse_prefilter",
@@ -2844,7 +2855,7 @@ describe("jobs-first indexed search", () => {
       });
     }
 
-    expect(crawlSources).toHaveBeenCalled();
+    expect(crawlSources).not.toHaveBeenCalled();
   });
 
   it("serves broad family-aware indexed retrieval scenarios while preserving title precision", async () => {
@@ -3567,6 +3578,197 @@ describe("jobs-first indexed search", () => {
     });
   });
 
+  it("returns only United States indexed software engineer results for a United States search", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    await seedIndexedJobs(repository, [
+      createPersistableJob({
+        title: "Software Engineer",
+        locationText: "Seattle, WA",
+        state: "Washington",
+        city: "Seattle",
+        sourceJobId: "seattle-se",
+        canonicalUrl: "https://example.com/jobs/seattle-se",
+        applyUrl: "https://example.com/jobs/seattle-se/apply",
+        sourceUrl: "https://example.com/jobs/seattle-se",
+      }),
+      createPersistableJob({
+        title: "Software Engineer",
+        locationText: "San Francisco, CA",
+        state: "California",
+        city: "San Francisco",
+        sourceJobId: "sf-se",
+        canonicalUrl: "https://example.com/jobs/sf-se",
+        applyUrl: "https://example.com/jobs/sf-se/apply",
+        sourceUrl: "https://example.com/jobs/sf-se",
+      }),
+      createPersistableJob({
+        title: "Software Engineer",
+        locationText: "Remote US",
+        remoteType: "remote",
+        sourceJobId: "remote-us-se",
+        canonicalUrl: "https://example.com/jobs/remote-us-se",
+        applyUrl: "https://example.com/jobs/remote-us-se/apply",
+        sourceUrl: "https://example.com/jobs/remote-us-se",
+      }),
+      createPersistableJob({
+        title: "Software Engineer",
+        country: "Canada",
+        state: "Ontario",
+        city: "Toronto",
+        locationText: "Toronto, Canada",
+        sourceJobId: "toronto-se",
+        canonicalUrl: "https://example.com/jobs/toronto-se",
+        applyUrl: "https://example.com/jobs/toronto-se/apply",
+        sourceUrl: "https://example.com/jobs/toronto-se",
+      }),
+      createPersistableJob({
+        title: "Software Engineer",
+        country: "Japan",
+        city: "Tokyo",
+        locationText: "Tokyo, Japan",
+        sourceJobId: "tokyo-se",
+        canonicalUrl: "https://example.com/jobs/tokyo-se",
+        applyUrl: "https://example.com/jobs/tokyo-se/apply",
+        sourceUrl: "https://example.com/jobs/tokyo-se",
+      }),
+      createPersistableJob({
+        title: "Software Engineer",
+        country: "South Korea",
+        city: "Seoul",
+        locationText: "Seoul, South Korea",
+        sourceJobId: "seoul-se",
+        canonicalUrl: "https://example.com/jobs/seoul-se",
+        applyUrl: "https://example.com/jobs/seoul-se/apply",
+        sourceUrl: "https://example.com/jobs/seoul-se",
+      }),
+    ]);
+
+    const result = await runSearchFromFilters(
+      {
+        title: "software engineer",
+        country: "United States",
+      },
+      {
+        repository,
+        providers: [],
+        discovery: createDiscovery(),
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now: new Date("2026-04-15T12:30:00.000Z"),
+      },
+    );
+
+    expect(result.jobs.map((job) => job.sourceJobId).sort()).toEqual([
+      "remote-us-se",
+      "seattle-se",
+      "sf-se",
+    ]);
+    expect(result.jobs.map((job) => job.sourceJobId)).not.toEqual(
+      expect.arrayContaining(["toronto-se", "tokyo-se", "seoul-se"]),
+    );
+    expect(result.diagnostics.session).toMatchObject({
+      backgroundRefreshQueued: false,
+      supplementalQueued: false,
+    });
+  });
+
+  it("builds location-constrained title candidate channels for software engineer United States", () => {
+    const query = buildIndexedJobCandidateQuery({
+      title: "software engineer",
+      country: "United States",
+    });
+    const channelNames = query.channels.map((channel) => channel.name);
+
+    expect(query.diagnostics).toMatchObject({
+      hasLocationFilter: true,
+      hasTitleFilter: true,
+      titleChannelsRequireLocation: true,
+      queryShape: "base AND locationConstraint AND titleChannel",
+    });
+    expect(channelNames).not.toContain("geoChannel");
+    expect(channelNames).not.toContain("legacyLocationFallbackChannel");
+    expect(
+      query.channels.every((channel) => channel.diagnostics.requiresLocation === true),
+    ).toBe(true);
+    for (const channel of query.channels) {
+      const serialized = JSON.stringify(channel.filter);
+      expect(serialized).toContain("searchIndex.locationSearchKeys");
+      expect(
+        serialized.includes("searchIndex.title") ||
+          serialized.includes("normalizedTitle") ||
+          serialized.includes("titleNormalized") ||
+          serialized.includes("\"title\""),
+      ).toBe(true);
+    }
+  });
+
+  it("intersects legacy title and location fallback for old locationText-only jobs", async () => {
+    const db = new FakeDb();
+    const repository = new JobCrawlerRepository(db);
+    const legacyJobs = [
+      legacyLocationOnlyJob("legacy-seattle-wa", "Seattle, WA"),
+      legacyLocationOnlyJob("legacy-toronto-ca", "Toronto, Canada"),
+      legacyLocationOnlyJob("legacy-tokyo-jp", "Tokyo, Japan"),
+    ];
+
+    for (const job of legacyJobs) {
+      await db.collection(collectionNames.jobs).insertOne(job);
+    }
+
+    const indexed = await getIndexedJobsForSearch(repository, {
+      title: "software engineer",
+      country: "United States",
+    });
+
+    expect(indexed.matches.map(({ job }) => job.sourceJobId)).toEqual(["legacy-seattle-wa"]);
+    expect(indexed.matches.map(({ job }) => job.sourceJobId)).not.toEqual(
+      expect.arrayContaining(["legacy-toronto-ca", "legacy-tokyo-jp"]),
+    );
+  });
+
+  it("normal search returns indexed DB results without queueing slow providers", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const crawlSources: CrawlProvider["crawlSources"] = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      return {
+        provider: "greenhouse" as const,
+        status: "success" as const,
+        sourceCount: 1,
+        fetchedCount: 0,
+        matchedCount: 0,
+        warningCount: 0,
+        jobs: [],
+      };
+    });
+
+    const started = await raceSearchStart(
+      startSearchFromFilters(
+        {
+          title: "software engineer",
+          country: "United States",
+        },
+        {
+          repository,
+          providers: [createStubProvider("greenhouse", crawlSources)],
+          discovery: createDiscovery(),
+          fetchImpl: vi.fn() as unknown as typeof fetch,
+          now: new Date("2026-04-15T12:35:00.000Z"),
+          initialVisibleWaitMs: 0,
+        },
+      ),
+      250,
+    );
+
+    expect(started.queued).toBe(false);
+    expect(started.result.crawlRun.status).toBe("completed");
+    expect(started.result.diagnostics.session).toMatchObject({
+      backgroundRefreshSuggested: true,
+      backgroundRefreshQueued: false,
+      supplementalQueued: false,
+      supplementalRunning: false,
+    });
+    expect(crawlSources).not.toHaveBeenCalled();
+  });
+
   it("builds DB-friendly search-ready candidate queries instead of regex-first full-list scans", () => {
     const query = buildIndexedJobCandidateQuery({
       title: "Machine Learning Engineer",
@@ -3726,7 +3928,8 @@ describe("jobs-first indexed search", () => {
       );
       expect(result.candidateCount).toBeGreaterThanOrEqual(result.matches.length);
       expect(result.requestTimeEvaluationCount).toBe(result.candidateCount);
-      expect(result.requestTimeExcludedCount).toBeGreaterThan(0);
+      expect(result.requestTimeExcludedCount).toBe(0);
+      expect(result.candidateCount).toBeLessThan(noise.length + scenarios.length);
       expect(result.candidateQuery).toMatchObject({
         usedSearchReadyTitleKeys: true,
         usedSearchReadyLocationKeys: true,

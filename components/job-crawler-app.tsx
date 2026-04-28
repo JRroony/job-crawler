@@ -102,6 +102,11 @@ type SearchDeltaRoutePayload = CrawlDeltaResponse & {
 
 type ProgressiveSearchSnapshot = Pick<CrawlResponse, "crawlRun" | "jobs">;
 
+type SearchIdentity = {
+  searchId?: string;
+  searchSessionId?: string;
+};
+
 const initialFilters: SearchFilters = {
   title: "",
   country: "",
@@ -143,6 +148,7 @@ export function JobCrawlerApp({
   const loadMoreSequenceRef = useRef(0);
   const activeDeliveryCursorRef = useRef(0);
   const activeIndexedDeliveryCursorRef = useRef(0);
+  const activeSearchIdentityRef = useRef<SearchIdentity>({});
   const clientRequestOwnerKeyRef = useRef(createClientRequestOwnerKey());
   const activeRequestControllerRef = useRef<AbortController | null>(null);
   const loadMoreRequestControllerRef = useRef<AbortController | null>(null);
@@ -278,6 +284,7 @@ export function JobCrawlerApp({
   function applyQueuedResult(payload: CrawlResponse) {
     const normalizedPayload = normalizeCrawlResponseForClient(payload);
 
+    activeSearchIdentityRef.current = resolveSearchIdentity(normalizedPayload);
     setActiveResult(normalizedPayload);
     activeDeliveryCursorRef.current = normalizedPayload.delivery?.cursor ?? 0;
     activeIndexedDeliveryCursorRef.current = normalizedPayload.delivery?.indexedCursor ?? 0;
@@ -314,6 +321,7 @@ export function JobCrawlerApp({
       );
       const payload = (await response.json()) as SearchDeltaRoutePayload;
       if (!isLatestClientRequest(options.pollToken, pollSequenceRef.current)) {
+        logStaleSearchPayloadIgnored(payload, activeSearchIdentityRef.current);
         return;
       }
       if (!response.ok) {
@@ -335,6 +343,7 @@ export function JobCrawlerApp({
       });
       const finalPayload = (await finalResponse.json()) as SearchRoutePayload;
       if (!isLatestClientRequest(options.pollToken, pollSequenceRef.current)) {
+        logStaleSearchPayloadIgnored(finalPayload, activeSearchIdentityRef.current);
         return;
       }
       if (!finalResponse.ok) {
@@ -385,6 +394,7 @@ export function JobCrawlerApp({
     setMessage("");
     setErrorKind(null);
     setActiveResult(null);
+    activeSearchIdentityRef.current = {};
     activeDeliveryCursorRef.current = 0;
     activeIndexedDeliveryCursorRef.current = 0;
     setSelectedJobKey(undefined);
@@ -405,6 +415,7 @@ export function JobCrawlerApp({
 
       const payload = (await response.json()) as SearchRoutePayload;
       if (!isLatestClientRequest(pollToken, pollSequenceRef.current)) {
+        logStaleSearchPayloadIgnored(payload, activeSearchIdentityRef.current);
         return;
       }
       if (!response.ok) {
@@ -482,6 +493,7 @@ export function JobCrawlerApp({
       });
       const payload = (await response.json()) as SearchRoutePayload;
       if (!isLatestClientRequest(pollToken, pollSequenceRef.current)) {
+        logStaleSearchPayloadIgnored(payload, activeSearchIdentityRef.current);
         return;
       }
       if (!response.ok) {
@@ -534,6 +546,7 @@ export function JobCrawlerApp({
       });
       const payload = (await response.json()) as CrawlResponse & { error?: string };
       if (!isLatestClientRequest(pollToken, pollSequenceRef.current)) {
+        logStaleSearchPayloadIgnored(payload, activeSearchIdentityRef.current);
         return;
       }
       if (!response.ok) {
@@ -597,6 +610,7 @@ export function JobCrawlerApp({
         !isLatestClientRequest(pollToken, pollSequenceRef.current) ||
         !isLatestClientRequest(loadMoreToken, loadMoreSequenceRef.current)
       ) {
+        logStaleSearchPayloadIgnored(payload, activeSearchIdentityRef.current);
         return;
       }
       if (!response.ok) {
@@ -607,9 +621,16 @@ export function JobCrawlerApp({
       }
 
       const normalizedPayload = normalizeCrawlResponseForClient(payload);
+      if (shouldIgnoreStaleSearchPayload(activeSearchIdentityRef.current, normalizedPayload)) {
+        logStaleSearchPayloadIgnored(normalizedPayload, activeSearchIdentityRef.current);
+        return;
+      }
       let mergedResult: CrawlResponse | null = null;
       setActiveResult((current) => {
         mergedResult = mergeSearchPageIntoResult(current, normalizedPayload);
+        if (mergedResult) {
+          activeSearchIdentityRef.current = resolveSearchIdentity(mergedResult);
+        }
         return mergedResult;
       });
       if (mergedResult) {
@@ -651,6 +672,7 @@ export function JobCrawlerApp({
       });
       const payload = (await response.json()) as SearchRoutePayload;
       if (!isLatestClientRequest(pollToken, pollSequenceRef.current)) {
+        logStaleSearchPayloadIgnored(payload, activeSearchIdentityRef.current);
         return;
       }
 
@@ -725,6 +747,7 @@ export function JobCrawlerApp({
   function applyLoadedResult(payload: CrawlResponse) {
     const normalizedPayload = normalizeCrawlResponseForClient(payload);
 
+    activeSearchIdentityRef.current = resolveSearchIdentity(normalizedPayload);
     setActiveResult(normalizedPayload);
     activeDeliveryCursorRef.current = normalizedPayload.delivery?.cursor ?? 0;
     activeIndexedDeliveryCursorRef.current = normalizedPayload.delivery?.indexedCursor ?? 0;
@@ -737,10 +760,22 @@ export function JobCrawlerApp({
     const normalizedPayload = normalizeCrawlDeltaResponseForClient(payload);
     let mergedResult: CrawlResponse | null = null;
 
+    if (shouldIgnoreStaleSearchPayload(activeSearchIdentityRef.current, normalizedPayload)) {
+      logStaleSearchPayloadIgnored(normalizedPayload, activeSearchIdentityRef.current);
+      return;
+    }
+
     activeDeliveryCursorRef.current = normalizedPayload.delivery.cursor;
     activeIndexedDeliveryCursorRef.current = normalizedPayload.delivery.indexedCursor ?? 0;
     setActiveResult((current) => {
-      mergedResult = mergeCrawlDeltaIntoResult(current, normalizedPayload, normalizedPayload.search.filters);
+      mergedResult = mergeCrawlDeltaIntoResult(
+        current,
+        normalizedPayload,
+        current?.search.filters ?? normalizedPayload.search.filters,
+      );
+      if (mergedResult) {
+        activeSearchIdentityRef.current = resolveSearchIdentity(mergedResult);
+      }
       return mergedResult;
     });
     hydrateSearchForm(normalizedPayload.search.filters);
@@ -755,6 +790,7 @@ export function JobCrawlerApp({
     activeRequestControllerRef.current = null;
     cancelLoadMoreRequest();
     setActiveResult(null);
+    activeSearchIdentityRef.current = {};
     setViewState("idle");
     setMessage("");
     setErrorKind(null);
@@ -1437,6 +1473,55 @@ export function resolveResultSearchSessionId(
   );
 }
 
+export function resolveSearchIdentity(
+  result: Pick<CrawlResponse, "search"> & {
+    searchSession?: CrawlResponse["searchSession"];
+    searchSessionId?: string | null;
+  },
+): SearchIdentity {
+  return {
+    searchId: result.search._id,
+    searchSessionId: resolveResultSearchSessionId(result),
+  };
+}
+
+export function shouldIgnoreStaleSearchPayload(
+  active: SearchIdentity,
+  payload: Pick<CrawlResponse, "search"> & {
+    searchSession?: CrawlResponse["searchSession"];
+    searchSessionId?: string | null;
+  },
+) {
+  const payloadIdentity = resolveSearchIdentity(payload);
+
+  if (active.searchId && payloadIdentity.searchId && active.searchId !== payloadIdentity.searchId) {
+    return true;
+  }
+
+  return Boolean(
+    active.searchSessionId &&
+      payloadIdentity.searchSessionId &&
+      active.searchSessionId !== payloadIdentity.searchSessionId,
+  );
+}
+
+export function logStaleSearchPayloadIgnored(
+  payload: Partial<Pick<CrawlResponse, "search">> & {
+    searchSession?: CrawlResponse["searchSession"];
+    searchSessionId?: string | null;
+  },
+  active: SearchIdentity,
+) {
+  console.info("[search:stale-response-ignored]", {
+    previousSearchSessionId:
+      payload.searchSession?._id ??
+      payload.searchSessionId ??
+      payload.search?.latestSearchSessionId ??
+      null,
+    activeSearchSessionId: active.searchSessionId ?? null,
+  });
+}
+
 export function isSameSearchSessionResult(
   current: CrawlResponse | null | undefined,
   payload: Pick<CrawlResponse, "search"> & {
@@ -1495,6 +1580,11 @@ export function mergeCrawlDeltaIntoResult(
   payload: CrawlDeltaResponse,
   activeFilters: SearchFilters = payload.search.filters,
 ): CrawlResponse {
+  if (current && shouldIgnoreStaleSearchPayload(resolveSearchIdentity(current), payload)) {
+    logStaleSearchPayloadIgnored(payload, resolveSearchIdentity(current));
+    return current;
+  }
+
   const sameSearch = current?.search._id === payload.search._id;
   const currentSessionId = current?.searchSession?._id;
   const payloadSessionId = payload.searchSession?._id;

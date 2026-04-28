@@ -88,6 +88,18 @@ describe("generic geo location engine", () => {
     expect(matchedLocations(locations, "Japan")).toEqual(["Tokyo, Japan"]);
   });
 
+  it("keeps ambiguous or missing locations unresolved instead of inventing United States evidence", () => {
+    for (const locationText of ["Location unavailable", "Remote", "Unknown"]) {
+      const geoLocation = normalizeJobGeoLocation({ locationText, locationRaw: locationText });
+
+      expect(geoLocation.physicalLocations).toEqual([]);
+      expect(geoLocation.remoteEligibility).toEqual([]);
+      expect(geoLocation.searchKeys).not.toContain("country:united states");
+      expect(geoLocation.searchKeys).not.toContain("country_code:us");
+      expect(matchJobLocationAgainstGeoIntent(geoLocation, parseGeoIntent("United States")).matches).toBe(false);
+    }
+  });
+
   it("builds generic indexed candidate queries from GeoIntent keys", () => {
     const query = buildIndexedJobCandidateQuery({
       title: "machine learning engineer",
