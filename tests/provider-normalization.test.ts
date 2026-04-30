@@ -179,6 +179,27 @@ describe("provider normalization", () => {
     });
   });
 
+  it("preserves all Lever locations so US filtering can use city and country evidence beyond the first location", () => {
+    const job = normalizeLeverJob({
+      siteToken: "figma",
+      discoveredAt: "2026-03-29T00:00:00.000Z",
+      job: {
+        id: "multi-location-role",
+        text: "Backend Engineer",
+        country: "US",
+        hostedUrl: "https://jobs.lever.co/figma/multi-location-role",
+        categories: {
+          location: "Toronto, Canada",
+          allLocations: ["Toronto, Canada", "Seattle, WA", "Austin, TX"],
+        },
+      },
+    });
+
+    expect(job.locationText).toBe("Toronto, Canada | Seattle, WA | Austin, TX | US");
+    expect(job.resolvedLocation?.isUnitedStates).toBe(true);
+    expect(job.country).toBe("United States");
+  });
+
   it("normalizes ashby candidates into the common model", () => {
     const job = normalizeAshbyCandidate({
       companyToken: "notion",

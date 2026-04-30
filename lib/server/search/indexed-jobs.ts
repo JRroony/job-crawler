@@ -122,6 +122,7 @@ export async function getIndexedJobsForSearch(
     excludedByLocation: matchResult.finalFilter.excludedByLocation,
     excludedByActive: matchResult.finalFilter.excludedByActive,
     sampleLocationExclusions: matchResult.finalFilter.sampleLocationExclusions,
+    sampleTitleExclusions: matchResult.finalFilter.sampleTitleExclusions,
   });
   const finishedAt = Date.now();
   const candidateQueryTrace = options.traceId

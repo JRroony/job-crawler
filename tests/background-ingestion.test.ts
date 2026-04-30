@@ -446,6 +446,62 @@ describe("recurring background ingestion", () => {
     expect(providerCalls).toBe(2);
   });
 
+  it("defaults the recurring scheduler interval to five minutes", async () => {
+    vi.useFakeTimers();
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const repository = new JobCrawlerRepository(new MongoLikeNullDb());
+    await repository.upsertSourceInventory([
+      createInventoryRecord({
+        token: "defaultintervalco",
+        companyHint: "Default Interval Co",
+        nextEligibleAt: "2026-04-15T11:00:00.000Z",
+      }),
+    ]);
+    let providerCalls = 0;
+    const provider = createStubProvider("greenhouse", async () => {
+      providerCalls += 1;
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: 0,
+        fetchedCount: 0,
+        matchedCount: 0,
+        warningCount: 0,
+        jobs: [],
+      };
+    });
+
+    startRecurringBackgroundIngestionScheduler({
+      repository,
+      providers: [provider],
+      maxProfiles: 1,
+      now: new Date("2026-04-15T12:00:00.000Z"),
+      refreshInventory: async () => [
+        createInventoryRecord({
+          token: "defaultintervalco",
+          companyHint: "Default Interval Co",
+          nextEligibleAt: "2026-04-15T11:00:00.000Z",
+        }),
+      ],
+    });
+
+    expect(infoSpy).toHaveBeenCalledWith(
+      "[background-ingestion:scheduler-start]",
+      expect.objectContaining({
+        started: true,
+        intervalMs: 300_000,
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(providerCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(299_999);
+    expect(providerCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(providerCalls).toBe(2);
+  });
+
   it("honors an initial scheduler delay before the first recurring run", async () => {
     vi.useFakeTimers();
     const repository = new JobCrawlerRepository(new MongoLikeNullDb());

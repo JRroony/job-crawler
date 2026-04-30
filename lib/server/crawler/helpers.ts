@@ -191,15 +191,46 @@ const experienceTitleRules: ExperienceRule[] = [
     id: "title_leadership",
     level: "lead",
     signalType: "leadership_context",
-    rationale: "The title explicitly indicates lead or people-management responsibility.",
+    rationale: "The title explicitly indicates lead responsibility.",
     patterns: [
       /\blead\b/,
       /\btech(?:nical)? lead\b/,
       /\bteam lead\b/,
+    ],
+  },
+  {
+    id: "title_manager_keyword",
+    level: "manager",
+    signalType: "leadership_context",
+    rationale: "The title explicitly indicates people-management responsibility.",
+    patterns: [
       /\b(?:engineering|software|data|machine learning|ml|ai|platform|infrastructure|security|it|devops|qa|quality|test|analytics)\s+manager\b/,
+      /\bmanager of (?:engineering|software|data|machine learning|ml|ai|platform|infrastructure|security|it|devops|qa|quality|test|analytics)\b/,
+    ],
+  },
+  {
+    id: "title_director_keyword",
+    level: "director",
+    signalType: "leadership_context",
+    rationale: "The title explicitly indicates director-level responsibility.",
+    patterns: [
       /\b(?:engineering|software|data|machine learning|ml|ai|platform|infrastructure|security|it|devops|qa|quality|test|analytics)\s+director\b/,
       /\bdirector of (?:engineering|software|data|machine learning|ml|ai|platform|infrastructure|security|it|devops|qa|quality|test|analytics)\b/,
+    ],
+  },
+  {
+    id: "title_executive_keyword",
+    level: "executive",
+    signalType: "leadership_context",
+    rationale: "The title explicitly indicates executive-level responsibility.",
+    patterns: [
       /\bhead of (?:engineering|software|data|machine learning|ml|ai|platform|infrastructure|security|it|devops|qa|quality|test|analytics)\b/,
+      /\bvp of (?:engineering|software|data|machine learning|ml|ai|platform|infrastructure|security|it|devops|qa|quality|test|analytics)\b/,
+      /\bvice president of (?:engineering|software|data|machine learning|ml|ai|platform|infrastructure|security|it|devops|qa|quality|test|analytics)\b/,
+      /\bchief (?:technology|technical|data|information|product|engineering) officer\b/,
+      /\bcto\b/,
+      /\bcdo\b/,
+      /\bcio\b/,
     ],
   },
   {
@@ -259,7 +290,8 @@ const structuredHintRules: ExperienceRule[] = [
 
 const descriptionHintRules: ExperienceRule[] = experienceTitleRules.filter(
   (rule) =>
-    !["title_leadership", "title_senior_keyword"].includes(rule.id) &&
+    rule.signalType !== "leadership_context" &&
+    rule.id !== "title_senior_keyword" &&
     !(rule.level === "junior" && rule.id === "title_junior"),
 );
 
@@ -274,8 +306,11 @@ const experienceLevelPriority: Record<ExperienceLevel, number> = {
   mid: 4,
   senior: 5,
   lead: 6,
-  staff: 7,
-  principal: 8,
+  manager: 7,
+  director: 8,
+  executive: 9,
+  staff: 10,
+  principal: 11,
 };
 
 const experienceConfidencePriority: Record<ExperienceInferenceConfidence, number> = {
@@ -307,7 +342,7 @@ const prioritizedMetadataHintRules = sortExperienceMatchersByPriority(
 );
 
 const experienceMetadataHintPattern =
-  /\b(intern|internship|co op|cooperative education|apprentice|working student|student program|student opportunity|student role|student position|for students|new grad|new graduate|recent grad|recent graduate|entry level|early career|early talent|junior|associate|mid level|senior|staff|principal|distinguished|fellow|member of technical staff|mts|smts|lmts|pmts|lead|architect|manager|director|level [2-5]|ii|iii|iv|v|l[4-9]|ic[4-9]|e[4-9]|years|year|yrs|yoe|experience)\b/;
+  /\b(intern|internship|co op|cooperative education|apprentice|working student|student program|student opportunity|student role|student position|for students|new grad|new graduate|recent grad|recent graduate|entry level|early career|early talent|junior|associate|mid level|senior|staff|principal|distinguished|fellow|member of technical staff|mts|smts|lmts|pmts|lead|architect|manager|director|executive|head of|vice president|vp|chief|cto|cdo|cio|level [2-5]|ii|iii|iv|v|l[4-9]|ic[4-9]|e[4-9]|years|year|yrs|yoe|experience)\b/;
 
 const negativeExperienceMetadataHintPatterns = [
   /\bif you are an? (?:intern|new grad|new graduate|staff|junior|senior|associate|working student|apprentice)\b/,
@@ -319,7 +354,7 @@ const negativeExperienceMetadataHintPatterns = [
 ];
 
 const experiencePromptSignalPattern =
-  /\b(intern(ship)?|co op|cooperative education|apprentice(ship)?|working student|student(?: program| opportunity| role| position)?|for students|campus|university recruiting|new grads?|new graduates?|recent grads?|recent graduates?|graduate program|entry(?: |-)?level|early career|early talent|junior|jr|associate|mid(?: |-)?level|senior|sr|staff|principal|distinguished|fellow|member of technical staff|mts|smts|lmts|pmts|lead|architect|manager|director|career level|seniority|level [2-5]|ii|iii|iv|v|l[4-9]|ic[4-9]|e[4-9]|requirements?|qualifications?|minimum qualifications?|preferred qualifications?|years?|yrs?|yoe)\b/i;
+  /\b(intern(ship)?|co op|cooperative education|apprentice(ship)?|working student|student(?: program| opportunity| role| position)?|for students|campus|university recruiting|new grads?|new graduates?|recent grads?|recent graduates?|graduate program|entry(?: |-)?level|early career|early talent|junior|jr|associate|mid(?: |-)?level|senior|sr|staff|principal|distinguished|fellow|member of technical staff|mts|smts|lmts|pmts|lead|architect|manager|director|executive|head of|vice president|vp|chief|cto|cdo|cio|career level|seniority|level [2-5]|ii|iii|iv|v|l[4-9]|ic[4-9]|e[4-9]|requirements?|qualifications?|minimum qualifications?|preferred qualifications?|years?|yrs?|yoe)\b/i;
 
 const experiencePromptYearPattern =
   /\b\d+(?:\.\d+)?\s*(?:\+|plus)?\s*(?:-|to|–|—)?\s*\d*(?:\.\d+)?\s*(?:years?|yrs?|yoe)\b/i;

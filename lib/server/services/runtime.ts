@@ -13,6 +13,7 @@ export type JobCrawlerRuntime = {
   now?: Date;
   deepExperienceInference?: boolean;
   linkValidationMode?: CrawlLinkValidationMode;
+  refreshStaleJobLinks?: boolean;
   inlineValidationTopN?: number;
   providerTimeoutMs?: number;
   progressUpdateIntervalMs?: number;

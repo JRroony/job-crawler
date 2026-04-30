@@ -1069,6 +1069,81 @@ describe("pipeline title retrieval", () => {
     );
   });
 
+  it("skips supplemental recall in fast mode when baseline crawling already meets the target", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T15:07:30.000Z");
+    let supplementalStarted = false;
+
+    const provider = createStubProvider("greenhouse", async () => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: 1,
+      fetchedCount: 30,
+      matchedCount: 30,
+      warningCount: 0,
+      jobs: Array.from({ length: 30 }, (_, index) => ({
+        title: index % 2 === 0 ? "Software Engineer" : "Backend Engineer",
+        company: "Acme",
+        locationText: index % 3 === 0 ? "Seattle, WA" : "Remote, United States",
+        sourcePlatform: "greenhouse" as const,
+        sourceJobId: `baseline-target-${index}`,
+        sourceUrl: `https://example.com/jobs/baseline-target-${index}`,
+        applyUrl: `https://example.com/jobs/baseline-target-${index}/apply`,
+        canonicalUrl: `https://example.com/jobs/baseline-target-${index}`,
+        discoveredAt: now.toISOString(),
+        rawSourceMetadata: {},
+      })),
+    }));
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [];
+      },
+      async discoverBaseline() {
+        return {
+          label: "baseline",
+          sources: [
+            classifySourceCandidate({
+              url: "https://boards.greenhouse.io/acme",
+              token: "acme",
+              confidence: "high",
+              discoveryMethod: "configured_env",
+            }),
+          ],
+          jobs: [],
+        };
+      },
+      async discoverSupplemental() {
+        supplementalStarted = true;
+        return {
+          label: "public_search",
+          sources: [],
+          jobs: [],
+        };
+      },
+    };
+
+    const result = await runSearchIngestionFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+        crawlMode: "fast",
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    expect(result.jobs).toHaveLength(30);
+    expect(result.diagnostics.stoppedReason).toBe("target_met");
+    expect(supplementalStarted).toBe(false);
+  });
+
   it("starts supplemental recall earlier in balanced mode than in fast mode", async () => {
     const now = new Date("2026-04-10T15:08:00.000Z");
     const buildRun = async (crawlMode: "fast" | "balanced") => {

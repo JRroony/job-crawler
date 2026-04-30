@@ -1,0 +1,565 @@
+{
+  "benchmarkVersion": 1,
+  "generatedAt": "2026-04-28T07:33:58.360Z",
+  "database": {
+    "uriHost": "127.0.0.1:27017",
+    "databaseName": "job_crawler_benchmark",
+    "resetBeforeRun": true
+  },
+  "config": {
+    "crawlMode": "fast",
+    "scenarioCount": 4,
+    "artifactDir": "/Users/admin/Projects/job-crawler/artifacts/benchmark-results"
+  },
+  "totals": {
+    "jobsFetched": 3347,
+    "jobsNormalized": 3347,
+    "jobsSavedToMongoDb": 152,
+    "searchResultCountFromDb": 152,
+    "duplicateCount": 0,
+    "duplicateRatio": 0,
+    "invalidUrlCount": 0,
+    "invalidUrlFieldCount": 0,
+    "expiredJobCount": 0,
+    "crawlDurationMs": 206659,
+    "wallDurationMs": 213516
+  },
+  "scenarios": [
+    {
+      "id": "software-engineer-united-states",
+      "title": "Software Engineer",
+      "country": "United States",
+      "crawlMode": "fast",
+      "status": "partial",
+      "searchId": "8e890dea-c295-49f0-96a4-88422c511fd7",
+      "searchSessionId": "056e78ba-e6aa-4c5d-a9c7-1cb1a868247c",
+      "crawlRunId": "ae9cd9f8-576f-407a-8053-61094f16319e",
+      "jobsFetched": 693,
+      "jobsFetchedPerProvider": {
+        "ashby": 141,
+        "greenhouse": 162,
+        "lever": 0,
+        "smartrecruiters": 0
+      },
+      "jobsNormalized": 693,
+      "jobsNormalizedPerProvider": {
+        "ashby": 390,
+        "greenhouse": 162,
+        "lever": 141,
+        "smartrecruiters": 0
+      },
+      "directJobsNormalized": 0,
+      "jobsMatched": 101,
+      "jobsSavedToMongoDb": 101,
+      "jobsReturnedByCrawl": 101,
+      "searchResultCountFromDb": 101,
+      "searchResponseResultCount": 101,
+      "duplicateCount": 0,
+      "dedupeInputCount": 101,
+      "duplicateRatio": 0,
+      "invalidUrlCount": 0,
+      "invalidUrlFieldCount": 0,
+      "expiredJobCount": 0,
+      "crawlDurationMs": 23973,
+      "wallDurationMs": 27265,
+      "titleRelevanceDistribution": {
+        "adjacent_concept": 4,
+        "canonical_variant": 16,
+        "exact": 3,
+        "same_family_related": 78
+      },
+      "seniorityDistribution": {
+        "intern": 5,
+        "mid": 3,
+        "new_grad": 5,
+        "principal": 2,
+        "senior": 26,
+        "staff": 21,
+        "unknown": 39
+      },
+      "locationMatchDistribution": {
+        "city_state_us": 72,
+        "remote_us": 29
+      },
+      "providers": [
+        {
+          "provider": "ashby",
+          "status": "timed_out",
+          "sourceCount": 10,
+          "jobsFetched": 141,
+          "jobsNormalized": 390,
+          "jobsMatched": 13,
+          "jobsSavedToMongoDb": 13,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 9916,
+          "timedOut": true,
+          "warningCount": 1,
+          "errorMessage": "Provider ashby exceeded the 9000ms crawl budget and was failed fast."
+        },
+        {
+          "provider": "greenhouse",
+          "status": "partial",
+          "sourceCount": 10,
+          "jobsFetched": 162,
+          "jobsNormalized": 162,
+          "jobsMatched": 29,
+          "jobsSavedToMongoDb": 29,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 7812,
+          "timedOut": false,
+          "warningCount": 8,
+          "errorMessage": "Greenhouse returned 404 for openai. Provider greenhouse source greenhouse:stripe exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:affirm exceeded the 7000ms source crawl budget. Greenhouse board airbnb failed: Request timed out after 1800ms. Provider greenhouse source greenhouse:alarmcom exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:asana exceeded the 7000ms source crawl budget. Greenhouse board benchling failed: Request timed out after 1800ms. Greenhouse board brex failed: Request timed out after 1800ms."
+        },
+        {
+          "provider": "lever",
+          "status": "timed_out",
+          "sourceCount": 10,
+          "jobsFetched": 0,
+          "jobsNormalized": 141,
+          "jobsMatched": 0,
+          "jobsSavedToMongoDb": 0,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 9919,
+          "timedOut": true,
+          "warningCount": 1,
+          "errorMessage": "Provider lever exceeded the 9000ms crawl budget and was failed fast."
+        },
+        {
+          "provider": "smartrecruiters",
+          "status": "running",
+          "sourceCount": 0,
+          "jobsFetched": 0,
+          "jobsNormalized": 0,
+          "jobsMatched": 0,
+          "jobsSavedToMongoDb": 0,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 0,
+          "timedOut": false,
+          "warningCount": 0
+        }
+      ],
+      "diagnostics": {
+        "discoveredSources": 40,
+        "crawledSources": 30,
+        "providersEnqueued": 3,
+        "providerFailures": 3,
+        "excludedByTitle": 578,
+        "excludedByLocation": 14,
+        "excludedByExperience": 0,
+        "validationDeferred": 0,
+        "stoppedReason": "target_met",
+        "dropReasonCounts": {
+          "crawl_source_budget": 109,
+          "filter:title_below_threshold": 383,
+          "filter:title_family_conflict": 195,
+          "filter:location_not_in_requested_country": 14
+        }
+      }
+    },
+    {
+      "id": "data-analyst-united-states",
+      "title": "Data Analyst",
+      "country": "United States",
+      "crawlMode": "fast",
+      "status": "partial",
+      "searchId": "0f19deb0-f633-4175-9af2-2489da4de9c4",
+      "searchSessionId": "12a8cb25-4c05-433d-948b-bc946dc6befe",
+      "crawlRunId": "52bb63f9-ddd2-4ccd-96a3-d1a7173d2bab",
+      "jobsFetched": 927,
+      "jobsFetchedPerProvider": {
+        "ashby": 351,
+        "greenhouse": 126,
+        "lever": 12,
+        "smartrecruiters": 0
+      },
+      "jobsNormalized": 927,
+      "jobsNormalizedPerProvider": {
+        "ashby": 521,
+        "greenhouse": 126,
+        "lever": 280,
+        "smartrecruiters": 0
+      },
+      "directJobsNormalized": 0,
+      "jobsMatched": 5,
+      "jobsSavedToMongoDb": 5,
+      "jobsReturnedByCrawl": 5,
+      "searchResultCountFromDb": 5,
+      "searchResponseResultCount": 5,
+      "duplicateCount": 0,
+      "dedupeInputCount": 5,
+      "duplicateRatio": 0,
+      "invalidUrlCount": 0,
+      "invalidUrlFieldCount": 0,
+      "expiredJobCount": 0,
+      "crawlDurationMs": 62052,
+      "wallDurationMs": 62861,
+      "titleRelevanceDistribution": {
+        "canonical_variant": 2,
+        "exact": 2,
+        "generic_token_overlap": 1
+      },
+      "seniorityDistribution": {
+        "lead": 1,
+        "mid": 2,
+        "senior": 1,
+        "unknown": 1
+      },
+      "locationMatchDistribution": {
+        "city_state_us": 5
+      },
+      "providers": [
+        {
+          "provider": "ashby",
+          "status": "timed_out",
+          "sourceCount": 10,
+          "jobsFetched": 351,
+          "jobsNormalized": 521,
+          "jobsMatched": 1,
+          "jobsSavedToMongoDb": 1,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 9388,
+          "timedOut": true,
+          "warningCount": 1,
+          "errorMessage": "Provider ashby exceeded the 9000ms crawl budget and was failed fast."
+        },
+        {
+          "provider": "greenhouse",
+          "status": "partial",
+          "sourceCount": 10,
+          "jobsFetched": 126,
+          "jobsNormalized": 126,
+          "jobsMatched": 1,
+          "jobsSavedToMongoDb": 1,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 11917,
+          "timedOut": false,
+          "warningCount": 8,
+          "errorMessage": "Greenhouse returned 404 for openai. Provider greenhouse source greenhouse:stripe exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:coinbase exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:affirm exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:airbnb exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:asana exceeded the 7000ms source crawl budget. Greenhouse returned 404 for benchling. Provider greenhouse source greenhouse:brex exceeded the 7000ms source crawl budget."
+        },
+        {
+          "provider": "lever",
+          "status": "timed_out",
+          "sourceCount": 10,
+          "jobsFetched": 12,
+          "jobsNormalized": 280,
+          "jobsMatched": 0,
+          "jobsSavedToMongoDb": 0,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 9387,
+          "timedOut": true,
+          "warningCount": 1,
+          "errorMessage": "Provider lever exceeded the 9000ms crawl budget and was failed fast."
+        },
+        {
+          "provider": "smartrecruiters",
+          "status": "timed_out",
+          "sourceCount": 0,
+          "jobsFetched": 0,
+          "jobsNormalized": 0,
+          "jobsMatched": 0,
+          "jobsSavedToMongoDb": 0,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 0,
+          "timedOut": true,
+          "warningCount": 0,
+          "errorMessage": "Crawl exceeded the global timeout of 60000ms."
+        }
+      ],
+      "diagnostics": {
+        "discoveredSources": 40,
+        "crawledSources": 30,
+        "providersEnqueued": 3,
+        "providerFailures": 3,
+        "excludedByTitle": 922,
+        "excludedByLocation": 0,
+        "excludedByExperience": 0,
+        "validationDeferred": 0,
+        "stoppedReason": "timeout",
+        "dropReasonCounts": {
+          "crawl_source_budget": 63,
+          "filter:title_below_threshold": 440,
+          "filter:title_family_conflict": 482
+        }
+      }
+    },
+    {
+      "id": "product-manager-united-states",
+      "title": "Product Manager",
+      "country": "United States",
+      "crawlMode": "fast",
+      "status": "partial",
+      "searchId": "e55d36df-2db9-4996-8010-30bcbd9efb22",
+      "searchSessionId": "cf659711-4222-4f5c-9f36-2c5de6772def",
+      "crawlRunId": "f2e4452d-51b9-437e-ac02-1e19b4e6b90a",
+      "jobsFetched": 927,
+      "jobsFetchedPerProvider": {
+        "ashby": 267,
+        "greenhouse": 126,
+        "lever": 12,
+        "smartrecruiters": 0
+      },
+      "jobsNormalized": 927,
+      "jobsNormalizedPerProvider": {
+        "ashby": 521,
+        "greenhouse": 126,
+        "lever": 280,
+        "smartrecruiters": 0
+      },
+      "directJobsNormalized": 0,
+      "jobsMatched": 33,
+      "jobsSavedToMongoDb": 33,
+      "jobsReturnedByCrawl": 33,
+      "searchResultCountFromDb": 33,
+      "searchResponseResultCount": 33,
+      "duplicateCount": 0,
+      "dedupeInputCount": 33,
+      "duplicateRatio": 0,
+      "invalidUrlCount": 0,
+      "invalidUrlFieldCount": 0,
+      "expiredJobCount": 0,
+      "crawlDurationMs": 54765,
+      "wallDurationMs": 56410,
+      "titleRelevanceDistribution": {
+        "canonical_variant": 7,
+        "exact": 3,
+        "generic_token_overlap": 2,
+        "same_family_related": 19,
+        "synonym": 2
+      },
+      "seniorityDistribution": {
+        "lead": 1,
+        "manager": 1,
+        "mid": 6,
+        "principal": 2,
+        "senior": 8,
+        "staff": 4,
+        "unknown": 11
+      },
+      "locationMatchDistribution": {
+        "city_state_us": 33
+      },
+      "providers": [
+        {
+          "provider": "ashby",
+          "status": "timed_out",
+          "sourceCount": 10,
+          "jobsFetched": 267,
+          "jobsNormalized": 521,
+          "jobsMatched": 4,
+          "jobsSavedToMongoDb": 4,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 10497,
+          "timedOut": true,
+          "warningCount": 1,
+          "errorMessage": "Provider ashby exceeded the 9000ms crawl budget and was failed fast."
+        },
+        {
+          "provider": "greenhouse",
+          "status": "partial",
+          "sourceCount": 10,
+          "jobsFetched": 126,
+          "jobsNormalized": 126,
+          "jobsMatched": 4,
+          "jobsSavedToMongoDb": 4,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 8299,
+          "timedOut": false,
+          "warningCount": 8,
+          "errorMessage": "Greenhouse returned 404 for openai. Provider greenhouse source greenhouse:stripe exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:coinbase exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:affirm exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:airbnb exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:asana exceeded the 7000ms source crawl budget. Greenhouse returned 404 for benchling. Provider greenhouse source greenhouse:brex exceeded the 7000ms source crawl budget."
+        },
+        {
+          "provider": "lever",
+          "status": "timed_out",
+          "sourceCount": 10,
+          "jobsFetched": 12,
+          "jobsNormalized": 280,
+          "jobsMatched": 2,
+          "jobsSavedToMongoDb": 2,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 10497,
+          "timedOut": true,
+          "warningCount": 1,
+          "errorMessage": "Provider lever exceeded the 9000ms crawl budget and was failed fast."
+        },
+        {
+          "provider": "smartrecruiters",
+          "status": "running",
+          "sourceCount": 0,
+          "jobsFetched": 0,
+          "jobsNormalized": 0,
+          "jobsMatched": 0,
+          "jobsSavedToMongoDb": 0,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 0,
+          "timedOut": false,
+          "warningCount": 0
+        }
+      ],
+      "diagnostics": {
+        "discoveredSources": 40,
+        "crawledSources": 30,
+        "providersEnqueued": 3,
+        "providerFailures": 3,
+        "excludedByTitle": 884,
+        "excludedByLocation": 10,
+        "excludedByExperience": 0,
+        "validationDeferred": 0,
+        "stoppedReason": "target_met",
+        "dropReasonCounts": {
+          "crawl_source_budget": 63,
+          "filter:title_below_threshold": 437,
+          "filter:title_family_conflict": 447,
+          "filter:location_not_in_requested_country": 10
+        }
+      }
+    },
+    {
+      "id": "machine-learning-engineer-united-states",
+      "title": "Machine Learning Engineer",
+      "country": "United States",
+      "crawlMode": "fast",
+      "status": "partial",
+      "searchId": "c4f1a40c-8ace-4f6e-b842-9dd2a5a339ad",
+      "searchSessionId": "08862b55-8497-42fa-92ec-af381a407011",
+      "crawlRunId": "46a075a9-a6a4-47b9-97ad-7300c4315510",
+      "jobsFetched": 800,
+      "jobsFetchedPerProvider": {
+        "ashby": 351,
+        "greenhouse": 78,
+        "lever": 13,
+        "smartrecruiters": 0
+      },
+      "jobsNormalized": 800,
+      "jobsNormalizedPerProvider": {
+        "ashby": 521,
+        "greenhouse": 78,
+        "lever": 201,
+        "smartrecruiters": 0
+      },
+      "directJobsNormalized": 0,
+      "jobsMatched": 13,
+      "jobsSavedToMongoDb": 13,
+      "jobsReturnedByCrawl": 13,
+      "searchResultCountFromDb": 13,
+      "searchResponseResultCount": 13,
+      "duplicateCount": 0,
+      "dedupeInputCount": 13,
+      "duplicateRatio": 0,
+      "invalidUrlCount": 0,
+      "invalidUrlFieldCount": 0,
+      "expiredJobCount": 0,
+      "crawlDurationMs": 65869,
+      "wallDurationMs": 66980,
+      "titleRelevanceDistribution": {
+        "adjacent_concept": 8,
+        "canonical_variant": 2,
+        "same_family_related": 2,
+        "synonym": 1
+      },
+      "seniorityDistribution": {
+        "lead": 1,
+        "mid": 1,
+        "senior": 7,
+        "staff": 2,
+        "unknown": 2
+      },
+      "locationMatchDistribution": {
+        "city_state_us": 13
+      },
+      "providers": [
+        {
+          "provider": "ashby",
+          "status": "timed_out",
+          "sourceCount": 10,
+          "jobsFetched": 351,
+          "jobsNormalized": 521,
+          "jobsMatched": 3,
+          "jobsSavedToMongoDb": 3,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 9973,
+          "timedOut": true,
+          "warningCount": 1,
+          "errorMessage": "Provider ashby exceeded the 9000ms crawl budget and was failed fast."
+        },
+        {
+          "provider": "greenhouse",
+          "status": "partial",
+          "sourceCount": 10,
+          "jobsFetched": 78,
+          "jobsNormalized": 78,
+          "jobsMatched": 0,
+          "jobsSavedToMongoDb": 0,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 7031,
+          "timedOut": false,
+          "warningCount": 9,
+          "errorMessage": "Greenhouse returned 404 for openai. Provider greenhouse source greenhouse:stripe exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:coinbase exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:affirm exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:airbnb exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:asana exceeded the 7000ms source crawl budget. Greenhouse returned 404 for benchling. Provider greenhouse source greenhouse:bottomlinetechnologies exceeded the 7000ms source crawl budget. Provider greenhouse source greenhouse:brex exceeded the 7000ms source crawl budget."
+        },
+        {
+          "provider": "lever",
+          "status": "timed_out",
+          "sourceCount": 10,
+          "jobsFetched": 13,
+          "jobsNormalized": 201,
+          "jobsMatched": 0,
+          "jobsSavedToMongoDb": 0,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 9974,
+          "timedOut": true,
+          "warningCount": 1,
+          "errorMessage": "Provider lever exceeded the 9000ms crawl budget and was failed fast."
+        },
+        {
+          "provider": "smartrecruiters",
+          "status": "timed_out",
+          "sourceCount": 0,
+          "jobsFetched": 0,
+          "jobsNormalized": 0,
+          "jobsMatched": 0,
+          "jobsSavedToMongoDb": 0,
+          "invalidUrlCount": 0,
+          "invalidUrlFieldCount": 0,
+          "crawlDurationMs": 0,
+          "timedOut": true,
+          "warningCount": 0,
+          "errorMessage": "Crawl exceeded the global timeout of 60000ms."
+        }
+      ],
+      "diagnostics": {
+        "discoveredSources": 40,
+        "crawledSources": 30,
+        "providersEnqueued": 3,
+        "providerFailures": 3,
+        "excludedByTitle": 787,
+        "excludedByLocation": 0,
+        "excludedByExperience": 0,
+        "validationDeferred": 0,
+        "stoppedReason": "timeout",
+        "dropReasonCounts": {
+          "crawl_source_budget": 63,
+          "filter:title_below_threshold": 362,
+          "filter:title_family_conflict": 425
+        }
+      }
+    }
+  ],
+  "artifacts": {
+    "json": "/Users/admin/Projects/job-crawler/artifacts/benchmark-results/crawler-benchmark-2026-04-28T07-33-58-360Z.json",
+    "summary": "/Users/admin/Projects/job-crawler/artifacts/benchmark-results/crawler-benchmark-2026-04-28T07-33-58-360Z.txt"
+  }
+}

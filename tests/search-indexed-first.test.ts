@@ -195,6 +195,30 @@ function createDiscoveryFromSources(sources: DiscoveredSource[]): DiscoveryServi
   };
 }
 
+function collectLocationRegexSources(value: unknown, inLocationField = false): string[] {
+  if (value instanceof RegExp) {
+    return inLocationField ? [value.source] : [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => collectLocationRegexSources(entry, inLocationField));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.entries(value).flatMap(([key, entry]) =>
+      collectLocationRegexSources(
+        entry,
+        inLocationField ||
+          key === "normalizedLocation" ||
+          key === "locationNormalized" ||
+          key === "locationText",
+      ),
+    );
+  }
+
+  return [];
+}
+
 function createSourceForPlatform(
   platform: "greenhouse" | "workday" | "company_page",
 ): DiscoveredSource {
@@ -1105,6 +1129,7 @@ describe("jobs-first indexed search", () => {
           fetchImpl: vi.fn() as unknown as typeof fetch,
           now: new Date("2026-04-15T12:00:00.000Z"),
           allowRequestTimeSupplementalCrawl: true,
+          linkValidationMode: "deferred",
           initialVisibleWaitMs: 0,
         },
       );
@@ -3681,8 +3706,13 @@ describe("jobs-first indexed search", () => {
     expect(query.diagnostics).toMatchObject({
       hasLocationFilter: true,
       hasTitleFilter: true,
+      hasTitleConstraint: true,
+      hasLocationConstraint: true,
       titleChannelsRequireLocation: true,
-      queryShape: "base AND locationConstraint AND titleChannel",
+      queryShape: expect.stringContaining("base AND locationConstraint AND ("),
+      locationConstraintAppliedToEveryTitleChannel: true,
+      usesGeoOnlyChannelForVisibleResults: false,
+      usesTitleOnlyChannelForLocationSearch: false,
     });
     expect(channelNames).not.toContain("geoChannel");
     expect(channelNames).not.toContain("legacyLocationFallbackChannel");
@@ -3699,6 +3729,19 @@ describe("jobs-first indexed search", () => {
           serialized.includes("\"title\""),
       ).toBe(true);
     }
+  });
+
+  it("does not broaden United States legacy indexed search with ambiguous CA state-code text", () => {
+    const query = buildIndexedJobCandidateQuery({
+      title: "software engineer",
+      country: "United States",
+    });
+    const regexSources = collectLocationRegexSources(query.filter);
+    const joinedRegexSources = regexSources.join("\n");
+
+    expect(joinedRegexSources).toContain("california");
+    expect(joinedRegexSources).toContain("san francisco ca");
+    expect(regexSources.some((source) => /(?:\(|\|)ca(?:\||\))/.test(source))).toBe(false);
   });
 
   it("intersects legacy title and location fallback for old locationText-only jobs", async () => {

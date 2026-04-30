@@ -38,6 +38,10 @@ describe("location resolution", () => {
       expected: { city: "Chicago", state: "Illinois", isRemote: false },
     },
     {
+      locationText: "Foster City, CA (Hybrid) In office M,W,F",
+      expected: { city: "Foster City", state: "California", isRemote: false },
+    },
+    {
       locationText: "Remote US",
       expected: { isRemote: true },
     },
@@ -59,6 +63,10 @@ describe("location resolution", () => {
       expected: { country: "Canada", city: "Toronto", state: "Ontario", stateCode: "ON" },
     },
     {
+      locationText: "Toronto, Ontario | CA",
+      expected: { country: "Canada", city: "Toronto", state: "Ontario", stateCode: "ON" },
+    },
+    {
       locationText: "Waterloo, Ontario",
       expected: { country: "Canada", city: "Waterloo", state: "Ontario", stateCode: "ON" },
     },
@@ -73,6 +81,14 @@ describe("location resolution", () => {
     {
       locationText: "Tel Aviv, Israel",
       expected: { country: "Israel", city: "Tel Aviv", state: "Tel Aviv District" },
+    },
+    {
+      locationText: "Noida, Uttar Pradesh | IN",
+      expected: { country: "India" },
+    },
+    {
+      locationText: "Chennai - India | IN",
+      expected: { country: "India" },
     },
   ])("resolves $locationText as a non-US location using country and regional evidence", ({
     locationText,
@@ -107,6 +123,176 @@ describe("location resolution", () => {
       isUnitedStates: false,
       eligibilityCountries: expect.arrayContaining(["Canada"]),
       ...expected,
+    });
+  });
+
+  it("does not let foreign country-code evidence pass a United States filter as a US state code", () => {
+    for (const locationText of [
+      "Noida, Uttar Pradesh | IN",
+      "Chennai - India | IN",
+      "Toronto, Ontario | CA",
+    ]) {
+      const evaluation = evaluateSearchFilters(
+        {
+          title: "Data Analyst",
+          company: "Acme",
+          country: undefined,
+          state: undefined,
+          city: undefined,
+          locationText,
+          rawSourceMetadata: {},
+        },
+        {
+          title: "Data Analyst",
+          country: "United States",
+        },
+        {
+          includeExperience: false,
+        },
+      );
+
+      expect(evaluation).toMatchObject({
+        matches: false,
+        reason: "location",
+        locationMatch: expect.objectContaining({
+          jobDiagnostics: expect.objectContaining({
+            country: locationText.includes("Toronto") ? "Canada" : "India",
+            isUnitedStates: false,
+          }),
+        }),
+      });
+    }
+  });
+
+  it("does not let workplace metadata or SaaS prose override structured India location evidence", () => {
+    const rawSourceMetadata = {
+      leverJob: {
+        country: "IN",
+        workplaceType: "onsite",
+        categories: {
+          location: "Hyderabad, Telangana",
+          allLocations: ["Hyderabad, Telangana"],
+        },
+        descriptionPlain:
+          "We are seeking a skilled Frontend Developer to help us build modern, responsive, and scalable web applications for our SaaS-based multi-tenant platforms.",
+      },
+    };
+
+    const resolved = resolveJobLocation({
+      country: "IN",
+      city: "Hyderabad",
+      locationText: "Hyderabad, Telangana | IN",
+      rawSourceMetadata,
+    });
+
+    expect(resolved).toMatchObject({
+      country: "India",
+      city: "Hyderabad",
+      isUnitedStates: false,
+      physicalLocations: expect.arrayContaining([
+        expect.objectContaining({
+          country: "India",
+          city: "Hyderabad",
+        }),
+      ]),
+    });
+    expect(resolved.physicalLocations ?? []).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ country: "United States" }),
+        expect.objectContaining({ country: "onsite" }),
+      ]),
+    );
+
+    const evaluation = evaluateSearchFilters(
+      {
+        title: "Frontend Developer",
+        company: "ShyftLabs",
+        country: "India",
+        city: "Hyderabad",
+        locationText: "Hyderabad, Telangana | IN",
+        rawSourceMetadata,
+        resolvedLocation: resolved,
+      },
+      {
+        title: "Software Engineer",
+        country: "United States",
+      },
+      {
+        includeExperience: false,
+      },
+    );
+
+    expect(evaluation).toMatchObject({
+      matches: false,
+      reason: "location",
+      locationMatch: expect.objectContaining({
+        jobDiagnostics: expect.objectContaining({
+          country: "India",
+          isUnitedStates: false,
+        }),
+      }),
+    });
+  });
+
+  it("keeps known Indian city and country-code metadata out of United States state matching", () => {
+    const rawSourceMetadata = {
+      leverJob: {
+        country: "IN",
+        workplaceType: "hybrid",
+        categories: {
+          location: "Noida, Uttar Pradesh",
+          allLocations: ["Noida, Uttar Pradesh"],
+        },
+      },
+    };
+
+    const resolved = resolveJobLocation({
+      country: "IN",
+      city: "Noida",
+      locationText: "Noida, Uttar Pradesh | IN",
+      rawSourceMetadata,
+    });
+
+    expect(resolved).toMatchObject({
+      country: "India",
+      city: "Noida",
+      isUnitedStates: false,
+    });
+    expect(resolved.physicalLocations ?? []).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ country: "United States" }),
+        expect.objectContaining({ country: "hybrid" }),
+      ]),
+    );
+  });
+
+  it("keeps mixed Lever multi-location roles eligible for US search when explicit US locations are present", () => {
+    const evaluation = evaluateSearchFilters(
+      {
+        title: "Backend Engineer",
+        company: "Acme",
+        country: undefined,
+        state: undefined,
+        city: undefined,
+        locationText: "Toronto, Canada | Seattle, WA | Austin, TX | US",
+        rawSourceMetadata: {},
+      },
+      {
+        title: "Backend Engineer",
+        country: "United States",
+      },
+      {
+        includeExperience: false,
+      },
+    );
+
+    expect(evaluation).toMatchObject({
+      matches: true,
+      locationMatch: expect.objectContaining({
+        jobDiagnostics: expect.objectContaining({
+          isUnitedStates: true,
+        }),
+      }),
     });
   });
 
@@ -610,6 +796,53 @@ describe("location resolution", () => {
       locationMatch: expect.objectContaining({
         explanation: expect.stringContaining("remote eligibility for United States"),
       }),
+    });
+  });
+
+  it("does not turn privacy-law resident text into a United States job location", () => {
+    const rawSourceMetadata = {
+      description:
+        "If you are a California resident, please review information regarding your rights under California privacy laws.",
+    };
+    const resolved = resolveJobLocation({
+      locationText: "Remote, Philippines",
+      rawSourceMetadata,
+    });
+
+    expect(resolved).toMatchObject({
+      country: "Philippines",
+      isUnitedStates: false,
+    });
+    expect(resolved.physicalLocations ?? []).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          country: "United States",
+        }),
+      ]),
+    );
+
+    const evaluation = evaluateSearchFilters(
+      {
+        title: "Data Analyst",
+        company: "Acme",
+        country: "Philippines",
+        state: undefined,
+        city: undefined,
+        locationText: "Remote, Philippines",
+        rawSourceMetadata,
+      },
+      {
+        title: "Data Analyst",
+        country: "United States",
+      },
+      {
+        includeExperience: false,
+      },
+    );
+
+    expect(evaluation).toMatchObject({
+      matches: false,
+      reason: "location",
     });
   });
 });

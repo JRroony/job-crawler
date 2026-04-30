@@ -7,6 +7,7 @@
     "build": "node scripts/run-next.js build",
     "start": "node scripts/run-next.js start",
     "backfill:search-index": "tsx scripts/backfill-search-index.ts",
+    "benchmark:crawler": "tsx scripts/benchmark-crawler.ts",
     "diagnose:search": "tsx scripts/diagnose-search-coverage.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

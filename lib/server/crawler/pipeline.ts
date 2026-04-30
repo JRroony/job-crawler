@@ -1,5 +1,7 @@
 import "server-only";
 
+import { setMaxListeners } from "node:events";
+
 import { buildCanonicalJobIdentity } from "@/lib/job-identity";
 import {
   dedupeJobsWithDiagnostics,
@@ -101,6 +103,7 @@ function mergeAbortSignals(signals: Array<AbortSignal | undefined>): AbortSignal
       return controller.signal;
     }
     
+    allowManyAbortListeners(signal);
     signal.addEventListener("abort", () => {
       controller.abort(signal.reason);
     }, { once: true });
@@ -383,6 +386,7 @@ export async function executeCrawlPipeline(
   const mutationErrors: unknown[] = [];
   let progressUpdateCount = 0;
   let persistenceBatchCount = 0;
+  let targetMet = false;
   let pendingProgressStage: CrawlRunStage | undefined;
   let pendingProgressNow: string | undefined;
   let lastProgressFlushAtMs = 0;
@@ -683,6 +687,11 @@ export async function executeCrawlPipeline(
             savedJobIds.add(job._id);
             newVisibleJobCount += 1;
           }
+        }
+        if (savedJobIds.size >= targetJobCount) {
+          targetMet = true;
+          diagnostics.stoppedReason = "target_met";
+          diagnostics.budgetExhausted = true;
         }
         logIngestionTrace("db-write-result", {
           searchId: search._id,
@@ -1307,16 +1316,6 @@ export async function executeCrawlPipeline(
     if (input.discovery.discoverBaseline && input.discovery.discoverSupplemental) {
       await persistentCancellation.throwIfCanceled({ heartbeat: true });
       throwIfAborted(mergedSignal);
-      const baselineVisibility = createDeferred<void>();
-      let baselineVisibilityResolved = false;
-      const markBaselineVisible = () => {
-        if (baselineVisibilityResolved) {
-          return;
-        }
-
-        baselineVisibilityResolved = true;
-        baselineVisibility.resolve();
-      };
       const baselineDiscoveryStartedMs = Date.now();
       const baselineStage = await input.discovery.discoverBaseline({
         filters: normalizedFilters,
@@ -1329,33 +1328,42 @@ export async function executeCrawlPipeline(
         sources: baselineStage.sources,
         jobs: baselineStage.jobs ?? [],
         diagnostics: baselineStage.diagnostics,
-        onFirstVisibleSaved: markBaselineVisible,
       }));
-      const baselineCompletionSignal = baselineProcessingPromise.finally(markBaselineVisible);
 
       if (normalizedFilters.crawlMode === "fast") {
-        await Promise.race([baselineVisibility.promise, baselineCompletionSignal]);
+        await baselineProcessingPromise;
       }
 
-      const supplementalDiscoveryStartedMs = Date.now();
-      const supplementalStage = await input.discovery.discoverSupplemental(
-        {
-          filters: normalizedFilters,
-          now: input.now,
-          fetchImpl: abortableFetchImpl,
-        },
-        {
-          baselineSources: baselineStage.sources,
-        },
-      );
-      stageTimingsMs.discovery += Date.now() - supplementalDiscoveryStartedMs;
-      const supplementalProcessingPromise = trackStagePromise(processDiscoveryStage({
-        label: supplementalStage.label,
-        sources: supplementalStage.sources,
-        jobs: supplementalStage.jobs ?? [],
-        diagnostics: supplementalStage.diagnostics,
-      }));
-      await Promise.all([baselineProcessingPromise, supplementalProcessingPromise]);
+      if (targetMet) {
+        console.info("[crawl:supplemental-skip]", {
+          searchId: search._id,
+          crawlRunId: crawlRun._id,
+          reason: "target_met_after_baseline",
+          savedCount: savedJobIds.size,
+          targetJobCount,
+        });
+        await baselineProcessingPromise;
+      } else {
+        const supplementalDiscoveryStartedMs = Date.now();
+        const supplementalStage = await input.discovery.discoverSupplemental(
+          {
+            filters: normalizedFilters,
+            now: input.now,
+            fetchImpl: abortableFetchImpl,
+          },
+          {
+            baselineSources: baselineStage.sources,
+          },
+        );
+        stageTimingsMs.discovery += Date.now() - supplementalDiscoveryStartedMs;
+        const supplementalProcessingPromise = trackStagePromise(processDiscoveryStage({
+          label: supplementalStage.label,
+          sources: supplementalStage.sources,
+          jobs: supplementalStage.jobs ?? [],
+          diagnostics: supplementalStage.diagnostics,
+        }));
+        await Promise.all([baselineProcessingPromise, supplementalProcessingPromise]);
+      }
     } else if (input.discovery.discoverInStages) {
       await persistentCancellation.throwIfCanceled({ heartbeat: true });
       throwIfAborted(mergedSignal);
@@ -3205,6 +3213,7 @@ function linkAbortSignals(
       break;
     }
 
+    allowManyAbortListeners(signal);
     const onAbort = () => {
       controller.abort(signal.reason);
     };
@@ -3217,6 +3226,14 @@ function linkAbortSignals(
       signal.removeEventListener("abort", onAbort);
     });
   };
+}
+
+function allowManyAbortListeners(signal: AbortSignal) {
+  try {
+    setMaxListeners(0, signal);
+  } catch {
+    // Older runtimes may not support EventTarget max listener controls.
+  }
 }
 
 async function runProviderWithTimeout<P>(
@@ -3268,18 +3285,6 @@ async function runProviderWithTimeout<P>(
 
 function isTimeoutError(error: unknown) {
   return error instanceof Error && error.message.includes("crawl budget");
-}
-
-function createDeferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-
-  return {
-    promise,
-    resolve,
-  };
 }
 
 function buildProviderSummary(

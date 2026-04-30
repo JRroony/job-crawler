@@ -1,5 +1,7 @@
 import "server-only";
 
+import { setMaxListeners } from "node:events";
+
 export class ProviderSourceTimeoutError extends Error {
   constructor(input: { provider: string; sourceId: string; timeoutMs: number }) {
     super(
@@ -119,6 +121,7 @@ function linkAbortSignals(
       break;
     }
 
+    allowManyAbortListeners(signal);
     const onAbort = () => {
       controller.abort(signal.reason);
     };
@@ -131,4 +134,12 @@ function linkAbortSignals(
       signal.removeEventListener("abort", onAbort);
     });
   };
+}
+
+function allowManyAbortListeners(signal: AbortSignal) {
+  try {
+    setMaxListeners(0, signal);
+  } catch {
+    // Older runtimes may not support EventTarget max listener controls.
+  }
 }

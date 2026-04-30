@@ -565,6 +565,30 @@ describe("title retrieval scoring", () => {
     });
   });
 
+  it("promotes modifier-qualified analyst concepts without making every operations analyst a data analyst", () => {
+    expect(getTitleMatchResult("GTM Business Analyst", "Data Analyst")).toMatchObject({
+      matches: true,
+      tier: "adjacent_concept",
+      canonicalJobTitle: "business analyst",
+    });
+    expect(getTitleMatchResult("Data Scientist, Product", "Data Analyst")).toMatchObject({
+      matches: true,
+      canonicalJobTitle: "data scientist",
+    });
+    expect(
+      getTitleMatchResult("Revenue Operations Analyst", "Data Analyst"),
+    ).toMatchObject({
+      matches: false,
+      tier: "none",
+    });
+    expect(
+      getTitleMatchResult("Data Analyst", "Revenue Operations Analyst"),
+    ).toMatchObject({
+      matches: false,
+      tier: "none",
+    });
+  });
+
   it("keeps qa matching inside the QA and test family", () => {
     expect(getTitleMatchResult("Test Engineer", "QA Engineer")).toMatchObject({
       matches: true,

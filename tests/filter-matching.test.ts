@@ -483,6 +483,12 @@ describe("title relevance", () => {
     });
   });
 
+  it("matches analytics-qualified data scientist roles for a data analyst query", () => {
+    expect(getTitleMatchResult("Data Scientist, Product", "Data Analyst")).toMatchObject({
+      matches: true,
+    });
+  });
+
   it("keeps sales analyst within the analytics family for a data analyst query", () => {
     expect(getTitleMatchResult("Sales Analyst", "Data Analyst")).toMatchObject({
       matches: true,

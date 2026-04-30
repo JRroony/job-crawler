@@ -97,9 +97,15 @@ export type IndexedJobCandidateQuery = {
     locationSearchKeys: string[];
     hasLocationFilter: boolean;
     hasTitleFilter: boolean;
+    hasTitleConstraint: boolean;
+    hasLocationConstraint: boolean;
     queryShape: string;
     channelNames: IndexedJobCandidateChannelName[];
+    titleChannels: IndexedJobCandidateChannelName[];
     titleChannelsRequireLocation: boolean;
+    locationConstraintAppliedToEveryTitleChannel: boolean;
+    usesGeoOnlyChannelForVisibleResults: boolean;
+    usesTitleOnlyChannelForLocationSearch: boolean;
     channelLimits: Record<IndexedJobCandidateChannelName, number>;
     candidateChannelBreakdown?: IndexedJobCandidateChannelBreakdown;
     usedPlatformPrefilter: boolean;
@@ -477,7 +483,7 @@ function normalizeSearchKey(value?: string) {
 function buildSearchReadyLocationCandidateClause(filters: SearchFilters) {
   const geoIntent = parseGeoIntentFromFilters(filters);
   const searchReadyKeys = geoIntent.searchKeys;
-  const resolvedLocationClause = buildResolvedLocationCandidateClause(filters);
+  const resolvedLocationClause = buildResolvedLocationCandidateClauseFromIntent(geoIntent);
   const clauses = [
     ...(searchReadyKeys.length > 0
       ? [
@@ -499,109 +505,242 @@ function buildSearchReadyLocationCandidateClause(filters: SearchFilters) {
 
 function buildResolvedLocationCandidateClause(filters: SearchFilters) {
   const geoIntent = parseGeoIntentFromFilters(filters);
-  const clauses: Record<string, unknown>[] = [];
+  return buildResolvedLocationCandidateClauseFromIntent(geoIntent);
+}
 
-  if (geoIntent.country) {
-    const countryAliases = dedupeStrings([
-      geoIntent.country.name,
-      geoIntent.country.code,
-      ...geoIntent.country.aliases,
-    ]);
-    clauses.push(
-      { "resolvedLocation.country": { $in: countryAliases } },
-      { country: { $in: countryAliases } },
-    );
-
-    if (isUnitedStatesValue(geoIntent.country.name) || isUnitedStatesValue(geoIntent.country.code)) {
-      clauses.push({ "resolvedLocation.isUnitedStates": true });
-    }
-  }
-
-  if (geoIntent.region) {
-    const regionAliases = dedupeStrings([
-      geoIntent.region.name,
-      geoIntent.region.code,
-      ...geoIntent.region.aliases,
-    ]);
-    clauses.push(
-      { "resolvedLocation.state": { $in: regionAliases } },
-      { "resolvedLocation.stateCode": { $in: regionAliases } },
-      { state: { $in: regionAliases } },
-    );
-  }
-
-  if (geoIntent.city) {
-    const cityAliases = dedupeStrings([
-      geoIntent.city.name,
-      ...geoIntent.city.aliases,
-    ]);
-    clauses.push(
-      { "resolvedLocation.city": { $in: cityAliases } },
-      { city: { $in: cityAliases } },
-    );
-  }
-
-  if (clauses.length === 0) {
+function buildResolvedLocationCandidateClauseFromIntent(
+  geoIntent: ReturnType<typeof parseGeoIntentFromFilters>,
+) {
+  if (geoIntent.scope === "none" || geoIntent.scope === "ambiguous") {
     return undefined;
+  }
+
+  const scopedLocationClause =
+    geoIntent.city
+      ? buildCityResolvedLocationClause(geoIntent)
+      : geoIntent.region
+        ? buildRegionResolvedLocationClause(geoIntent)
+        : geoIntent.country
+          ? buildCountryResolvedLocationClause(geoIntent)
+          : undefined;
+
+  if (!geoIntent.isRemote) {
+    return scopedLocationClause;
+  }
+
+  const remoteClause = {
+    $or: [
+      { "resolvedLocation.isRemote": true },
+      { remoteType: "remote" },
+      { "geoLocation.workplaceType": "remote" },
+    ],
+  };
+
+  if (!scopedLocationClause) {
+    return remoteClause;
+  }
+
+  return { $and: [remoteClause, scopedLocationClause] };
+}
+
+function buildCountryResolvedLocationClause(
+  geoIntent: ReturnType<typeof parseGeoIntentFromFilters>,
+) {
+  if (!geoIntent.country) {
+    return undefined;
+  }
+
+  const countryAliases = dedupeStrings([
+    geoIntent.country.name,
+    geoIntent.country.code,
+    ...geoIntent.country.aliases,
+  ]);
+  const clauses: Record<string, unknown>[] = [
+    { "resolvedLocation.country": { $in: countryAliases } },
+    { country: { $in: countryAliases } },
+  ];
+
+  if (isUnitedStatesValue(geoIntent.country.name) || isUnitedStatesValue(geoIntent.country.code)) {
+    clauses.push({ "resolvedLocation.isUnitedStates": true });
   }
 
   return { $or: clauses };
 }
 
+function buildRegionResolvedLocationClause(
+  geoIntent: ReturnType<typeof parseGeoIntentFromFilters>,
+) {
+  if (!geoIntent.region) {
+    return undefined;
+  }
+
+  const regionAliases = dedupeStrings([
+    geoIntent.region.name,
+    geoIntent.region.code,
+    ...geoIntent.region.aliases,
+  ]);
+
+  return {
+    $or: [
+      { "resolvedLocation.state": { $in: regionAliases } },
+      { "resolvedLocation.stateCode": { $in: regionAliases } },
+      { state: { $in: regionAliases } },
+    ],
+  };
+}
+
+function buildCityResolvedLocationClause(
+  geoIntent: ReturnType<typeof parseGeoIntentFromFilters>,
+) {
+  if (!geoIntent.city) {
+    return undefined;
+  }
+
+  const cityAliases = dedupeStrings([
+    geoIntent.city.name,
+    ...geoIntent.city.aliases,
+  ]);
+
+  return {
+    $or: [
+      { "resolvedLocation.city": { $in: cityAliases } },
+      { city: { $in: cityAliases } },
+    ],
+  };
+}
+
 function buildLegacyLocationFallbackClause(filters: SearchFilters) {
   const geoIntent = parseGeoIntentFromFilters(filters);
-  const terms: string[] = [];
+  const terms = buildLegacyLocationFallbackTerms(geoIntent);
+
+  return buildGenericLocationTextFallbackClause(terms);
+}
+
+function buildLegacyLocationFallbackTerms(
+  geoIntent: ReturnType<typeof parseGeoIntentFromFilters>,
+) {
+  if (geoIntent.scope === "none") {
+    return [];
+  }
+
+  if (geoIntent.isRemote) {
+    return buildRemoteLegacyLocationFallbackTerms(geoIntent);
+  }
+
+  if (geoIntent.city) {
+    return buildCityLegacyLocationFallbackTerms(geoIntent);
+  }
+
+  if (geoIntent.region) {
+    return buildRegionLegacyLocationFallbackTerms(geoIntent);
+  }
 
   if (geoIntent.country) {
+    const terms: string[] = [];
     const catalogCountry = geoCatalog.find(
       (country) => country.code === geoIntent.country?.code || country.name === geoIntent.country?.name,
     );
-    terms.push(...dedupeStrings([
+    const countryTerms = dedupeStrings([
       geoIntent.country.name,
       geoIntent.country.code,
       ...geoIntent.country.aliases,
       ...(catalogCountry ? countryLocationAliases(catalogCountry) : []),
-    ]));
+    ]);
+    const isUnitedStatesCountry =
+      isUnitedStatesValue(geoIntent.country.name) || isUnitedStatesValue(geoIntent.country.code);
 
-    if (isUnitedStatesValue(geoIntent.country.name) || isUnitedStatesValue(geoIntent.country.code)) {
+    terms.push(
+      ...(
+        isUnitedStatesCountry
+          ? countryTerms.filter((term) => !isAmbiguousShortLocationTerm(term))
+          : countryTerms
+      ),
+    );
+
+    if (isUnitedStatesCountry) {
       terms.push(...buildBroadUnitedStatesLegacyFallbackTerms());
     }
+
+    return dedupeStrings(terms);
   }
 
-  if (geoIntent.region) {
-    terms.push(...dedupeStrings([
-      geoIntent.region.name,
-      geoIntent.region.code,
-      ...geoIntent.region.aliases,
-    ]));
+  return geoIntent.normalizedInput ? [geoIntent.normalizedInput] : [];
+}
 
-    const usState = resolveUsState(geoIntent.region.name) ?? resolveUsState(geoIntent.region.code);
-    const usStateCode =
-      resolveUsStateCode(geoIntent.region.name) ?? resolveUsStateCode(geoIntent.region.code);
-    if (usState) {
-      terms.push(usState);
-    }
-    if (usStateCode) {
-      terms.push(usStateCode);
-    }
+function buildRemoteLegacyLocationFallbackTerms(
+  geoIntent: ReturnType<typeof parseGeoIntentFromFilters>,
+) {
+  const baseTerms =
+    geoIntent.city
+      ? buildCityLegacyLocationFallbackTerms(geoIntent)
+      : geoIntent.region
+        ? buildRegionLegacyLocationFallbackTerms(geoIntent)
+        : geoIntent.country
+          ? dedupeStrings([
+              geoIntent.country.name,
+              geoIntent.country.code,
+              ...geoIntent.country.aliases,
+            ])
+          : [geoIntent.normalizedInput];
+
+  return buildRemoteQualifiedLocationTerms(baseTerms);
+}
+
+function buildRegionLegacyLocationFallbackTerms(
+  geoIntent: ReturnType<typeof parseGeoIntentFromFilters>,
+) {
+  if (!geoIntent.region) {
+    return [];
   }
 
-  if (geoIntent.city) {
-    terms.push(geoIntent.city.name, ...geoIntent.city.aliases);
+  const terms = dedupeStrings([
+    geoIntent.region.name,
+    geoIntent.region.code,
+    ...geoIntent.region.aliases,
+  ]);
+  const usState = resolveUsState(geoIntent.region.name) ?? resolveUsState(geoIntent.region.code);
+  const usStateCode =
+    resolveUsStateCode(geoIntent.region.name) ?? resolveUsStateCode(geoIntent.region.code);
 
-    const analyzedCity = analyzeUsLocation(geoIntent.city.name);
-    if (analyzedCity.isUnitedStates) {
-      terms.push(...dedupeStrings([
-        analyzedCity.city,
-        analyzedCity.stateName,
-        analyzedCity.stateCode,
-        [analyzedCity.city, analyzedCity.stateCode].filter(Boolean).join(" "),
-        [analyzedCity.city, analyzedCity.stateName].filter(Boolean).join(" "),
-      ]));
-    }
+  return dedupeStrings([
+    ...terms,
+    usState,
+    usStateCode,
+  ]);
+}
+
+function buildCityLegacyLocationFallbackTerms(
+  geoIntent: ReturnType<typeof parseGeoIntentFromFilters>,
+) {
+  if (!geoIntent.city) {
+    return [];
   }
 
-  return buildGenericLocationTextFallbackClause(terms);
+  const analyzedCity = analyzeUsLocation(geoIntent.city.name);
+  const cityTerms = dedupeStrings([
+    geoIntent.city.name,
+    ...geoIntent.city.aliases,
+    analyzedCity.city,
+    analyzedCity.stateName,
+    analyzedCity.stateCode,
+    [analyzedCity.city, analyzedCity.stateCode].filter(Boolean).join(" "),
+    [analyzedCity.city, analyzedCity.stateName].filter(Boolean).join(" "),
+  ]);
+
+  return cityTerms;
+}
+
+function buildRemoteQualifiedLocationTerms(terms: string[]) {
+  return dedupeStrings(
+    terms
+      .filter((term) => term.trim().length > 0)
+      .flatMap((term) => [
+        `remote ${term}`,
+        `${term} remote`,
+        `remote in ${term}`,
+        `remote within ${term}`,
+      ]),
+  );
 }
 
 function buildBroadUnitedStatesLegacyFallbackTerms() {
@@ -619,7 +758,7 @@ function buildBroadUnitedStatesLegacyFallbackTerms() {
 }
 
 function isAmbiguousShortLocationTerm(value: string) {
-  return new Set(["AS", "HI", "ID", "IN", "ME", "OR"]).has(value.toUpperCase());
+  return new Set(["AS", "CA", "HI", "ID", "IN", "ME", "OR"]).has(value.toUpperCase());
 }
 
 function buildLocationCandidateClause(filters: SearchFilters) {
@@ -729,10 +868,24 @@ export function buildIndexedJobCandidateQuery(
     baseClauses.push(experienceClause);
   }
 
+  const titleChannelClauses: Record<string, unknown>[] = [
+    buildExactTitleChannelClause(exactTitleTerms),
+    buildAliasTitleChannelClause(aliasTitleTerms),
+    buildConceptChannelClause(titleConceptIds),
+    familyRoleFallback,
+    buildLegacyTitleFallbackClause(normalizedTitleRegex),
+  ].flatMap((clause) => (clause ? [clause as Record<string, unknown>] : []));
+  const titleConstraint =
+    titleChannelClauses.length === 0
+      ? undefined
+      : titleChannelClauses.length === 1
+        ? titleChannelClauses[0]
+        : { $or: titleChannelClauses };
   const titleChannelBaseClauses = locationCandidateClause
     ? [...baseClauses, locationCandidateClause]
     : baseClauses;
-  const titleChannelsRequireLocation = hasLocationFilter && Boolean(locationCandidateClause);
+  const titleChannelsRequireLocation =
+    hasTitleFilter && hasLocationFilter && Boolean(locationCandidateClause);
   const channels = [
     buildCandidateChannel({
       name: "exactTitleChannel",
@@ -793,17 +946,41 @@ export function buildIndexedJobCandidateQuery(
     }),
   ].filter((channel): channel is IndexedJobCandidateChannel => Boolean(channel));
   const channelNames = channels.map((channel) => channel.name);
-  const queryShape =
-    hasLocationFilter && locationCandidateClause
-      ? "base AND locationConstraint AND titleChannel"
-      : "base AND titleChannel";
-
-  const filter =
-    channels.length === 0
-      ? composeCandidateClause(baseClauses)
-      : channels.length === 1
-        ? channels[0].filter
-        : { $or: channels.map((channel) => channel.filter) };
+  const titleChannels = channels
+    .filter((channel) => channel.name !== "geoChannel" && channel.name !== "legacyLocationFallbackChannel")
+    .map((channel) => channel.name);
+  const hasTitleConstraint = hasTitleFilter && Boolean(titleConstraint);
+  const hasLocationConstraint = hasLocationFilter && Boolean(locationCandidateClause);
+  const locationConstraintAppliedToEveryTitleChannel =
+    !hasTitleFilter ||
+    !hasLocationFilter ||
+    (hasLocationConstraint &&
+      titleChannels.length > 0 &&
+      channels
+        .filter((channel) => titleChannels.includes(channel.name))
+        .every((channel) => channel.diagnostics.requiresLocation === true));
+  const usesGeoOnlyChannelForVisibleResults = false;
+  const usesTitleOnlyChannelForLocationSearch =
+    hasTitleFilter &&
+    hasLocationFilter &&
+    channels
+      .filter((channel) => titleChannels.includes(channel.name))
+      .some((channel) => channel.diagnostics.requiresLocation !== true);
+  const queryShape = describeCandidateQueryShape({
+    hasTitleFilter,
+    hasLocationFilter,
+    hasTitleConstraint,
+    hasLocationConstraint,
+    titleChannels,
+  });
+  const filterClauses = [...baseClauses];
+  if (hasLocationConstraint && locationCandidateClause) {
+    filterClauses.push(locationCandidateClause);
+  }
+  if (hasTitleFilter) {
+    filterClauses.push(titleConstraint ?? buildNoCandidateClause());
+  }
+  const filter = composeCandidateClause(filterClauses);
 
   return {
     filter,
@@ -822,9 +999,15 @@ export function buildIndexedJobCandidateQuery(
       locationSearchKeys: geoIntent.searchKeys,
       hasLocationFilter,
       hasTitleFilter,
+      hasTitleConstraint,
+      hasLocationConstraint,
       queryShape,
       channelNames,
+      titleChannels,
       titleChannelsRequireLocation,
+      locationConstraintAppliedToEveryTitleChannel,
+      usesGeoOnlyChannelForVisibleResults,
+      usesTitleOnlyChannelForLocationSearch,
       channelLimits: limits.channelLimits,
       usedPlatformPrefilter: Boolean(allowedPlatforms?.length),
       usedLocationPrefilter: Boolean(locationCandidateClause),
@@ -837,6 +1020,46 @@ export function buildIndexedJobCandidateQuery(
       usedSearchReadyExperienceKeys: Boolean(filters.experienceLevels?.length),
     },
   };
+}
+
+function describeCandidateQueryShape(input: {
+  hasTitleFilter: boolean;
+  hasLocationFilter: boolean;
+  hasTitleConstraint: boolean;
+  hasLocationConstraint: boolean;
+  titleChannels: IndexedJobCandidateChannelName[];
+}) {
+  if (input.hasTitleFilter && input.hasLocationFilter) {
+    const channelExpression =
+      input.titleChannels.length > 0
+        ? input.titleChannels.join(" OR ")
+        : "noTitleCandidateChannel";
+    return input.hasLocationConstraint && input.hasTitleConstraint
+      ? `base AND locationConstraint AND (${channelExpression})`
+      : "base AND noMatchingTitleGeoIntersection";
+  }
+
+  if (input.hasTitleFilter) {
+    const channelExpression =
+      input.titleChannels.length > 0
+        ? input.titleChannels.join(" OR ")
+        : "noTitleCandidateChannel";
+    return input.hasTitleConstraint
+      ? `base AND (${channelExpression})`
+      : "base AND noMatchingTitleConstraint";
+  }
+
+  if (input.hasLocationFilter) {
+    return input.hasLocationConstraint
+      ? "base AND locationConstraint"
+      : "base AND noMatchingLocationConstraint";
+  }
+
+  return "base";
+}
+
+function buildNoCandidateClause() {
+  return { _id: "__job_crawler_no_indexed_candidates__" };
 }
 
 const indexedJobCandidateSort: CandidateQuerySort = {

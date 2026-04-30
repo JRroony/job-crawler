@@ -65,7 +65,20 @@ export const geoCatalog: GeoCatalogCountry[] = [
   },
   { code: "GB", name: "United Kingdom", aliases: ["UK", "Great Britain", "Britain"], cities: [{ name: "London" }, { name: "Manchester" }, { name: "Edinburgh" }] },
   { code: "DE", name: "Germany", aliases: ["Deutschland"], cities: [{ name: "Berlin" }, { name: "Munich", aliases: ["Muenchen"] }, { name: "Hamburg" }, { name: "Frankfurt" }] },
-  { code: "IN", name: "India", cities: [{ name: "Bengaluru", aliases: ["Bangalore"] }, { name: "Hyderabad" }, { name: "Mumbai" }, { name: "Delhi" }, { name: "Pune" }] },
+  {
+    code: "IN",
+    name: "India",
+    cities: [
+      { name: "Bengaluru", aliases: ["Bangalore"] },
+      { name: "Hyderabad" },
+      { name: "Mumbai" },
+      { name: "Delhi" },
+      { name: "Pune" },
+      { name: "Noida" },
+      { name: "Chennai" },
+      { name: "Gurugram", aliases: ["Gurgaon"] },
+    ],
+  },
   { code: "JP", name: "Japan", cities: [{ name: "Tokyo" }, { name: "Osaka" }, { name: "Kyoto" }] },
   { code: "KR", name: "South Korea", aliases: ["Korea", "Republic of Korea"], cities: [{ name: "Seoul" }] },
   { code: "SG", name: "Singapore", cities: [{ name: "Singapore" }] },
@@ -84,6 +97,7 @@ export const geoCatalog: GeoCatalogCountry[] = [
   { code: "PL", name: "Poland", cities: [{ name: "Warsaw" }, { name: "Krakow" }] },
   { code: "BR", name: "Brazil", cities: [{ name: "Sao Paulo" }, { name: "Rio de Janeiro" }] },
   { code: "MX", name: "Mexico", cities: [{ name: "Mexico City" }, { name: "Guadalajara" }] },
+  { code: "PH", name: "Philippines", aliases: ["PH"], cities: [{ name: "Manila" }] },
 ];
 
 export function countryAliases(country: GeoCatalogCountry) {

@@ -329,26 +329,245 @@ function matchesActiveSearchTitle(job: JobListing, filters: SearchFilters) {
     return true;
   }
 
-  if (query === "machine learning engineer") {
-    return [
-      "machine learning engineer",
-      "ml engineer",
-      "ai engineer",
-      "applied ai engineer",
-      "applied ml engineer",
-      "machine learning infrastructure engineer",
-      "deep learning engineer",
-      "computer vision engineer",
-      "nlp engineer",
-      "llm engineer",
-      "generative ai engineer",
-      "research engineer ml",
-      "ai research engineer",
-    ].some((variant) => title.includes(variant));
+  const querySignal = buildClientTitleSignal(query);
+  const jobSignal = buildClientTitleSignal(title);
+  const sharedTerms = querySignal.meaningfulTokens.filter((token) =>
+    jobSignal.expandedTokens.includes(token),
+  );
+  const sharedModifierTerms = sharedTerms.filter((token) => token !== querySignal.headWord);
+  const sameFamily =
+    Boolean(querySignal.family && jobSignal.family) &&
+    querySignal.family === jobSignal.family;
+  const compatibleHead = areClientTitleHeadsCompatible(
+    querySignal.headWord,
+    jobSignal.headWord,
+  );
+
+  if (sameFamily && compatibleHead) {
+    return true;
   }
 
-  const queryTerms = query.split(" ").filter((term) => term.length > 2);
-  return queryTerms.length > 0 && queryTerms.every((term) => title.includes(term));
+  if (sameFamily && sharedModifierTerms.length > 0) {
+    return true;
+  }
+
+  if (compatibleHead && sharedModifierTerms.length > 0) {
+    return true;
+  }
+
+  const requiredTerms = querySignal.meaningfulTokens.filter((term) => term.length > 2);
+  return requiredTerms.length > 0 && requiredTerms.every((term) => jobSignal.expandedTokens.includes(term));
+}
+
+type ClientTitleFamily =
+  | "software_engineering"
+  | "data_platform"
+  | "data_analytics"
+  | "ai_ml_science"
+  | "product"
+  | "program_management"
+  | "cloud_devops_security"
+  | "architecture_solutions"
+  | "design_content_marketing"
+  | "qa_support_it"
+  | "business_operations_people";
+
+type ClientTitleSignal = {
+  normalized: string;
+  tokens: string[];
+  expandedTokens: string[];
+  meaningfulTokens: string[];
+  headWord?: string;
+  family?: ClientTitleFamily;
+};
+
+const clientTitleStopTerms = new Set([
+  "and",
+  "for",
+  "in",
+  "of",
+  "the",
+  "to",
+  "with",
+  "job",
+  "jobs",
+  "role",
+  "roles",
+  "senior",
+  "sr",
+  "junior",
+  "jr",
+  "lead",
+  "staff",
+  "principal",
+  "associate",
+  "ii",
+  "iii",
+  "iv",
+  "v",
+]);
+
+const clientTitleHeadWords = [
+  "engineer",
+  "developer",
+  "scientist",
+  "analyst",
+  "manager",
+  "owner",
+  "designer",
+  "writer",
+  "architect",
+  "consultant",
+  "administrator",
+  "specialist",
+  "coordinator",
+  "recruiter",
+  "tester",
+];
+
+const clientTitleFamilyKeywords: Array<{
+  family: ClientTitleFamily;
+  phrases: string[];
+  terms: string[];
+}> = [
+  {
+    family: "software_engineering",
+    phrases: ["software", "backend", "back end", "frontend", "front end", "full stack", "web", "mobile", "ios", "android", "platform", "api", "distributed systems"],
+    terms: ["software", "backend", "frontend", "fullstack", "developer", "web", "mobile", "ios", "android", "platform", "api", "systems"],
+  },
+  {
+    family: "data_platform",
+    phrases: ["data engineer", "analytics engineer", "data platform", "data warehouse", "etl", "database", "big data", "data integration"],
+    terms: ["data", "analytics", "warehouse", "etl", "database", "pipeline", "spark", "dbt", "bigquery"],
+  },
+  {
+    family: "data_analytics",
+    phrases: ["data analyst", "business analyst", "product analyst", "business intelligence", "reporting analyst", "financial analyst", "marketing analyst", "insights"],
+    terms: ["analyst", "analytics", "business", "product", "intelligence", "reporting", "financial", "marketing", "insights", "strategy"],
+  },
+  {
+    family: "ai_ml_science",
+    phrases: ["machine learning", "artificial intelligence", "applied scientist", "research scientist", "data scientist", "deep learning", "computer vision", "natural language", "generative ai", "large language model"],
+    terms: ["ml", "ai", "llm", "nlp", "vision", "scientist", "research", "applied", "learning", "model", "models", "mlops", "data"],
+  },
+  {
+    family: "product",
+    phrases: ["product manager", "technical product", "product owner", "growth product", "platform product", "associate product"],
+    terms: ["product", "pm", "apm", "owner", "growth", "platform"],
+  },
+  {
+    family: "program_management",
+    phrases: ["program manager", "technical program", "project manager", "delivery manager", "scrum master"],
+    terms: ["program", "project", "delivery", "scrum", "tpm"],
+  },
+  {
+    family: "cloud_devops_security",
+    phrases: ["devops", "site reliability", "cloud", "infrastructure", "security", "devsecops", "network"],
+    terms: ["devops", "sre", "cloud", "infrastructure", "security", "devsecops", "network", "reliability"],
+  },
+  {
+    family: "architecture_solutions",
+    phrases: ["solutions engineer", "solution engineer", "solutions architect", "sales engineer", "pre sales", "customer engineer"],
+    terms: ["solutions", "solution", "sales", "customer", "architect", "presales"],
+  },
+  {
+    family: "design_content_marketing",
+    phrases: ["product designer", "ux", "ui", "technical writer", "content designer", "documentation", "marketing"],
+    terms: ["designer", "design", "ux", "ui", "writer", "writing", "content", "documentation", "marketing"],
+  },
+  {
+    family: "qa_support_it",
+    phrases: ["qa", "quality assurance", "test engineer", "sdet", "support engineer", "it support"],
+    terms: ["qa", "quality", "test", "tester", "sdet", "support", "it"],
+  },
+  {
+    family: "business_operations_people",
+    phrases: ["business operations", "operations", "recruiter", "people", "hr", "talent"],
+    terms: ["business", "operations", "recruiter", "people", "hr", "talent"],
+  },
+];
+
+function buildClientTitleSignal(normalized: string): ClientTitleSignal {
+  const expanded = expandClientTitleText(normalized);
+  const tokens = expanded.split(" ").filter(Boolean);
+  const meaningfulTokens = tokens.filter((token) => !clientTitleStopTerms.has(token));
+  const headWord = [...meaningfulTokens].reverse().find((token) =>
+    clientTitleHeadWords.includes(token),
+  );
+
+  return {
+    normalized,
+    tokens,
+    expandedTokens: Array.from(new Set(tokens)),
+    meaningfulTokens: Array.from(new Set(meaningfulTokens)),
+    headWord,
+    family: inferClientTitleFamily(expanded, meaningfulTokens, headWord),
+  };
+}
+
+function expandClientTitleText(normalized: string) {
+  return normalizeSearchText(
+    normalized
+      .replace(/\bml\b/g, "machine learning ml")
+      .replace(/\bai\b/g, "artificial intelligence ai")
+      .replace(/\bllm\b/g, "large language model llm")
+      .replace(/\bnlp\b/g, "natural language processing nlp")
+      .replace(/\bsre\b/g, "site reliability engineer sre")
+      .replace(/\bsdet\b/g, "software development engineer test sdet")
+      .replace(/\bux\b/g, "user experience ux")
+      .replace(/\bui\b/g, "user interface ui")
+      .replace(/\bpm\b/g, "product manager pm")
+      .replace(/\btpm\b/g, "technical program manager tpm"),
+  );
+}
+
+function inferClientTitleFamily(
+  normalized: string,
+  tokens: string[],
+  headWord?: string,
+): ClientTitleFamily | undefined {
+  const tokenSet = new Set(tokens);
+  const scored = clientTitleFamilyKeywords
+    .map((definition) => {
+      const phraseScore = definition.phrases.filter((phrase) =>
+        normalized.includes(normalizeSearchText(phrase)),
+      ).length * 3;
+      const termScore = definition.terms.filter((term) => tokenSet.has(term)).length;
+      const headScore =
+        headWord && definition.terms.includes(headWord)
+          ? 1
+          : 0;
+      return {
+        family: definition.family,
+        score: phraseScore + termScore + headScore,
+      };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score);
+
+  return scored[0]?.family;
+}
+
+function areClientTitleHeadsCompatible(left?: string, right?: string) {
+  if (!left || !right) {
+    return false;
+  }
+
+  if (left === right) {
+    return true;
+  }
+
+  const pairs = [
+    ["engineer", "developer"],
+    ["manager", "owner"],
+    ["architect", "consultant"],
+    ["tester", "engineer"],
+    ["designer", "writer"],
+  ];
+
+  return pairs.some(([first, second]) =>
+    (left === first && right === second) || (left === second && right === first),
+  );
 }
 
 function matchesActiveSearchLocation(job: JobListing, filters: SearchFilters) {

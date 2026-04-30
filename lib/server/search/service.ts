@@ -25,6 +25,8 @@ import {
 } from "@/lib/server/search/session-service";
 import { getIndexedJobsForSearch } from "@/lib/server/search/indexed-jobs";
 import { InputValidationError, isInputValidationError } from "@/lib/server/search/errors";
+import { parseGeoIntentFromFilters } from "@/lib/server/geo/parse";
+import { analyzeTitle } from "@/lib/server/title-retrieval";
 import {
   attachSearchTraceStage,
   buildSearchIntentTracePayload,
@@ -216,11 +218,43 @@ function initializeSearchTrace(input: {
     normalizedFilters: input.normalizedFilters,
     timestamp: input.timestamp,
   });
+  const titleAnalysis = analyzeTitle(input.normalizedFilters.title);
+  const geoIntent = parseGeoIntentFromFilters(input.normalizedFilters);
+  const intentDiagnostics = {
+    traceId: input.traceId,
+    titleIntent: {
+      normalized: titleAnalysis.normalized,
+      strippedNormalized: titleAnalysis.strippedNormalized,
+      canonicalTitle: titleAnalysis.canonicalTitle,
+      family: titleAnalysis.family,
+      roleGroup: titleAnalysis.roleGroup,
+      primaryConceptId: titleAnalysis.primaryConceptId,
+      matchedConceptIds: titleAnalysis.matchedConceptIds,
+      candidateConceptIds: titleAnalysis.candidateConceptIds.slice(0, 10),
+      meaningfulTokens: titleAnalysis.meaningfulTokens,
+    },
+    geoIntent: {
+      rawInput: geoIntent.rawInput,
+      normalizedInput: geoIntent.normalizedInput,
+      scope: geoIntent.scope,
+      country: geoIntent.country,
+      region: geoIntent.region,
+      city: geoIntent.city,
+      isRemote: geoIntent.isRemote,
+      isCountryWide: geoIntent.isCountryWide,
+      confidence: geoIntent.confidence,
+      searchKeys: geoIntent.searchKeys,
+    },
+    hasTitleFilter: titleAnalysis.normalized.length > 0,
+    hasLocationFilter: geoIntent.scope !== "none",
+  };
+  console.info("[search:intent]", intentDiagnostics);
   const intentTrace = emitSearchTraceStage("intent", {
     ...buildSearchIntentTracePayload({
       traceId: input.traceId,
       filters: input.normalizedFilters,
     }),
+    ...intentDiagnostics,
     searchId: input.searchId,
     searchSessionId: input.searchSessionId,
   });

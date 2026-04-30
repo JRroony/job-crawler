@@ -1,0 +1,34 @@
+Crawler benchmark 2026-04-28T08:42:20.923Z
+Database: job_crawler_benchmark (127.0.0.1:27017)
+Mode: fast
+Scenarios: 1
+
+Totals
+  Jobs fetched: 821
+  Jobs normalized: 821
+  Jobs saved to MongoDB: 18
+  Search results from DB: 18
+  Duplicate ratio: 10.0% (2 duplicates)
+  Invalid URL count: 0
+  Expired job count: 0
+  Total crawl duration: 62.8s
+
+Scenario Summary
+  Data Analyst, United States | status=partial | fetched=821 | normalized=821 | saved=18 | dbSearch=18 | dupRatio=10.0% | invalidUrls=0 | expired=0 | duration=62.8s
+
+Scenario Distributions
+  Data Analyst, United States
+    titleRelevance=adjacent_concept:11, canonical_variant:4, exact:1, same_family_related:1, synonym:1
+    seniority=mid:2, senior:13, staff:1, unknown:2
+    location=city_state_us:13, country_philippines:1, remote_us:4
+
+Provider Summary
+  Data Analyst, United States
+    ashby | status=success | sources=10 | fetched=413 | normalized=413 | matched=8 | saved=8 | invalidUrls=0 | duration=7.8s
+    greenhouse | status=partial | sources=10 | fetched=115 | normalized=115 | matched=11 | saved=9 | invalidUrls=0 | duration=7.3s
+    lever | status=partial | sources=10 | fetched=293 | normalized=293 | matched=1 | saved=1 | invalidUrls=0 | duration=8.9s
+    smartrecruiters | status=timed_out | sources=0 | fetched=0 | normalized=0 | matched=0 | saved=0 | invalidUrls=0 | duration=0ms
+
+Artifacts
+  JSON: /Users/admin/Projects/job-crawler/artifacts/benchmark-results/crawler-benchmark-2026-04-28T08-42-20-923Z.json
+  Summary: /Users/admin/Projects/job-crawler/artifacts/benchmark-results/crawler-benchmark-2026-04-28T08-42-20-923Z.txt

@@ -73,7 +73,10 @@ export function labelForExperience(level?: string) {
     junior: "Junior",
     mid: "Mid",
     senior: "Senior",
-    lead: "Lead / Manager",
+    lead: "Lead",
+    manager: "Manager",
+    director: "Director",
+    executive: "Executive",
     staff: "Staff",
     principal: "Principal",
   };

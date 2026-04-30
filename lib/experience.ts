@@ -44,6 +44,10 @@ export function resolveExperienceBand(
     return "leadership";
   }
 
+  if (level === "manager" || level === "director" || level === "executive") {
+    return "leadership";
+  }
+
   if (level === "staff" || level === "principal") {
     return "advanced";
   }

@@ -170,6 +170,25 @@ describe("experience classification", () => {
     });
   });
 
+  it.each([
+    ["Engineering Manager", "manager"],
+    ["Director of Engineering", "director"],
+    ["VP of Data", "executive"],
+    ["Chief Technology Officer", "executive"],
+  ] as const)("classifies clear leadership title %s as %s", (title, expected) => {
+    const classification = classifyExperience({ title });
+
+    expect(classification).toMatchObject({
+      explicitLevel: expected,
+      experienceBand: "leadership",
+      source: "title",
+      isUnspecified: false,
+      diagnostics: {
+        finalSeniority: expected,
+      },
+    });
+  });
+
   it("keeps ambiguous company-specific acronyms unknown when confidence is low", () => {
     const classification = classifyExperience({
       title: "Software Engineer",
@@ -238,8 +257,10 @@ describe("inferExperienceLevel", () => {
     ["Software Engineer II", "mid"],
     ["Senior Software Engineer", "senior"],
     ["Lead Backend Engineer", "lead"],
-    ["Engineering Manager", "lead"],
-    ["Director of Engineering", "lead"],
+    ["Engineering Manager", "manager"],
+    ["Director of Engineering", "director"],
+    ["VP of Engineering", "executive"],
+    ["Chief Technology Officer", "executive"],
     ["Staff Data Engineer", "staff"],
     ["Principal Software Engineer", "principal"],
     ["Software Engineer III", "senior"],

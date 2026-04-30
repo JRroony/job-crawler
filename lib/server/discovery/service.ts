@@ -116,6 +116,7 @@ export const defaultDiscoveryService: DiscoveryService = createDiscoveryService(
 type DiscoveryExecutionInput = DiscoveryInput & {
   env: DiscoveryEnvSnapshot;
   repository?: JobCrawlerRepository;
+  skipInventoryBootstrap?: boolean;
 };
 
 export async function discoverSources(input: DiscoveryExecutionInput) {
@@ -766,6 +767,7 @@ export async function expandSourceInventory(input: {
           useCanadaHighDemandExpansion ? 20 : 6,
         ),
       },
+      skipInventoryBootstrap: true,
     });
 
     searchDiagnostics.push({
@@ -909,11 +911,233 @@ async function loadInventorySources(
   const selectedInventoryPlatforms = selectedPlatforms
     ? Array.from(selectedPlatforms).filter(isInventoryPlatform)
     : undefined;
-  const records = await input.repository.listSourceInventory(
+  let records = await input.repository.listSourceInventory(
     selectedInventoryPlatforms,
   );
 
-  return records.map(toDiscoveredSourceFromInventory);
+  if (records.length === 0 && !input.skipInventoryBootstrap) {
+    await refreshSourceInventory({
+      repository: input.repository,
+      now: input.now,
+      env: input.env,
+      fetchImpl: input.fetchImpl,
+    });
+    records = await input.repository.listSourceInventory(selectedInventoryPlatforms);
+    console.info("[discovery:inventory-bootstrap]", {
+      filters: input.filters,
+      selectedPlatforms: selectedInventoryPlatforms,
+      bootstrappedCount: records.length,
+      platformCounts: summarizeInventoryRecordPlatformCounts(records),
+    });
+  }
+
+  return rankSourceInventoryRecordsForSearch(records, input.filters, input.now).map(
+    toDiscoveredSourceFromInventory,
+  );
+}
+
+export function rankSourceInventoryRecordsForSearch(
+  records: SourceInventoryRecord[],
+  filters: Pick<SearchFilters, "title" | "country" | "state" | "city">,
+  now: Date = new Date(),
+) {
+  const preferredTags = resolvePreferredInventoryTags(filters);
+  const geoTags = resolvePreferredInventoryGeoTags(filters);
+  const nowMs = now.getTime();
+
+  return records
+    .map((record, index) => ({
+      record,
+      index,
+      score: scoreSourceInventoryRecord(record, {
+        preferredTags,
+        geoTags,
+        nowMs,
+      }),
+    }))
+    .sort((left, right) => {
+      if (left.score !== right.score) {
+        return left.score - right.score;
+      }
+
+      if (left.record.crawlPriority !== right.record.crawlPriority) {
+        return left.record.crawlPriority - right.record.crawlPriority;
+      }
+
+      if (left.record.inventoryRank !== right.record.inventoryRank) {
+        return left.record.inventoryRank - right.record.inventoryRank;
+      }
+
+      return left.index - right.index;
+    })
+    .map(({ record }) => record);
+}
+
+function scoreSourceInventoryRecord(
+  record: SourceInventoryRecord,
+  input: {
+    preferredTags: Set<string>;
+    geoTags: Set<string>;
+    nowMs: number;
+  },
+) {
+  let score = record.inventoryRank + record.crawlPriority * 0.5;
+
+  if (record.status !== "active") {
+    score += 100_000;
+  }
+
+  score += resolveInventoryHealthPenalty(record.health);
+
+  const nextEligibleAtMs = record.nextEligibleAt ? Date.parse(record.nextEligibleAt) : NaN;
+  if (Number.isFinite(nextEligibleAtMs) && nextEligibleAtMs > input.nowMs) {
+    score += 20_000 + Math.min(30_000, Math.ceil((nextEligibleAtMs - input.nowMs) / 60_000));
+  }
+
+  const coverageTags = readInventoryCoverageTags(record);
+  for (const tag of coverageTags) {
+    if (input.preferredTags.has(tag)) {
+      score -= 10_000;
+    }
+
+    if (input.geoTags.has(tag)) {
+      score -= 1_500;
+    }
+  }
+
+  if (input.geoTags.has("united_states") && record.sourceMetadata.unitedStatesRelevant === true) {
+    score -= 800;
+  }
+
+  if (input.geoTags.has("canada") && record.sourceMetadata.canadaRelevant === true) {
+    score -= 800;
+  }
+
+  if (record.confidence === "high") {
+    score -= 50;
+  } else if (record.confidence === "low") {
+    score += 150;
+  }
+
+  return score;
+}
+
+function resolveInventoryHealthPenalty(health: SourceInventoryRecord["health"]) {
+  switch (health) {
+    case "healthy":
+      return 0;
+    case "unknown":
+      return 250;
+    case "degraded":
+      return 2_500;
+    case "failing":
+      return 8_000;
+  }
+}
+
+function resolvePreferredInventoryTags(
+  filters: Pick<SearchFilters, "title">,
+) {
+  const tags = new Set<string>();
+  const title = normalizeTitleText(filters.title);
+  const analysis = analyzeTitle(title);
+
+  const add = (...values: string[]) => {
+    values.forEach((value) => {
+      const tag = normalizeInventoryTag(value);
+      if (tag) {
+        tags.add(tag);
+      }
+    });
+  };
+
+  switch (analysis.family) {
+    case "data_analytics":
+      add(
+        "data",
+        "analytics",
+        "analytics_high_yield",
+        "business_intelligence",
+        "bi",
+        "reporting",
+        "product_analytics",
+      );
+      break;
+    case "software_engineering":
+      add("software", "engineering", "developer_tools", "infrastructure", "platform", "cloud");
+      break;
+    case "ai_ml_science":
+      add("ai", "machine_learning", "data", "analytics", "infrastructure");
+      break;
+    case "product":
+      add("product", "product_management", "growth", "platform", "productivity");
+      break;
+  }
+
+  if (/\b(?:analyst|analytics|business intelligence|bi|reporting|insights)\b/.test(title)) {
+    add("data", "analytics", "analytics_high_yield", "business_intelligence", "bi", "reporting");
+  }
+
+  if (/\b(?:engineer|developer|software|platform|infrastructure|devops|sre)\b/.test(title)) {
+    add("software", "engineering", "developer_tools", "infrastructure", "platform");
+  }
+
+  if (/\b(?:product manager|product owner|growth product|platform product)\b/.test(title)) {
+    add("product", "product_management", "growth", "platform");
+  }
+
+  return tags;
+}
+
+function resolvePreferredInventoryGeoTags(
+  filters: Pick<SearchFilters, "country" | "state" | "city">,
+) {
+  const tags = new Set<string>();
+  const country = normalizeDiscoveryText(filters.country);
+  const state = normalizeDiscoveryText(filters.state);
+  const city = normalizeDiscoveryText(filters.city);
+
+  if (
+    country === "united states" ||
+    country === "usa" ||
+    country === "us" ||
+    /\b(?:seattle|bellevue|austin|new york|san jose|boston|chicago)\b/.test(city) ||
+    /\b(?:wa|washington|tx|texas|ny|new york|ca|california|ma|massachusetts|il|illinois)\b/.test(state)
+  ) {
+    tags.add("united_states");
+    tags.add("remote");
+    tags.add("global");
+  }
+
+  if (
+    country === "canada" ||
+    /\b(?:toronto|vancouver|montreal|calgary|ottawa)\b/.test(city) ||
+    /\b(?:on|ontario|bc|british columbia|qc|quebec|ab|alberta)\b/.test(state)
+  ) {
+    tags.add("canada");
+    tags.add("canada_possible");
+    tags.add("remote");
+    tags.add("global");
+  }
+
+  return tags;
+}
+
+function readInventoryCoverageTags(record: SourceInventoryRecord) {
+  const rawTags = record.sourceMetadata.coverageTags;
+  if (!Array.isArray(rawTags)) {
+    return [];
+  }
+
+  return rawTags
+    .filter((value): value is string => typeof value === "string")
+    .map(normalizeInventoryTag)
+    .filter((value): value is string => Boolean(value));
+}
+
+function normalizeInventoryTag(value: string) {
+  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function isInventoryPlatform(

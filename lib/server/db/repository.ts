@@ -1090,34 +1090,53 @@ export class JobCrawlerRepository {
     }
     console.info("[search:candidate-query]", {
       traceId: options.traceId,
+      rawFilters: filters,
       hasLocationFilter: candidateQuery.diagnostics.hasLocationFilter,
       hasTitleFilter: candidateQuery.diagnostics.hasTitleFilter,
+      hasTitleConstraint: candidateQuery.diagnostics.hasTitleConstraint,
+      hasLocationConstraint: candidateQuery.diagnostics.hasLocationConstraint,
       queryShape: candidateQuery.diagnostics.queryShape,
-      channelNames: candidateQuery.diagnostics.channelNames,
-      titleChannelsRequireLocation: candidateQuery.diagnostics.titleChannelsRequireLocation,
+      titleChannels: candidateQuery.diagnostics.titleChannels,
+      locationConstraintAppliedToEveryTitleChannel:
+        candidateQuery.diagnostics.locationConstraintAppliedToEveryTitleChannel,
+      usesGeoOnlyChannelForVisibleResults:
+        candidateQuery.diagnostics.usesGeoOnlyChannelForVisibleResults,
+      usesTitleOnlyChannelForLocationSearch:
+        candidateQuery.diagnostics.usesTitleOnlyChannelForLocationSearch,
       limit: candidateQuery.limit,
     });
-    const channelResults = await Promise.all(
-      candidateQuery.channels.map(async (channel) => ({
-        channel,
-        documents: await this.jobs()
-          .find(channel.filter, {
-            sort: channel.sort,
-            limit: channel.limit,
-          })
-          .toArray(),
-      })),
-    );
+    const channelResults =
+      candidateQuery.channels.length > 0
+        ? await Promise.all(
+            candidateQuery.channels.map(async (channel) => ({
+              channel,
+              documents: await this.jobs()
+                .find(channel.filter, {
+                  sort: channel.sort,
+                  limit: channel.limit,
+                })
+                .toArray(),
+            })),
+          )
+        : [];
     const candidateChannelBreakdown = buildIndexedCandidateChannelBreakdown(
       channelResults.map((result) => ({
         channelName: result.channel.name,
         count: result.documents.length,
       })),
     );
-    const documents = mergeIndexedCandidateChannelDocuments(
-      channelResults.map((result) => result.documents),
-      candidateQuery.mergedCandidateLimit,
-    );
+    const documents =
+      channelResults.length > 0
+        ? mergeIndexedCandidateChannelDocuments(
+            channelResults.map((result) => result.documents),
+            candidateQuery.mergedCandidateLimit,
+          )
+        : await this.jobs()
+            .find(candidateQuery.filter, {
+              sort: candidateQuery.sort,
+              limit: candidateQuery.limit,
+            })
+            .toArray();
     candidateChannelBreakdown.mergedCandidateCount = documents.length;
     const diagnostics = {
       ...candidateQuery.diagnostics,

@@ -63,7 +63,7 @@ const remoteUnitedStatesAliasList = [
   "remote us only",
 ];
 
-const ambiguousStateCodes = new Set(["AS", "HI", "ID", "IN", "ME", "OR"]);
+const ambiguousStateCodes = new Set(["AS", "CA", "HI", "ID", "IN", "ME", "OR"]);
 
 const usStateEntries: UsState[] = [
   { code: "AL", name: "Alabama" },
@@ -254,6 +254,11 @@ export function resolveUsState(value?: string) {
 export function resolveUsStateCode(value?: string) {
   const stateName = resolveUsState(value);
   return stateName ? usStateCodeByName.get(stateName) : undefined;
+}
+
+export function isAmbiguousUsStateCode(value?: string) {
+  const normalized = value?.trim().toUpperCase();
+  return normalized ? ambiguousStateCodes.has(normalized) : false;
 }
 
 export function isUnitedStatesValue(value?: string) {

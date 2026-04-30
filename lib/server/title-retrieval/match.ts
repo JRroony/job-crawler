@@ -8,6 +8,7 @@ import {
 } from "@/lib/server/title-retrieval/catalog";
 import { analyzeTitle } from "@/lib/server/title-retrieval/analyze";
 import { buildTitleQueryVariants } from "@/lib/server/title-retrieval/build-queries";
+import { extractMeaningfulTokens } from "@/lib/server/title-retrieval/normalize";
 import type {
   TitleAnalysis,
   TitleMatchMode,
@@ -127,6 +128,23 @@ export function getTitleMatchResult(
       matchedTerms: sharedTerms(query, job),
       penalties,
       explanation: "The titles map to adjacent concepts in the same role family.",
+    });
+  }
+
+  const relevantCrossFamilyConceptId = findRelevantCrossFamilyConcept(query, job);
+  if (relevantCrossFamilyConceptId) {
+    return buildScoredMatchResult({
+      mode,
+      threshold,
+      tier: "adjacent_concept",
+      baseScore: 610,
+      query,
+      job,
+      matchedConceptId: relevantCrossFamilyConceptId,
+      matchedTerms: sharedTerms(query, job),
+      penalties,
+      explanation:
+        "The titles map to a controlled cross-family analytics relationship with domain-specific modifiers.",
     });
   }
 
@@ -484,7 +502,7 @@ function collectMatchPenalties(query: TitleAnalysis, job: TitleAnalysis) {
     job.matchedConceptIds.some((jobConceptId) =>
       areTitleConceptsAdjacent(queryConceptId, jobConceptId),
     ),
-  );
+  ) || Boolean(findRelevantCrossFamilyConcept(query, job));
   const sharedPrimaryFamily =
     Boolean(queryConcept?.family) &&
     Boolean(jobConcept?.family) &&
@@ -598,6 +616,47 @@ function findAdjacentConcept(query: TitleAnalysis, job: TitleAnalysis) {
     job.matchedConceptIds.some((jobConceptId) =>
       areTitleConceptsAdjacent(queryConceptId, jobConceptId),
     ),
+  );
+}
+
+function findRelevantCrossFamilyConcept(query: TitleAnalysis, job: TitleAnalysis) {
+  if (isModifierQualifiedDataScientistMatch(query, job)) {
+    return "data_scientist";
+  }
+
+  return undefined;
+}
+
+function isModifierQualifiedDataScientistMatch(query: TitleAnalysis, job: TitleAnalysis) {
+  if (query.primaryConceptId !== "data_analyst" || job.primaryConceptId !== "data_scientist") {
+    return false;
+  }
+
+  const analystConcept = getTitleConcept("data_analyst");
+  if (!analystConcept) {
+    return false;
+  }
+
+  const analystSignals = new Set(buildConceptSignalTokensForMatch(analystConcept));
+  const scientistModifiers = job.meaningfulTokens.filter((token) => token !== "data");
+  return (
+    scientistModifiers.length > 0 &&
+    scientistModifiers.some((token) => analystSignals.has(token))
+  );
+}
+
+function buildConceptSignalTokensForMatch(
+  concept: NonNullable<ReturnType<typeof getTitleConcept>>,
+) {
+  const phrases = [
+    concept.canonicalTitle,
+    ...(concept.aliases ?? []),
+    ...(concept.tokenSynonyms ?? []).flat(),
+    ...(concept.broadDiscoveryQueries ?? []),
+  ];
+
+  return Array.from(
+    new Set(phrases.flatMap((phrase) => extractMeaningfulTokens(phrase)).filter(Boolean)),
   );
 }
 

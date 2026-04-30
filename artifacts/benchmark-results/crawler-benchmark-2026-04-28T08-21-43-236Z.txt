@@ -1,0 +1,64 @@
+Crawler benchmark 2026-04-28T08:21:43.236Z
+Database: job_crawler_benchmark (127.0.0.1:27017)
+Mode: fast
+Scenarios: 4
+
+Totals
+  Jobs fetched: 3024
+  Jobs normalized: 3034
+  Jobs saved to MongoDB: 133
+  Search results from DB: 133
+  Duplicate ratio: 0.0% (0 duplicates)
+  Invalid URL count: 0
+  Expired job count: 0
+  Total crawl duration: 262.2s
+
+Scenario Summary
+  Software Engineer, United States | status=partial | fetched=715 | normalized=715 | saved=93 | dbSearch=93 | dupRatio=0.0% | invalidUrls=0 | expired=0 | duration=59.8s
+  Data Analyst, United States | status=partial | fetched=671 | normalized=671 | saved=4 | dbSearch=4 | dupRatio=0.0% | invalidUrls=0 | expired=0 | duration=62.0s
+  Product Manager, United States | status=partial | fetched=711 | normalized=711 | saved=19 | dbSearch=19 | dupRatio=0.0% | invalidUrls=0 | expired=0 | duration=60.9s
+  Machine Learning Engineer, United States | status=partial | fetched=927 | normalized=937 | saved=17 | dbSearch=17 | dupRatio=0.0% | invalidUrls=0 | expired=0 | duration=79.5s
+
+Scenario Distributions
+  Software Engineer, United States
+    titleRelevance=adjacent_concept:7, canonical_variant:16, exact:3, same_family_related:67
+    seniority=intern:5, lead:1, mid:2, new_grad:4, principal:1, senior:17, staff:8, unknown:55
+    location=city_state_us:93
+  Data Analyst, United States
+    titleRelevance=adjacent_concept:1, canonical_variant:2, exact:1
+    seniority=lead:1, mid:2, unknown:1
+    location=city_state_us:4
+  Product Manager, United States
+    titleRelevance=canonical_variant:4, exact:2, generic_token_overlap:2, same_family_related:9, synonym:2
+    seniority=lead:1, manager:1, mid:3, senior:6, staff:4, unknown:4
+    location=city_state_us:19
+  Machine Learning Engineer, United States
+    titleRelevance=adjacent_concept:11, canonical_variant:3, same_family_related:2, synonym:1
+    seniority=lead:1, mid:2, senior:8, staff:2, unknown:4
+    location=city_state_us:17
+
+Provider Summary
+  Software Engineer, United States
+    ashby | status=timed_out | sources=10 | fetched=126 | normalized=521 | matched=23 | saved=23 | invalidUrls=0 | duration=9.4s
+    greenhouse | status=failed | sources=10 | fetched=0 | normalized=0 | matched=0 | saved=0 | invalidUrls=0 | duration=8.2s
+    lever | status=timed_out | sources=10 | fetched=0 | normalized=194 | matched=0 | saved=0 | invalidUrls=0 | duration=9.4s
+    smartrecruiters | status=running | sources=0 | fetched=0 | normalized=0 | matched=0 | saved=0 | invalidUrls=0 | duration=0ms
+  Data Analyst, United States
+    ashby | status=timed_out | sources=10 | fetched=141 | normalized=351 | matched=0 | saved=0 | invalidUrls=0 | duration=10.2s
+    greenhouse | status=partial | sources=10 | fetched=126 | normalized=126 | matched=2 | saved=2 | invalidUrls=0 | duration=12.3s
+    lever | status=timed_out | sources=10 | fetched=0 | normalized=194 | matched=0 | saved=0 | invalidUrls=0 | duration=10.3s
+    smartrecruiters | status=timed_out | sources=0 | fetched=0 | normalized=0 | matched=0 | saved=0 | invalidUrls=0 | duration=0ms
+  Product Manager, United States
+    ashby | status=timed_out | sources=10 | fetched=141 | normalized=390 | matched=1 | saved=1 | invalidUrls=0 | duration=9.3s
+    greenhouse | status=partial | sources=10 | fetched=48 | normalized=48 | matched=1 | saved=1 | invalidUrls=0 | duration=7.6s
+    lever | status=timed_out | sources=10 | fetched=12 | normalized=273 | matched=2 | saved=2 | invalidUrls=0 | duration=9.3s
+    smartrecruiters | status=timed_out | sources=0 | fetched=0 | normalized=0 | matched=0 | saved=0 | invalidUrls=0 | duration=0ms
+  Machine Learning Engineer, United States
+    ashby | status=timed_out | sources=10 | fetched=141 | normalized=521 | matched=0 | saved=0 | invalidUrls=0 | duration=9.2s
+    greenhouse | status=partial | sources=10 | fetched=126 | normalized=126 | matched=0 | saved=0 | invalidUrls=0 | duration=7.3s
+    lever | status=timed_out | sources=10 | fetched=13 | normalized=280 | matched=0 | saved=0 | invalidUrls=0 | duration=9.2s
+    smartrecruiters | status=timed_out | sources=0 | fetched=0 | normalized=0 | matched=0 | saved=0 | invalidUrls=0 | duration=0ms
+
+Artifacts
+  JSON: /Users/admin/Projects/job-crawler/artifacts/benchmark-results/crawler-benchmark-2026-04-28T08-21-43-236Z.json
+  Summary: /Users/admin/Projects/job-crawler/artifacts/benchmark-results/crawler-benchmark-2026-04-28T08-21-43-236Z.txt

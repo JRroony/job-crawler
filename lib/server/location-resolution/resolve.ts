@@ -6,10 +6,13 @@ import type {
   ResolvedLocationEvidence,
   ResolvedLocationEvidenceSource,
 } from "@/lib/types";
+import { findCityByAlias, findCountryByAlias } from "@/lib/geo/catalog";
 import {
   analyzeUsLocation,
+  isAmbiguousUsStateCode,
   isUnitedStatesValue,
   normalizeLocationText,
+  resolveUsMetro,
   resolveUsState,
   resolveUsStateCode,
 } from "@/lib/server/locations/us";
@@ -51,7 +54,6 @@ const directLocationKeys = [
   "formattedAddress",
   "address",
   "allLocations",
-  "workplaceType",
 ] as const;
 
 const cityKeys = ["city", "addressLocality", "locality"] as const;
@@ -64,7 +66,7 @@ const officePathPattern = /(office|offices)/i;
 const descriptionPathPattern =
   /(description|summary|overview|requirements|qualifications|content)/i;
 const descriptionLocationHintPattern =
-  /(remote|located|location|based|reside|eligible|must be in|within)/i;
+  /(remote|located|location|\bresid(?:e|es|ing)\b|eligible|eligibility|must be in|within|based\s+(?:in|out of|within|near))/i;
 
 export function resolveJobLocation(input: ResolveJobLocationInput): ResolvedLocation {
   const candidates = collectLocationCandidates(input);
@@ -201,6 +203,10 @@ function collectMetadataCandidates(rawSourceMetadata?: Record<string, unknown>) 
 
     if (typeof node === "string") {
       const pathLabel = path.join(".");
+      if (isBareWorkplaceModeMetadata(pathLabel, node)) {
+        return;
+      }
+
       if (descriptionPathPattern.test(pathLabel)) {
         extractDescriptionLocationHints(node).forEach((hint) =>
           candidates.push({
@@ -239,6 +245,13 @@ function collectMetadataCandidates(rawSourceMetadata?: Record<string, unknown>) 
   }
 }
 
+function isBareWorkplaceModeMetadata(pathLabel: string, value: string) {
+  return (
+    /\bworkplace(?:Type|Mode)?\b/i.test(pathLabel) &&
+    /^(?:remote|hybrid|onsite|on site)$/i.test(value.trim())
+  );
+}
+
 function buildStructuredLocationFromRecord(record: Record<string, unknown>) {
   const directLocation = firstString(record, directLocationKeys);
   if (directLocation) {
@@ -255,6 +268,7 @@ function buildStructuredLocationFromRecord(record: Record<string, unknown>) {
 function resolveCandidate(candidate: LocationCandidate): ResolvedCandidate | undefined {
   const analysis = analyzeUsLocation(candidate.value);
   const internationalAnalysis = analyzeSupportedCountryLocation(candidate.value);
+  const genericForeignLocation = resolveGenericForeignLocation(candidate.value);
   const eligibilityHint = isEligibilityCandidate(candidate);
   const structuredParts = eligibilityHint
     ? { city: undefined, state: undefined, stateCode: undefined }
@@ -265,30 +279,40 @@ function resolveCandidate(candidate: LocationCandidate): ResolvedCandidate | und
     analysis.stateCode ??
     (state ? resolveUsStateCode(state) : undefined);
   const city = structuredParts.city ?? analysis.city;
+  const preferGenericForeignLocation =
+    genericForeignLocation &&
+    shouldPreferGenericForeignLocation(candidate.value, {
+      stateCode,
+      city,
+      genericForeignLocation,
+    });
   const isUnitedStates =
-    analysis.isUnitedStates ||
-    Boolean(state) ||
-    isUnitedStatesValue(candidate.value);
+    !preferGenericForeignLocation &&
+    (analysis.isUnitedStates ||
+      Boolean(state) ||
+      isUnitedStatesValue(candidate.value));
 
   if (!isUnitedStates) {
     const normalizedCountry =
-      internationalAnalysis.country ?? normalizeCountryValue(candidate.value);
+      internationalAnalysis.country ??
+      genericForeignLocation?.country ??
+      normalizeCountryValue(candidate.value);
     if (!normalizedCountry || normalizedCountry === "United States") {
       return undefined;
     }
 
     const confidence = resolveConfidence(candidate.source, {
-      city: internationalAnalysis.city,
-      state: internationalAnalysis.state,
+      city: internationalAnalysis.city ?? genericForeignLocation?.city,
+      state: internationalAnalysis.state ?? genericForeignLocation?.state,
       isRemote: internationalAnalysis.isRemote,
       explicitUsAlias: false,
     });
 
     const location = compactResolvedLocation({
       country: normalizedCountry,
-      state: internationalAnalysis.state,
-      stateCode: internationalAnalysis.stateCode,
-      city: internationalAnalysis.city,
+      state: internationalAnalysis.state ?? genericForeignLocation?.state,
+      stateCode: internationalAnalysis.stateCode ?? genericForeignLocation?.stateCode,
+      city: internationalAnalysis.city ?? genericForeignLocation?.city,
       isRemote: internationalAnalysis.isRemote,
       isUnitedStates: false,
       confidence,
@@ -302,8 +326,8 @@ function resolveCandidate(candidate: LocationCandidate): ResolvedCandidate | und
       score:
         candidate.priority +
         confidenceScore(confidence) +
-        (internationalAnalysis.city ? 12 : 0) +
-        (internationalAnalysis.state ? 14 : 0),
+        (internationalAnalysis.city ?? genericForeignLocation?.city ? 12 : 0) +
+        (internationalAnalysis.state ?? genericForeignLocation?.state ? 14 : 0),
     };
   }
 
@@ -331,6 +355,112 @@ function resolveCandidate(candidate: LocationCandidate): ResolvedCandidate | und
     role: eligibilityHint || analysis.isRemote ? "eligibility" : "physical",
     score: candidate.priority + confidenceScore(confidence) + (city ? 12 : 0) + (state ? 14 : 0),
   };
+}
+
+function resolveGenericForeignLocation(value: string) {
+  const parts = splitLocationParts(value);
+  const country = [...parts]
+    .reverse()
+    .map(findCountryByAlias)
+    .find((entry) => entry && entry.code !== "US");
+  const cityMatch = parts
+    .flatMap((part) => findCityByAlias(part))
+    .find((entry) => entry.country.code !== "US");
+  const resolvedCountry = cityMatch?.country ?? country;
+
+  if (!resolvedCountry) {
+    return undefined;
+  }
+
+  return {
+    country: resolvedCountry.name,
+    countryCode: resolvedCountry.code,
+    state: cityMatch?.city.regionName,
+    stateCode: cityMatch?.city.regionCode,
+    city: cityMatch?.city.name,
+  };
+}
+
+function shouldPreferGenericForeignLocation(
+  value: string,
+  input: {
+    stateCode: string | undefined;
+    city: string | undefined;
+    genericForeignLocation: NonNullable<ReturnType<typeof resolveGenericForeignLocation>>;
+  },
+) {
+  if (hasExplicitUnitedStatesEvidence(value) || hasRecognizedUsMetroEvidence(value)) {
+    return false;
+  }
+
+  if (
+    input.city &&
+    input.stateCode &&
+    !input.genericForeignLocation.city &&
+    hasCompactUsCityStateEvidence(value, input.stateCode)
+  ) {
+    return false;
+  }
+
+  if (
+    input.stateCode &&
+    !isAmbiguousUsStateCode(input.stateCode) &&
+    !input.genericForeignLocation.city
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function hasCompactUsCityStateEvidence(value: string, stateCode: string) {
+  const parts = splitLocationParts(value);
+  const stateIndex = parts.findIndex((part) => {
+    const stateName = resolveUsState(part);
+    return stateName ? resolveUsStateCode(stateName) === stateCode : false;
+  });
+
+  if (stateIndex !== 1 || !parts[0]) {
+    return false;
+  }
+
+  return parts.slice(stateIndex + 1).every(isScheduleNoisePart);
+}
+
+function isScheduleNoisePart(value: string) {
+  const normalized = normalizeLocationText(value);
+  return (
+    !normalized ||
+    /^(m|t|w|th|f|s|su|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)$/i.test(normalized)
+  );
+}
+
+function hasExplicitUnitedStatesEvidence(value: string) {
+  return splitLocationParts(value).some((part) => {
+    const normalized = normalizeLocationText(part);
+    return (
+      isUnitedStatesValue(part) ||
+      normalized === "remote us" ||
+      normalized === "remote usa" ||
+      normalized === "remote united states"
+    );
+  });
+}
+
+function hasRecognizedUsMetroEvidence(value: string) {
+  if (resolveUsMetro(value)) {
+    return true;
+  }
+
+  const parts = splitLocationParts(value);
+  return parts.some((part, index) => {
+    if (resolveUsMetro(part)) {
+      return true;
+    }
+
+    const nextPart = parts[index + 1];
+    return nextPart ? Boolean(resolveUsMetro(`${part}, ${nextPart}`)) : false;
+  });
 }
 
 function isEligibilityCandidate(candidate: LocationCandidate) {
@@ -594,7 +724,8 @@ function stripLeadingWorkplaceDescriptor(value: string) {
 function sanitizeLocationPart(value: string) {
   return stripLeadingWorkplaceDescriptor(
     value
-      .replace(/\((?:remote|hybrid|onsite|on site)[^)]+\)/gi, " ")
+      .replace(/\((?:remote|hybrid|onsite|on site|in office)[^)]*\)/gi, " ")
+      .replace(/\s+\b(?:remote|hybrid|onsite|on site|in office|office based)\b.*$/i, " ")
       .replace(/\s+/g, " ")
       .trim(),
   );

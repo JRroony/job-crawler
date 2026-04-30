@@ -459,7 +459,47 @@ function canPromoteAliasMatch(
   }
 
   const concept = getTitleConcept(alias.conceptId);
-  return concept ? canPromoteConceptCandidate(concept, meaningfulTokens) : false;
+  if (!concept) {
+    return false;
+  }
+
+  return (
+    canPromoteConceptCandidate(concept, meaningfulTokens) ||
+    canPromoteModifierQualifiedAnalysisAlias(alias, normalizedTitle)
+  );
+}
+
+function canPromoteModifierQualifiedAnalysisAlias(
+  alias: ReturnType<typeof findMatchingTitleAliases>[number],
+  normalizedTitle: string,
+) {
+  if (alias.roleGroup !== "analysis" || alias.phrase === normalizedTitle) {
+    return false;
+  }
+
+  const modifierText = extractAliasModifierText(alias.phrase, normalizedTitle);
+  if (!modifierText) {
+    return false;
+  }
+
+  const modifierTokens = extractMeaningfulTokens(modifierText);
+  if (modifierTokens.length === 0 || modifierTokens.length > 5) {
+    return false;
+  }
+
+  return !extractHeadWord(modifierText);
+}
+
+function extractAliasModifierText(aliasPhrase: string, normalizedTitle: string) {
+  if (normalizedTitle.startsWith(`${aliasPhrase} `)) {
+    return normalizedTitle.slice(aliasPhrase.length).trim();
+  }
+
+  if (normalizedTitle.endsWith(` ${aliasPhrase}`)) {
+    return normalizedTitle.slice(0, -aliasPhrase.length).trim();
+  }
+
+  return undefined;
 }
 
 function buildConceptSignalPhrases(

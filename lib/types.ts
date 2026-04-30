@@ -85,6 +85,9 @@ export const experienceLevels = [
   "mid",
   "senior",
   "lead",
+  "manager",
+  "director",
+  "executive",
   "staff",
   "principal",
 ] as const;

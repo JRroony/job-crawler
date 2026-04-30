@@ -26,6 +26,7 @@ import {
   discoverSourcesDetailed,
   expandSourceInventory,
   listBackgroundInventoryExpansionPortfolio,
+  rankSourceInventoryRecordsForSearch,
   refreshSourceInventory,
   resolvePublicSearchExecutionOptions,
   selectBackgroundInventoryExpansionFilters,
@@ -430,6 +431,15 @@ describe("source discovery", () => {
       sourceMetadata: expect.objectContaining({
         canadaRelevant: true,
         company: "Cohere",
+      }),
+    });
+    expect(seeds.find((record) => record._id === "greenhouse:lyft")).toMatchObject({
+      platform: "greenhouse",
+      inventoryOrigin: "greenhouse_registry",
+      sourceMetadata: expect.objectContaining({
+        unitedStatesRelevant: true,
+        company: "Lyft",
+        coverageTags: expect.arrayContaining(["data", "analytics"]),
       }),
     });
     expect(seeds.find((record) => record._id === "workday:rbc-rbcglobal1")).toMatchObject({
@@ -2827,6 +2837,87 @@ describe("source capping with platform diversity", () => {
         workdayHost: "rbc.wd3.myworkdayjobs.com",
       }),
     });
+  });
+
+  it("prioritizes inventory sources by title-family coverage tags before provider routing", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    await refreshSourceInventory({
+      repository,
+      now: new Date("2026-04-14T00:00:00.000Z"),
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+      },
+    });
+
+    const inventory = await repository.listSourceInventory(["greenhouse"]);
+    const ranked = rankSourceInventoryRecordsForSearch(
+      inventory,
+      {
+        title: "Data Analyst",
+        country: "United States",
+      },
+      new Date("2026-04-14T00:00:00.000Z"),
+    );
+    const topGreenhouseTokens = ranked.slice(0, 10).map((record) => record.token);
+
+    expect(topGreenhouseTokens).toEqual(
+      expect.arrayContaining(["lyft", "instacart", "reddit", "chime", "current81"]),
+    );
+    expect(topGreenhouseTokens.includes("openai")).toBe(false);
+
+    const baseline = await discoverBaselineSourcesDetailed({
+      filters: {
+        title: "Data Analyst",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      now: new Date("2026-04-14T00:00:00.000Z"),
+      repository,
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
+      },
+    });
+
+    expect(baseline.sources.slice(0, 10).map((source) => source.token)).toEqual(
+      topGreenhouseTokens,
+    );
+  });
+
+  it("bootstraps empty persistent inventory before baseline routing", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+
+    const baseline = await discoverBaselineSourcesDetailed({
+      filters: {
+        title: "Data Analyst",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      now: new Date("2026-04-14T00:00:00.000Z"),
+      repository,
+      env: {
+        ...discoveryEnvDefaults,
+        greenhouseBoardTokens: [],
+        leverSiteTokens: [],
+        ashbyBoardTokens: [],
+        PUBLIC_SEARCH_DISCOVERY_ENABLED: false,
+      },
+    });
+
+    expect(baseline.diagnostics?.inventorySources).toBeGreaterThan(0);
+    expect(baseline.diagnostics?.configuredSources).toBe(0);
+    expect(baseline.sources.slice(0, 10).map((source) => source.token)).toEqual(
+      expect.arrayContaining(["lyft", "instacart", "reddit", "chime", "current81"]),
+    );
+    expect(
+      baseline.sources.every((source) => source.discoveryMethod === "source_inventory"),
+    ).toBe(true);
   });
 
   it("persists structured registry input for Lever, Ashby, and Workday with health metadata", async () => {

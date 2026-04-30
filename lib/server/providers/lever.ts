@@ -58,10 +58,7 @@ export function normalizeLeverJob(input: {
   discoveredAt: string;
   job: LeverPosting;
 }) {
-  const locationText =
-    input.job.categories?.location ??
-    input.job.categories?.allLocations?.[0] ??
-    "Location unavailable";
+  const locationText = buildLeverLocationText(input.job);
   const explicitExperienceLevel = resolveLeverExplicitExperienceLevel(input.job);
   const structuredExperienceHints = collectLeverStructuredExperienceHints(input.job);
   const descriptionExperienceHints = collectLeverDescriptionExperienceHints(input.job);
@@ -108,6 +105,21 @@ export function normalizeLeverJob(input: {
     descriptionExperienceHints,
     descriptionSnippet: input.job.descriptionPlain ?? input.job.description,
   });
+}
+
+function buildLeverLocationText(job: LeverPosting) {
+  const locations = [
+    job.categories?.location,
+    ...(job.categories?.allLocations ?? []),
+    job.country,
+  ]
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value));
+  const uniqueLocations = Array.from(new Set(locations));
+
+  return uniqueLocations.length > 0
+    ? uniqueLocations.join(" | ")
+    : "Location unavailable";
 }
 
 export async function extractLeverJobFromDetailUrl(input: {

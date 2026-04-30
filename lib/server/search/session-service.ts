@@ -299,7 +299,7 @@ export async function getSearchDetails(searchId: string, runtime: SearchDetailsR
   let jobs = resolved.searchSession
     ? await repository.getJobsBySearchSession(resolved.searchSession._id)
     : await repository.getJobsByCrawlRun(resolved.crawlRun._id);
-  if (resolved.crawlRun.status !== "running") {
+  if (runtime.refreshStaleJobLinks === true && resolved.crawlRun.status !== "running") {
     jobs = await refreshStaleJobs(jobs, repository, runtime.fetchImpl ?? fetch, runtime.now ?? new Date());
   }
   const filteredSessionJobs = filterAndDecorateSearchJobs(

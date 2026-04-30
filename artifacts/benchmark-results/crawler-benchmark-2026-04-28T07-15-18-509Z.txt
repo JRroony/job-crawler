@@ -1,0 +1,51 @@
+Crawler benchmark 2026-04-28T07:15:18.509Z
+Database: job_crawler_benchmark (127.0.0.1:27017)
+Mode: fast
+Scenarios: 5
+
+Totals
+  Jobs fetched: 4435
+  Jobs normalized: 4463
+  Jobs saved to MongoDB: 145
+  Search results from DB: 145
+  Duplicate ratio: 0.7% (1 duplicates)
+  Invalid URL count: 0
+  Total crawl duration: 238.3s
+
+Scenario Summary
+  Software Engineer, United States | status=partial | fetched=718 | normalized=726 | saved=91 | dbSearch=91 | dupRatio=1.1% | invalidUrls=0 | duration=35.1s
+  Data Analyst, United States | status=partial | fetched=1037 | normalized=1037 | saved=5 | dbSearch=5 | dupRatio=0.0% | invalidUrls=0 | duration=22.3s
+  Product Manager, United States | status=partial | fetched=807 | normalized=807 | saved=31 | dbSearch=31 | dupRatio=0.0% | invalidUrls=0 | duration=61.1s
+  Machine Learning Engineer, United States | status=partial | fetched=1077 | normalized=1087 | saved=13 | dbSearch=13 | dupRatio=0.0% | invalidUrls=0 | duration=64.0s
+  Machine Learning Engineer, Canada | status=partial | fetched=796 | normalized=806 | saved=5 | dbSearch=5 | dupRatio=0.0% | invalidUrls=0 | duration=55.7s
+
+Provider Summary
+  Software Engineer, United States
+    ashby | status=timed_out | sources=10 | fetched=126 | normalized=390 | matched=23 | saved=23 | invalidUrls=0 | duration=9.5s
+    greenhouse | status=partial | sources=10 | fetched=48 | normalized=48 | matched=0 | saved=0 | invalidUrls=0 | duration=7.7s
+    lever | status=timed_out | sources=10 | fetched=0 | normalized=280 | matched=0 | saved=0 | invalidUrls=0 | duration=9.5s
+    smartrecruiters | status=running | sources=0 | fetched=0 | normalized=0 | matched=0 | saved=0 | invalidUrls=0 | duration=0ms
+  Data Analyst, United States
+    ashby | status=success | sources=10 | fetched=757 | normalized=757 | matched=2 | saved=2 | invalidUrls=0 | duration=6.9s
+    greenhouse | status=failed | sources=10 | fetched=0 | normalized=0 | matched=0 | saved=0 | invalidUrls=0 | duration=2.7s
+    lever | status=timed_out | sources=10 | fetched=194 | normalized=280 | matched=1 | saved=1 | invalidUrls=0 | duration=9.8s
+    smartrecruiters | status=running | sources=0 | fetched=0 | normalized=0 | matched=0 | saved=0 | invalidUrls=0 | duration=0ms
+  Product Manager, United States
+    ashby | status=timed_out | sources=10 | fetched=141 | normalized=521 | matched=1 | saved=1 | invalidUrls=0 | duration=9.1s
+    greenhouse | status=partial | sources=10 | fetched=126 | normalized=126 | matched=4 | saved=4 | invalidUrls=0 | duration=10.6s
+    lever | status=timed_out | sources=10 | fetched=107 | normalized=160 | matched=9 | saved=9 | invalidUrls=0 | duration=9.1s
+    smartrecruiters | status=timed_out | sources=0 | fetched=0 | normalized=0 | matched=0 | saved=0 | invalidUrls=0 | duration=0ms
+  Machine Learning Engineer, United States
+    ashby | status=success | sources=10 | fetched=757 | normalized=757 | matched=5 | saved=5 | invalidUrls=0 | duration=8.0s
+    greenhouse | status=partial | sources=10 | fetched=126 | normalized=126 | matched=0 | saved=0 | invalidUrls=0 | duration=7.9s
+    lever | status=timed_out | sources=10 | fetched=13 | normalized=194 | matched=0 | saved=0 | invalidUrls=0 | duration=10.0s
+    smartrecruiters | status=timed_out | sources=0 | fetched=0 | normalized=0 | matched=0 | saved=0 | invalidUrls=0 | duration=0ms
+  Machine Learning Engineer, Canada
+    ashby | status=timed_out | sources=10 | fetched=225 | normalized=390 | matched=0 | saved=0 | invalidUrls=0 | duration=9.8s
+    greenhouse | status=partial | sources=10 | fetched=126 | normalized=126 | matched=0 | saved=0 | invalidUrls=0 | duration=8.8s
+    lever | status=timed_out | sources=10 | fetched=95 | normalized=280 | matched=1 | saved=1 | invalidUrls=0 | duration=9.8s
+    smartrecruiters | status=running | sources=0 | fetched=0 | normalized=0 | matched=0 | saved=0 | invalidUrls=0 | duration=0ms
+
+Artifacts
+  JSON: /Users/admin/Projects/job-crawler/artifacts/benchmark-results/crawler-benchmark-2026-04-28T07-15-18-509Z.json
+  Summary: /Users/admin/Projects/job-crawler/artifacts/benchmark-results/crawler-benchmark-2026-04-28T07-15-18-509Z.txt

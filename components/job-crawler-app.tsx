@@ -482,6 +482,11 @@ export function JobCrawlerApp({
     setViewState("loading");
     setMessage("");
     setErrorKind(null);
+    setActiveResult(null);
+    activeSearchIdentityRef.current = {};
+    activeDeliveryCursorRef.current = 0;
+    activeIndexedDeliveryCursorRef.current = 0;
+    setSelectedJobKey(undefined);
 
     try {
       const response = await fetch(`/api/searches/${id}/rerun`, {
@@ -539,6 +544,11 @@ export function JobCrawlerApp({
     setViewState("loading");
     setMessage("");
     setErrorKind(null);
+    setActiveResult(null);
+    activeSearchIdentityRef.current = {};
+    activeDeliveryCursorRef.current = 0;
+    activeIndexedDeliveryCursorRef.current = 0;
+    setSelectedJobKey(undefined);
 
     try {
       const response = await fetch(`/api/searches/${searchId}`, {

@@ -51,7 +51,7 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("true")
     .transform((value) => value === "true"),
-  BACKGROUND_INGESTION_INTERVAL_MS: z.coerce.number().int().positive().default(120000),
+  BACKGROUND_INGESTION_INTERVAL_MS: z.coerce.number().int().positive().default(300000),
   BACKGROUND_INGESTION_PROFILES_PER_CYCLE: z.coerce.number().int().positive().default(4),
   BACKGROUND_INGESTION_MAX_SOURCES_PER_CYCLE: z.coerce.number().int().positive().default(160),
   BACKGROUND_INGESTION_MAX_SOURCES_PER_PROVIDER: z.coerce.number().int().positive().default(48),
@@ -145,7 +145,7 @@ export function getEnv() {
       BACKGROUND_INGESTION_ENABLED:
         process.env.BACKGROUND_INGESTION_ENABLED ?? "true",
       BACKGROUND_INGESTION_INTERVAL_MS:
-        process.env.BACKGROUND_INGESTION_INTERVAL_MS ?? "120000",
+        process.env.BACKGROUND_INGESTION_INTERVAL_MS ?? "300000",
       BACKGROUND_INGESTION_PROFILES_PER_CYCLE:
         process.env.BACKGROUND_INGESTION_PROFILES_PER_CYCLE ?? "4",
       BACKGROUND_INGESTION_MAX_SOURCES_PER_CYCLE:

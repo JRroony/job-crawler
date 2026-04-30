@@ -5,7 +5,10 @@ import { z } from "zod";
 import { slugToLabel } from "@/lib/server/crawler/helpers";
 import { discoverCatalogSources } from "@/lib/server/discovery/catalog";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
-import { getDefaultGreenhouseRegistryEntries } from "@/lib/server/discovery/greenhouse-registry";
+import {
+  getDefaultGreenhouseRegistryEntries,
+  type GreenhouseRegistryEntry,
+} from "@/lib/server/discovery/greenhouse-registry";
 import {
   applyRegistryInventoryMetadata,
   getDefaultSourceRegistryEntries,
@@ -103,22 +106,21 @@ export function buildSourceInventorySeeds(
   const seeds: SourceInventoryRecord[] = [];
 
   getDefaultGreenhouseRegistryEntries().forEach((entry, index) => {
-    seeds.push(
-      toSourceInventoryRecord(
-        classifySourceCandidate({
-          url: `https://boards.greenhouse.io/${entry.token}`,
-          token: entry.token,
-          companyHint: entry.companyHint,
-          confidence: "high",
-          discoveryMethod: "platform_registry",
-        }),
-        {
-          now: new Date(0).toISOString(),
-          inventoryOrigin: "greenhouse_registry",
-          inventoryRank: index,
-        },
-      ),
+    const record = toSourceInventoryRecord(
+      classifySourceCandidate({
+        url: `https://boards.greenhouse.io/${entry.token}`,
+        token: entry.token,
+        companyHint: entry.companyHint,
+        confidence: "high",
+        discoveryMethod: "platform_registry",
+      }),
+      {
+        now: new Date(0).toISOString(),
+        inventoryOrigin: "greenhouse_registry",
+        inventoryRank: index,
+      },
     );
+    seeds.push(applyGreenhouseRegistryInventoryMetadata(record, entry));
   });
 
   env.greenhouseBoardTokens.forEach((token, index) => {
@@ -291,6 +293,29 @@ export function toDiscoveredSourceFromInventory(
     ...(record.careerSitePath ? { careerSitePath: record.careerSitePath } : {}),
     ...(record.jobUrl ? { jobUrl: record.jobUrl } : {}),
   } as DiscoveredSource;
+}
+
+function applyGreenhouseRegistryInventoryMetadata(
+  record: SourceInventoryRecord,
+  entry: GreenhouseRegistryEntry,
+): SourceInventoryRecord {
+  const coverageTags = Array.from(new Set(entry.coverageTags ?? ["global"]));
+
+  return sourceInventoryRecordSchema.parse({
+    ...record,
+    sourceMetadata: {
+      ...record.sourceMetadata,
+      registryPlatform: "greenhouse",
+      company: entry.companyHint,
+      coverageTags,
+      canadaRelevant:
+        coverageTags.includes("canada") || coverageTags.includes("canada_possible"),
+      unitedStatesRelevant:
+        coverageTags.includes("united_states") ||
+        coverageTags.includes("remote") ||
+        coverageTags.includes("global"),
+    },
+  });
 }
 
 function dedupeSourceInventoryRecords(records: SourceInventoryRecord[]) {
