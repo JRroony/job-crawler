@@ -676,6 +676,141 @@ async function executeRecurringInventoryIngestion(
   >();
   const backgroundPersistenceFailures: string[] = [];
   const runTimestamp = () => new Date(startedAtMs + Math.max(0, Date.now() - startMs)).toISOString();
+  const persistBackgroundProviderBatch = async (input: {
+    provider: CrawlSourceResult["provider"];
+    seeds: NormalizedJobSeed[];
+    fetchedCount: number;
+    sourceCount: number;
+    status: "success" | "partial" | "failed" | "unsupported" | "running";
+    warningCount?: number;
+    errorMessage?: string;
+    batchLabel: string;
+  }) => {
+    totalFetchedJobs += input.fetchedCount;
+    diagnostics.performance.persistenceBatchCount += 1;
+    console.info("[crawl:persistence-batch-start]", {
+      systemProfileId: target.systemProfile.id,
+      searchId: target.search._id,
+      crawlRunId: target.crawlRunId,
+      provider: input.provider,
+      batch: input.batchLabel,
+      sourceCount: input.sourceCount,
+      fetchedCount: input.fetchedCount,
+      seedCount: input.seeds.length,
+    });
+    console.info("[background-ingestion:persistence-batch-start]", {
+      systemProfileId: target.systemProfile.id,
+      searchId: target.search._id,
+      crawlRunId: target.crawlRunId,
+      provider: input.provider,
+      sourceCount: input.sourceCount,
+      fetchedCount: input.fetchedCount,
+      seedCount: input.seeds.length,
+    });
+
+    let persistence: PersistJobsWithStatsResult;
+    let validMatchedCount = 0;
+    let hydrationDroppedCount = 0;
+    try {
+      const hydration = hydrateBackgroundJobs(input.seeds, runtime.now);
+      hydrationDroppedCount = hydration.dropped.length;
+      for (const drop of hydration.dropped) {
+        diagnostics.dropReasonCounts[drop.reason] =
+          (diagnostics.dropReasonCounts[drop.reason] ?? 0) + 1;
+        console.warn("[background-ingestion:seed-normalization-drop]", {
+          searchId: target.search._id,
+          crawlRunId: target.crawlRunId,
+          provider: input.provider,
+          reason: drop.reason,
+          errorMessage: drop.message,
+          ...drop.context,
+        });
+      }
+      const persistableJobs = hydration.jobs;
+      validMatchedCount = persistableJobs.length;
+      totalMatchedJobs += validMatchedCount;
+      diagnostics.jobsBeforeDedupe += persistableJobs.length;
+      persistence = await repository.persistJobsWithStats(target.crawlRunId, persistableJobs, {
+        searchSessionId: target.searchSession._id,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Background job persistence failed unexpectedly.";
+      backgroundPersistenceFailures.push(`${input.provider}: ${message}`);
+      diagnostics.backgroundPersistence = buildBackgroundPersistenceDiagnostics(
+        totalPersistenceStats,
+        Array.from(providerThroughputTotals.entries()),
+        diagnostics.backgroundPersistence?.skippedReason,
+        backgroundPersistenceFailures,
+      );
+      console.error("[background-ingestion:persistence-batch-failed]", {
+        systemProfileId: target.systemProfile.id,
+        searchId: target.search._id,
+        crawlRunId: target.crawlRunId,
+        provider: input.provider,
+        sourceCount: input.sourceCount,
+        fetchedCount: input.fetchedCount,
+        seedCount: input.seeds.length,
+        errorMessage: message,
+      });
+      throw error;
+    }
+
+    const effectiveWarningCount = (input.warningCount ?? 0) + hydrationDroppedCount;
+    const effectiveProviderStatus =
+      hydrationDroppedCount > 0 && input.status === "success" ? "partial" : input.status;
+    const savedJobs = persistence.jobs;
+    totalSavedJobs += persistence.linkedToRunCount;
+    accumulatePersistenceStats(totalPersistenceStats, persistence);
+    accumulateProviderThroughputStats(providerThroughputTotals, input.provider, {
+      sourceCount: input.sourceCount,
+      fetchedCount: input.fetchedCount,
+      matchedCount: validMatchedCount,
+      seedCount: input.seeds.length,
+      warningCount: effectiveWarningCount,
+      failedBatches: 0,
+      ...persistence,
+    });
+    diagnostics.backgroundPersistence = buildBackgroundPersistenceDiagnostics(
+      totalPersistenceStats,
+      Array.from(providerThroughputTotals.entries()),
+      diagnostics.backgroundPersistence?.skippedReason,
+      backgroundPersistenceFailures,
+    );
+    diagnostics.jobsAfterDedupe = totalSavedJobs;
+    diagnostics.dedupedOut = Math.max(0, diagnostics.jobsBeforeDedupe - diagnostics.jobsAfterDedupe);
+
+    console.info("[ingestion:db-write-result]", {
+      searchId: target.search._id,
+      searchSessionId: target.searchSession._id,
+      crawlRunId: target.crawlRunId,
+      provider: input.provider,
+      batch: input.batchLabel,
+      insertedCount: persistence.insertedCount,
+      updatedCount: persistence.updatedCount,
+      linkedToRunCount: persistence.linkedToRunCount,
+      indexedEventCount: persistence.indexedEventCount,
+      savedCount: savedJobs.length,
+    });
+    console.info("[crawl:persistence-confirmed]", {
+      searchId: target.search._id,
+      searchSessionId: target.searchSession._id,
+      crawlRunId: target.crawlRunId,
+      provider: input.provider,
+      insertedCount: persistence.insertedCount,
+      updatedCount: persistence.updatedCount,
+      linkedToRunCount: persistence.linkedToRunCount,
+      indexedEventCount: persistence.indexedEventCount,
+    });
+
+    return {
+      persistence,
+      savedJobs,
+      validMatchedCount,
+      effectiveWarningCount,
+      effectiveProviderStatus,
+    };
+  };
   console.info("[provider-tiering:selection]", {
     searchId: target.search._id,
     crawlRunId: target.crawlRunId,
@@ -896,122 +1031,79 @@ async function executeRecurringInventoryIngestion(
       diagnostics.crawledSources += providerSources.length;
       const providerStartedAt = runTimestamp();
       const providerStartedMs = Date.now();
+      let emittedLiveBatch = false;
 
       try {
-        const result = await crawlProviderSourcesWithTimeout(
-          provider,
-          {
+        const providerContext = (providerSignal: AbortSignal): Parameters<CrawlProvider["crawlSources"]>[0] => ({
             fetchImpl: runtime.fetchImpl ?? fetch,
             now: runtime.now,
             filters: target.systemProfile.filters,
-            signal: runController.signal,
+            signal: providerSignal,
             sourceTimeoutMs: runtime.sourceTimeoutMs,
+            providerTimeoutMs: runtime.providerTimeoutMs,
+            isBackgroundRun: true,
             throwIfCanceled: () => runController.throwIfCanceled(),
-          },
-          providerSources,
-          runtime.providerTimeoutMs,
-        );
+            onBatch: async (batch) => {
+              emittedLiveBatch = true;
+              await persistBackgroundProviderBatch({
+                provider: batch.provider,
+                seeds: batch.jobs,
+                fetchedCount: batch.fetchedCount,
+                sourceCount: batch.sourceCount ?? 1,
+                status: "running",
+                batchLabel: `${batch.provider}:batch`,
+              });
+            },
+          });
 
-        totalFetchedJobs += result.fetchedCount;
+        const result = provider.sourceTimeoutIsolation
+          ? await provider.crawlSources(providerContext(runController.signal), providerSources)
+          : await crawlProviderSourcesWithTimeout(
+              provider,
+              providerContext(runController.signal),
+              providerSources,
+              runtime.providerTimeoutMs,
+            );
+        const sourceStatus = mapProviderResultToSourceStatus(result);
+
         mergeBackgroundProviderDropReasonCounts(
           diagnostics,
           result.diagnostics?.dropReasonCounts,
         );
 
-        diagnostics.performance.persistenceBatchCount += 1;
-        console.info("[background-ingestion:persistence-batch-start]", {
-          systemProfileId: target.systemProfile.id,
-          searchId: target.search._id,
-          crawlRunId: target.crawlRunId,
-          provider: provider.provider,
-          sourceCount: providerSources.length,
-          fetchedCount: result.fetchedCount,
-          matchedCount: result.matchedCount,
-          seedCount: result.jobs.length,
-        });
-
-        let persistence: PersistJobsWithStatsResult;
-        let validMatchedCount = 0;
-        let hydrationDroppedCount = 0;
-        try {
-          const hydration = hydrateBackgroundJobs(result.jobs, runtime.now);
-          hydrationDroppedCount = hydration.dropped.length;
-          for (const drop of hydration.dropped) {
-            diagnostics.dropReasonCounts[drop.reason] =
-              (diagnostics.dropReasonCounts[drop.reason] ?? 0) + 1;
-            console.warn("[background-ingestion:seed-normalization-drop]", {
-              searchId: target.search._id,
-              crawlRunId: target.crawlRunId,
+        const batchPersistence = emittedLiveBatch
+          ? undefined
+          : await persistBackgroundProviderBatch({
               provider: provider.provider,
-              reason: drop.reason,
-              errorMessage: drop.message,
-              ...drop.context,
+              seeds: result.jobs,
+              fetchedCount: result.fetchedCount,
+              sourceCount: providerSources.length,
+              status: result.status,
+              warningCount: result.warningCount,
+              errorMessage: result.errorMessage,
+              batchLabel: result.provider,
             });
-          }
-          const persistableJobs = hydration.jobs;
-          validMatchedCount = persistableJobs.length;
-          totalMatchedJobs += validMatchedCount;
-          diagnostics.jobsBeforeDedupe += persistableJobs.length;
-          persistence = await repository.persistJobsWithStats(target.crawlRunId, persistableJobs, {
-            searchSessionId: target.searchSession._id,
-          });
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : "Background job persistence failed unexpectedly.";
-          backgroundPersistenceFailures.push(`${provider.provider}: ${message}`);
-          diagnostics.backgroundPersistence = buildBackgroundPersistenceDiagnostics(
-            totalPersistenceStats,
-            Array.from(providerThroughputTotals.entries()),
-            diagnostics.backgroundPersistence?.skippedReason,
-            backgroundPersistenceFailures,
-          );
-          console.error("[background-ingestion:persistence-batch-failed]", {
-            systemProfileId: target.systemProfile.id,
-            searchId: target.search._id,
-            crawlRunId: target.crawlRunId,
-            provider: provider.provider,
-            sourceCount: providerSources.length,
-            fetchedCount: result.fetchedCount,
-            matchedCount: result.matchedCount,
-            seedCount: result.jobs.length,
-            errorMessage: message,
-          });
-          throw error;
-        }
-        const savedJobs = persistence.jobs;
-        const effectiveWarningCount = (result.warningCount ?? 0) + hydrationDroppedCount;
+        const providerTotals = providerThroughputTotals.get(provider.provider);
+        const validMatchedCount =
+          batchPersistence?.validMatchedCount ?? providerTotals?.matchedCount ?? 0;
+        const savedJobs = batchPersistence?.savedJobs ?? [];
+        const effectiveWarningCount =
+          (providerTotals?.warningCount ?? 0) + (emittedLiveBatch ? result.warningCount ?? 0 : 0);
         const effectiveProviderStatus =
-          hydrationDroppedCount > 0 && result.status === "success" ? "partial" : result.status;
-        totalSavedJobs += persistence.linkedToRunCount;
-        accumulatePersistenceStats(totalPersistenceStats, persistence);
-        accumulateProviderThroughputStats(providerThroughputTotals, provider.provider, {
-          sourceCount: providerSources.length,
-          fetchedCount: result.fetchedCount,
-          matchedCount: validMatchedCount,
-          seedCount: result.jobs.length,
-          warningCount: effectiveWarningCount,
-          failedBatches: 0,
-          ...persistence,
-        });
-        diagnostics.backgroundPersistence = buildBackgroundPersistenceDiagnostics(
-          totalPersistenceStats,
-          Array.from(providerThroughputTotals.entries()),
-          diagnostics.backgroundPersistence?.skippedReason,
-          backgroundPersistenceFailures,
-        );
-        diagnostics.jobsAfterDedupe = totalSavedJobs;
-        diagnostics.dedupedOut = Math.max(0, diagnostics.jobsBeforeDedupe - diagnostics.jobsAfterDedupe);
+          emittedLiveBatch
+            ? sourceStatus
+            : mapProviderStatus(batchPersistence?.effectiveProviderStatus ?? result.status, result);
 
         const finishedAt = runTimestamp();
         const sourceResult = createSourceResult({
           crawlRunId: target.crawlRunId,
           searchId: target.search._id,
           provider: provider.provider,
-          status: mapProviderStatus(effectiveProviderStatus),
+          status: effectiveProviderStatus,
           sourceCount: providerSources.length,
-          fetchedCount: result.fetchedCount,
+          fetchedCount: providerTotals?.fetchedCount ?? result.fetchedCount,
           matchedCount: validMatchedCount,
-          savedCount: savedJobs.length,
+          savedCount: providerTotals?.linkedToRunCount ?? savedJobs.length,
           warningCount: effectiveWarningCount,
           errorMessage: result.errorMessage,
           startedAt: providerStartedAt,
@@ -1026,27 +1118,17 @@ async function executeRecurringInventoryIngestion(
           crawlRunId: target.crawlRunId,
           provider: provider.provider,
           sourceCount: providerSources.length,
-          fetchedCount: result.fetchedCount,
+          fetchedCount: providerTotals?.fetchedCount ?? result.fetchedCount,
           matchedCount: validMatchedCount,
           seedCount: result.jobs.length,
-          savedCount: savedJobs.length,
-          insertedCount: persistence.insertedCount,
-          updatedCount: persistence.updatedCount,
-          linkedToRunCount: persistence.linkedToRunCount,
-          indexedEventCount: persistence.indexedEventCount,
+          savedCount: providerTotals?.linkedToRunCount ?? savedJobs.length,
+          insertedCount: providerTotals?.insertedCount ?? batchPersistence?.persistence.insertedCount ?? 0,
+          updatedCount: providerTotals?.updatedCount ?? batchPersistence?.persistence.updatedCount ?? 0,
+          linkedToRunCount: providerTotals?.linkedToRunCount ?? batchPersistence?.persistence.linkedToRunCount ?? 0,
+          indexedEventCount: providerTotals?.indexedEventCount ?? batchPersistence?.persistence.indexedEventCount ?? 0,
           status: effectiveProviderStatus,
           warningCount: effectiveWarningCount,
           errorMessage: result.errorMessage,
-        });
-        console.info("[crawl:persistence-confirmed]", {
-          searchId: target.search._id,
-          searchSessionId: target.searchSession._id,
-          crawlRunId: target.crawlRunId,
-          provider: provider.provider,
-          insertedCount: persistence.insertedCount,
-          updatedCount: persistence.updatedCount,
-          linkedToRunCount: persistence.linkedToRunCount,
-          indexedEventCount: persistence.indexedEventCount,
         });
         await repository.recordSourceInventoryObservations(
           providerSources.map((source) => ({
@@ -1054,24 +1136,27 @@ async function executeRecurringInventoryIngestion(
             observedAt: finishedAt,
             succeeded: effectiveProviderStatus === "success" || effectiveProviderStatus === "partial",
             health:
-              effectiveProviderStatus === "failed"
+              effectiveProviderStatus === "failed" || effectiveProviderStatus === "timed_out"
                 ? "failing"
                 : effectiveProviderStatus === "partial"
                   ? "degraded"
                   : "healthy",
-            lastFailureReason: effectiveProviderStatus === "failed" ? result.errorMessage : undefined,
+            lastFailureReason:
+              effectiveProviderStatus === "failed" || effectiveProviderStatus === "timed_out"
+                ? result.errorMessage
+                : undefined,
             nextEligibleAt: resolveObservedSourceNextEligibleAt({
               record: selectedRecordById.get(source.id) ?? inventory.find((record) => record._id === source.id)!,
               observedAt: finishedAt,
               intervalMs: runtime.schedulingIntervalMs,
               health:
-                effectiveProviderStatus === "failed"
+                effectiveProviderStatus === "failed" || effectiveProviderStatus === "timed_out"
                   ? "failing"
                   : effectiveProviderStatus === "partial"
                     ? "degraded"
                     : "healthy",
               consecutiveFailures:
-                effectiveProviderStatus === "failed"
+                effectiveProviderStatus === "failed" || effectiveProviderStatus === "timed_out"
                   ? (selectedRecordById.get(source.id)?.consecutiveFailures ?? 0) + 1
                   : 0,
               succeeded: effectiveProviderStatus === "success" || effectiveProviderStatus === "partial",
@@ -1083,20 +1168,32 @@ async function executeRecurringInventoryIngestion(
           provider: provider.provider,
           duration: Date.now() - providerStartedMs,
           sourceCount: providerSources.length,
-          timedOut: false,
+          timedOut: effectiveProviderStatus === "timed_out",
         });
       } catch (error) {
         const providerTimedOut = isBackgroundProviderTimeout(error);
         const abortLike =
           error instanceof Error && error.name === "AbortError" && !providerTimedOut;
-        if (!abortLike) {
-          diagnostics.providerFailures += 1;
-        }
 
         const finishedAt = runTimestamp();
         const providerTotals = providerThroughputTotals.get(provider.provider);
         const errorMessage =
           error instanceof Error ? error.message : "Provider crawl failed unexpectedly.";
+        const hasPreservedProviderWork =
+          (providerTotals?.fetchedCount ?? 0) > 0 ||
+          (providerTotals?.matchedCount ?? 0) > 0 ||
+          (providerTotals?.linkedToRunCount ?? 0) > 0;
+        const recoveredStatus: CrawlSourceResult["status"] =
+          providerTimedOut && hasPreservedProviderWork
+            ? "partial"
+            : providerTimedOut
+              ? "timed_out"
+              : abortLike
+                ? "aborted"
+                : "failed";
+        if (!abortLike && recoveredStatus !== "partial") {
+          diagnostics.providerFailures += 1;
+        }
         if (providerTimedOut) {
           console.warn("[crawl:provider-timeout]", {
             searchId: target.search._id,
@@ -1112,13 +1209,16 @@ async function executeRecurringInventoryIngestion(
           crawlRunId: target.crawlRunId,
           searchId: target.search._id,
           provider: provider.provider,
-          status: providerTimedOut ? "timed_out" : abortLike ? "aborted" : "failed",
+          status: recoveredStatus,
           sourceCount: providerSources.length,
-          fetchedCount: 0,
-          matchedCount: 0,
-          savedCount: 0,
+          fetchedCount: providerTotals?.fetchedCount ?? 0,
+          matchedCount: providerTotals?.matchedCount ?? 0,
+          savedCount: providerTotals?.linkedToRunCount ?? 0,
           warningCount: 1,
-          errorMessage,
+          errorMessage:
+            recoveredStatus === "partial"
+              ? `Partial timeout: ${errorMessage}`
+              : errorMessage,
           startedAt: providerStartedAt,
           finishedAt,
         });
@@ -1128,16 +1228,19 @@ async function executeRecurringInventoryIngestion(
           providerSources.map((source) => ({
             sourceId: source.id,
             observedAt: finishedAt,
-            succeeded: false,
-            health: providerTimedOut ? "degraded" : "failing",
-            lastFailureReason: errorMessage,
+            succeeded: recoveredStatus === "partial" ? undefined : false,
+            health: recoveredStatus === "partial" || providerTimedOut ? "degraded" : "failing",
+            lastFailureReason: sourceResult.errorMessage,
             nextEligibleAt: resolveObservedSourceNextEligibleAt({
               record: selectedRecordById.get(source.id) ?? inventory.find((record) => record._id === source.id)!,
               observedAt: finishedAt,
               intervalMs: runtime.schedulingIntervalMs,
-              health: providerTimedOut ? "degraded" : "failing",
-              consecutiveFailures: (selectedRecordById.get(source.id)?.consecutiveFailures ?? 0) + 1,
-              succeeded: false,
+              health: recoveredStatus === "partial" || providerTimedOut ? "degraded" : "failing",
+              consecutiveFailures:
+                recoveredStatus === "partial"
+                  ? selectedRecordById.get(source.id)?.consecutiveFailures ?? 0
+                  : (selectedRecordById.get(source.id)?.consecutiveFailures ?? 0) + 1,
+              succeeded: recoveredStatus === "partial" ? undefined : false,
             }),
           })),
         );
@@ -1146,17 +1249,19 @@ async function executeRecurringInventoryIngestion(
           provider: provider.provider,
           duration: Date.now() - providerStartedMs,
           sourceCount: providerSources.length,
-          timedOut: providerTimedOut,
+          timedOut: providerTimedOut && recoveredStatus !== "partial",
         });
-        accumulateProviderThroughputStats(providerThroughputTotals, provider.provider, {
-          ...createEmptyPersistenceStats(),
-          sourceCount: providerSources.length,
-          fetchedCount: 0,
-          matchedCount: 0,
-          seedCount: 0,
-          warningCount: 0,
-          failedBatches: 1,
-        });
+        if (!hasPreservedProviderWork) {
+          accumulateProviderThroughputStats(providerThroughputTotals, provider.provider, {
+            ...createEmptyPersistenceStats(),
+            sourceCount: providerSources.length,
+            fetchedCount: 0,
+            matchedCount: 0,
+            seedCount: 0,
+            warningCount: 0,
+            failedBatches: 1,
+          });
+        }
 
         if (abortLike) {
           throw error;
@@ -2026,9 +2131,35 @@ function resolveFinalStatus(sourceResults: CrawlSourceResult[], totalSavedJobs: 
 }
 
 function mapProviderStatus(
-  status: "success" | "partial" | "failed" | "unsupported",
+  status: "success" | "partial" | "failed" | "unsupported" | "running",
+  result?: Awaited<ReturnType<CrawlProvider["crawlSources"]>>,
 ): CrawlSourceResult["status"] {
+  if (result && mapProviderResultToSourceStatus(result) === "timed_out") {
+    return "timed_out";
+  }
+
   return status;
+}
+
+function mapProviderResultToSourceStatus(
+  result: Awaited<ReturnType<CrawlProvider["crawlSources"]>>,
+): CrawlSourceResult["status"] {
+  const diagnostics = result.diagnostics;
+  const sourceCount = result.sourceCount ?? diagnostics?.sourceCount ?? 0;
+  const sourceTimedOutCount = diagnostics?.sourceTimedOutCount ?? 0;
+  const emittedJobs = result.jobs.length + (diagnostics?.jobsEmittedViaOnBatch ?? 0);
+
+  if (
+    result.status === "failed" &&
+    sourceCount > 0 &&
+    sourceTimedOutCount >= sourceCount &&
+    result.fetchedCount === 0 &&
+    emittedJobs === 0
+  ) {
+    return "timed_out";
+  }
+
+  return result.status;
 }
 
 function mergeSignals(...signals: Array<AbortSignal | undefined>) {

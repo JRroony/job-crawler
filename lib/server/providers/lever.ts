@@ -27,6 +27,7 @@ import {
   type ProviderExecutionContext,
 } from "@/lib/server/providers/types";
 import { createAdapterProvider } from "@/lib/server/providers/adapter";
+import { getEnv } from "@/lib/server/env";
 
 type LeverPosting = {
   id?: string;
@@ -157,7 +158,12 @@ export function createLeverProvider() {
     provider: "lever",
     supportsSource: isLeverSource,
     unsupportedMessage: "No discovered Lever sources are available.",
-    concurrency: 3,
+    concurrency: (context) => {
+      const env = getEnv();
+      return context.isBackgroundRun
+        ? env.BACKGROUND_INGESTION_LEVER_SOURCE_CONCURRENCY
+        : env.CRAWL_LEVER_SOURCE_CONCURRENCY;
+    },
     async crawlSource(context, source) {
       return crawlLeverSource(context, source);
     },
@@ -177,6 +183,8 @@ async function crawlLeverSource(
   const hostedUrl = resolveLeverHostedUrl(source);
   const normalizedSiteToken =
     siteToken ?? buildProviderCompanyToken(source.companyHint) ?? "lever";
+  let listFetchSucceeded = false;
+  let usableSource = Boolean(apiUrl);
 
   let payload: LeverPosting[] = [];
   if (apiUrl) {
@@ -194,6 +202,7 @@ async function crawlLeverSource(
       warnings.push(formatLeverFetchWarning(source, result));
       dropReasons.push("list_fetch_failed");
     } else {
+      listFetchSucceeded = true;
       payload = result.data ?? [];
     }
   } else {
@@ -265,6 +274,9 @@ async function crawlLeverSource(
     parseSuccessCount: normalizedJobs.length,
     parseFailureCount: source.jobId && !detailFallbackJob && jobs.length === 0 ? 1 : 0,
     dropReasons,
+    sourceSucceeded: listFetchSucceeded || Boolean(detailFallbackJob),
+    sourceFailed: usableSource && !listFetchSucceeded && normalizedJobs.length === 0,
+    sourceSkipped: !usableSource,
   };
 }
 

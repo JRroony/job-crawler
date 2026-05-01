@@ -27,6 +27,7 @@ import type { DiscoveryService, DiscoveredSource } from "@/lib/server/discovery/
 import { runSearchFromFilters } from "@/lib/server/search/service";
 import type { CrawlProvider } from "@/lib/server/providers/types";
 import { createCompanyPageProvider } from "@/lib/server/providers/company-page";
+import { createLeverProvider } from "@/lib/server/providers/lever";
 import { MongoLikeNullDb } from "@/tests/helpers/mongo-like-null-db";
 
 afterEach(() => {
@@ -826,6 +827,110 @@ describe("recurring background ingestion", () => {
           matchedCount: 0,
           seedCount: 0,
           failedBatches: 1,
+        }),
+      ],
+    });
+  });
+
+  it("persists partial Lever background ingestion when one source times out", async () => {
+    const db = new MongoLikeNullDb();
+    const repository = new JobCrawlerRepository(db);
+    const now = new Date("2026-04-15T12:00:00.000Z");
+
+    await repository.upsertSourceInventory([
+      createPlatformInventoryRecord({
+        platform: "lever",
+        url: "https://jobs.lever.co/fastco",
+        token: "fastco",
+        companyHint: "Fast Co",
+      }),
+      createPlatformInventoryRecord({
+        platform: "lever",
+        url: "https://jobs.lever.co/slowco",
+        token: "slowco",
+        companyHint: "Slow Co",
+      }),
+    ]);
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes("/slowco?")) {
+        return new Promise<Response>(() => undefined);
+      }
+
+      return new Response(
+        JSON.stringify([
+          {
+            id: "lever-background-job",
+            text: "Software Engineer",
+            hostedUrl: "https://jobs.lever.co/fastco/lever-background-job",
+            applyUrl: "https://jobs.lever.co/fastco/lever-background-job/apply",
+            categories: {
+              location: "Remote, United States",
+              commitment: "Full-time",
+            },
+          },
+        ]),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [createLeverProvider()],
+      now,
+      maxSources: 2,
+      maxSourcesPerProvider: 2,
+      schedulingIntervalMs: 60_000,
+      runTimeoutMs: 2_000,
+      providerTimeoutMs: 100,
+      sourceTimeoutMs: 25,
+      fetchImpl,
+      refreshInventory: () => repository.listSourceInventory(["lever"]),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected recurring ingestion to start.");
+    }
+
+    const crawlRun = await waitForRunCompletion(repository, triggered.crawlRunId);
+    const sourceResults = await repository.getCrawlSourceResults(triggered.crawlRunId);
+    const leverResult = sourceResults.find((sourceResult) => sourceResult.provider === "lever");
+    const persistedJobs = await repository.getJobsByCrawlRun(triggered.crawlRunId);
+
+    expect(crawlRun.status).not.toBe("failed");
+    expect(persistedJobs).toHaveLength(1);
+    expect(db.snapshot(collectionNames.jobs)).toHaveLength(1);
+    expect(persistedJobs[0]).toMatchObject({
+      title: "Software Engineer",
+      sourcePlatform: "lever",
+      sourceJobId: "lever-background-job",
+    });
+    expect(leverResult).toMatchObject({
+      provider: "lever",
+      status: "partial",
+      sourceCount: 2,
+      fetchedCount: 1,
+      matchedCount: 1,
+      savedCount: 1,
+    });
+    expect(crawlRun.diagnostics.backgroundPersistence).toMatchObject({
+      jobsInserted: 1,
+      jobsLinkedToRun: 1,
+      providerStats: [
+        expect.objectContaining({
+          provider: "lever",
+          fetchedCount: 1,
+          matchedCount: 1,
+          savedCount: 1,
+          failedBatches: 0,
         }),
       ],
     });

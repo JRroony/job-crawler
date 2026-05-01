@@ -498,6 +498,7 @@ export function instrumentProviders(
 ): CrawlProvider[] {
   return providers.map((provider) => ({
     provider: provider.provider,
+    sourceTimeoutIsolation: provider.sourceTimeoutIsolation,
     supportsSource(source): source is never {
       return provider.supportsSource(source);
     },

@@ -84,6 +84,7 @@ type ExecuteCrawlPipelineInput = {
   linkValidationMode?: CrawlLinkValidationMode;
   inlineValidationTopN?: number;
   providerTimeoutMs?: number;
+  sourceTimeoutMs?: number;
   progressUpdateIntervalMs?: number;
   signal?: AbortSignal;
 };
@@ -257,8 +258,8 @@ export async function executeCrawlPipeline(
     ? env.BACKGROUND_INGESTION_RUN_TIMEOUT_MS
     : env.CRAWL_GLOBAL_TIMEOUT_MS;
   const sourceTimeoutMs = isDeepCrawl
-    ? env.BACKGROUND_INGESTION_SOURCE_TIMEOUT_MS
-    : env.CRAWL_SOURCE_TIMEOUT_MS;
+    ? input.sourceTimeoutMs ?? env.BACKGROUND_INGESTION_SOURCE_TIMEOUT_MS
+    : input.sourceTimeoutMs ?? env.CRAWL_SOURCE_TIMEOUT_MS;
   const maxSourcesPerProvider = isDeepCrawl
     ? env.BACKGROUND_INGESTION_MAX_SOURCES_PER_PROVIDER
     : env.CRAWL_MAX_SOURCES_PER_PROVIDER;
@@ -906,8 +907,7 @@ export async function executeCrawlPipeline(
       }
 
       try {
-        const result = await runProviderWithTimeout(
-          async (providerSignal) =>
+        const crawlProviderSources = (providerSignal: AbortSignal) =>
             provider.crawlSources(
               {
                 fetchImpl: createAbortableFetch(
@@ -924,6 +924,8 @@ export async function executeCrawlPipeline(
                 filters: normalizedFilters,
                 signal: providerSignal,
                 sourceTimeoutMs,
+                providerTimeoutMs,
+                isBackgroundRun: false,
                 throwIfCanceled: async () => {
                   await persistentCancellation.throwIfCanceled({ heartbeat: true });
                   if (providerSignal.aborted) {
@@ -952,11 +954,16 @@ export async function executeCrawlPipeline(
                 },
               },
               sourcesForProvider,
-            ),
-          provider.provider,
-          providerTimeoutMs,
-          mergedSignal,
-        );
+            );
+        const result = provider.sourceTimeoutIsolation
+          ? await crawlProviderSources(mergedSignal)
+          : await runProviderWithTimeout(
+              crawlProviderSources,
+              provider.provider,
+              providerTimeoutMs,
+              mergedSignal,
+            );
+        const sourceStatus = mapProviderResultToSourceStatus(result);
 
         const finishedAt = new Date().toISOString();
         await persistentCancellation.throwIfCanceled({ heartbeat: true });
@@ -966,7 +973,7 @@ export async function executeCrawlPipeline(
           provider: result.provider,
           duration: durationMs,
           sourceCount: result.sourceCount ?? sourcesForProvider.length,
-          timedOut: false,
+          timedOut: sourceStatus === "timed_out",
         });
         logIngestionTrace("provider-result", {
           searchId: search._id,
@@ -983,7 +990,7 @@ export async function executeCrawlPipeline(
         });
         mergeProviderDropReasonCounts(diagnostics, result.diagnostics?.dropReasonCounts);
 
-        if (result.status === "failed") {
+        if (sourceStatus === "failed" || sourceStatus === "timed_out") {
           diagnostics.providerFailures += 1;
         }
 
@@ -997,7 +1004,7 @@ export async function executeCrawlPipeline(
               seeds: result.jobs,
               fetchedCount: result.fetchedCount,
               sourceCount: result.sourceCount ?? sourcesForProvider.length,
-              status: result.status,
+              status: sourceStatus,
               warningCount: result.warningCount,
               errorMessage: result.errorMessage,
               startedAt,
@@ -1013,16 +1020,16 @@ export async function executeCrawlPipeline(
                 observedAt: finishedAt,
                 status: "active",
                 health:
-                  result.status === "failed"
+                  sourceStatus === "failed" || sourceStatus === "timed_out"
                     ? "failing"
-                    : result.status === "partial"
+                    : sourceStatus === "partial"
                       ? "degraded"
                       : "healthy",
                 lastFailureReason: result.errorMessage,
                 succeeded:
-                  result.status === "success"
+                  sourceStatus === "success"
                     ? true
-                    : result.status === "failed"
+                    : sourceStatus === "failed" || sourceStatus === "timed_out"
                       ? false
                       : undefined,
               }),
@@ -1040,7 +1047,7 @@ export async function executeCrawlPipeline(
 
           const updated = crawlSourceResultSchema.parse({
             ...existing,
-            status: result.status,
+            status: sourceStatus,
             warningCount: existing.warningCount + (result.warningCount ?? 0),
             errorMessage: result.errorMessage ?? existing.errorMessage,
             finishedAt,
@@ -1053,16 +1060,16 @@ export async function executeCrawlPipeline(
               observedAt: finishedAt,
               status: "active",
               health:
-                result.status === "failed"
+                sourceStatus === "failed" || sourceStatus === "timed_out"
                   ? "failing"
-                  : result.status === "partial"
+                  : sourceStatus === "partial"
                     ? "degraded"
                     : "healthy",
               lastFailureReason: result.errorMessage,
               succeeded:
-                result.status === "success"
+                sourceStatus === "success"
                   ? true
-                  : result.status === "failed"
+                  : sourceStatus === "failed" || sourceStatus === "timed_out"
                     ? false
                     : undefined,
             }),
@@ -1114,20 +1121,36 @@ export async function executeCrawlPipeline(
         }, "error");
 
         await queueMutation(async () => {
-          diagnostics.providerFailures += 1;
+          const latest = sourceResultsByProvider.get(provider.provider) ?? existing;
+          const hasPreservedProviderWork =
+            (latest?.fetchedCount ?? 0) > 0 ||
+            (latest?.matchedCount ?? 0) > 0 ||
+            (latest?.savedCount ?? 0) > 0;
+          const recoveredStatus: CrawlSourceResult["status"] =
+            timedOut && hasPreservedProviderWork
+              ? "partial"
+              : timedOut
+                ? "timed_out"
+                : "failed";
+          if (recoveredStatus !== "partial") {
+            diagnostics.providerFailures += 1;
+          }
           const failedResult = crawlSourceResultSchema.parse({
-            _id: existing?._id ?? createId(),
+            _id: latest?._id ?? createId(),
             crawlRunId: crawlRun._id,
             searchId: search._id,
             provider: provider.provider,
-            status: timedOut ? "timed_out" : "failed",
-            sourceCount: existing?.sourceCount ?? sourcesForProvider.length,
-            fetchedCount: existing?.fetchedCount ?? 0,
-            matchedCount: existing?.matchedCount ?? 0,
-            savedCount: existing?.savedCount ?? 0,
-            warningCount: (existing?.warningCount ?? 0) + 1,
-            errorMessage,
-            startedAt: existing?.startedAt ?? startedAt,
+            status: recoveredStatus,
+            sourceCount: latest?.sourceCount ?? sourcesForProvider.length,
+            fetchedCount: latest?.fetchedCount ?? 0,
+            matchedCount: latest?.matchedCount ?? 0,
+            savedCount: latest?.savedCount ?? 0,
+            warningCount: (latest?.warningCount ?? 0) + 1,
+            errorMessage:
+              recoveredStatus === "partial"
+                ? `Partial timeout: ${errorMessage}`
+                : errorMessage,
+            startedAt: latest?.startedAt ?? startedAt,
             finishedAt,
           });
           sourceResultsByProvider.set(provider.provider, failedResult);
@@ -1137,9 +1160,13 @@ export async function executeCrawlPipeline(
             buildSourceInventoryObservations(sourcesForProvider, {
               observedAt: finishedAt,
               status: "active",
-              health: timedOut ? "degraded" : "failing",
-              lastFailureReason: errorMessage,
-              succeeded: false,
+              health: failedResult.status === "partial"
+                ? "degraded"
+                : timedOut
+                  ? "degraded"
+                  : "failing",
+              lastFailureReason: failedResult.errorMessage,
+              succeeded: failedResult.status === "partial" ? undefined : false,
             }),
           );
           await updateRunProgress("crawling", finishedAt);
@@ -3103,6 +3130,27 @@ function deriveRunStatus(
   }
 
   return "completed";
+}
+
+function mapProviderResultToSourceStatus(
+  result: Awaited<ReturnType<CrawlProvider["crawlSources"]>>,
+): CrawlSourceResult["status"] {
+  const diagnostics = result.diagnostics;
+  const sourceCount = result.sourceCount ?? diagnostics?.sourceCount ?? 0;
+  const sourceTimedOutCount = diagnostics?.sourceTimedOutCount ?? 0;
+  const emittedJobs = result.jobs.length + (diagnostics?.jobsEmittedViaOnBatch ?? 0);
+
+  if (
+    result.status === "failed" &&
+    sourceCount > 0 &&
+    sourceTimedOutCount >= sourceCount &&
+    result.fetchedCount === 0 &&
+    emittedJobs === 0
+  ) {
+    return "timed_out";
+  }
+
+  return result.status;
 }
 
 type ResolvedValidationStrategy = {

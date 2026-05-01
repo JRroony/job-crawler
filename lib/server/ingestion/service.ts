@@ -39,6 +39,7 @@ async function buildSearchIngestionContext(
     linkValidationMode: runtime.linkValidationMode,
     inlineValidationTopN: runtime.inlineValidationTopN,
     providerTimeoutMs: runtime.providerTimeoutMs,
+    sourceTimeoutMs: runtime.sourceTimeoutMs,
     progressUpdateIntervalMs: runtime.progressUpdateIntervalMs,
   };
 }
@@ -62,6 +63,7 @@ export async function executeSearchIngestion(
     linkValidationMode: context.linkValidationMode,
     inlineValidationTopN: context.inlineValidationTopN,
     providerTimeoutMs: context.providerTimeoutMs,
+    sourceTimeoutMs: context.sourceTimeoutMs,
     progressUpdateIntervalMs: context.progressUpdateIntervalMs,
     signal: runtime.signal,
   });
@@ -97,6 +99,7 @@ export async function queueSearchIngestion(
         linkValidationMode: context.linkValidationMode,
         inlineValidationTopN: context.inlineValidationTopN,
         providerTimeoutMs: context.providerTimeoutMs,
+        sourceTimeoutMs: context.sourceTimeoutMs,
         progressUpdateIntervalMs: context.progressUpdateIntervalMs,
         signal,
       });

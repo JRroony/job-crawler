@@ -73,6 +73,10 @@ async function crawlProvider(
       fetchImpl: input.fetchImpl,
       now: input.now,
       filters: input.filters,
+      sourceTimeoutMs: input.sourceTimeoutMs,
+      providerTimeoutMs: input.providerTimeoutMs,
+      isBackgroundRun: input.isBackgroundRun,
+      onBatch: input.onBatch,
     },
     input.sources.filter((source) => provider.supportsSource(source)),
   );
@@ -584,6 +588,106 @@ describe("provider crawl status and live parsing", () => {
       invalidSeedCount: 1,
       dropReasonCounts: {
         seed_invalid_empty_title: 1,
+      },
+    });
+  });
+
+  it("keeps successful Lever sources when another source times out", async () => {
+    const provider = createLeverProvider();
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes("/slowco?")) {
+        return new Promise<Response>(() => undefined);
+      }
+
+      const token = url.includes("/fastco-a?") ? "fastco-a" : "fastco-c";
+      return new Response(
+        JSON.stringify([
+          {
+            id: `${token}-role-1`,
+            text: "Software Engineer",
+            hostedUrl: `https://jobs.lever.co/${token}/${token}-role-1`,
+            applyUrl: `https://jobs.lever.co/${token}/${token}-role-1/apply`,
+            categories: {
+              location: "Remote, United States",
+              commitment: "Full-time",
+            },
+          },
+        ]),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Software Engineer",
+        country: "United States",
+      },
+      sourceTimeoutMs: 25,
+      providerTimeoutMs: 250,
+      sources: [leverSource("fastco-a"), leverSource("slowco"), leverSource("fastco-c")],
+    });
+
+    expect(result.status).toBe("partial");
+    expect(result.fetchedCount).toBeGreaterThan(0);
+    expect(result.matchedCount).toBeGreaterThan(0);
+    expect(result.jobs.map((job) => job.sourceJobId).sort()).toEqual([
+      "fastco-a-role-1",
+      "fastco-c-role-1",
+    ]);
+    expect(result.diagnostics).toMatchObject({
+      provider: "lever",
+      sourceCount: 3,
+      sourceSucceededCount: 2,
+      sourceTimedOutCount: 1,
+      sourceFailedCount: 0,
+      fetchedCount: 2,
+      rawFetchedCount: 2,
+      dropReasonCounts: {
+        source_timeout: 1,
+      },
+    });
+    expect(result.status).not.toBe("failed");
+  });
+
+  it("marks a Lever crawl failed with timeout diagnostics when all sources time out", async () => {
+    const provider = createLeverProvider();
+    const fetchImpl = vi.fn(async () => {
+      return new Promise<Response>(() => undefined);
+    }) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Software Engineer",
+        country: "United States",
+      },
+      sourceTimeoutMs: 20,
+      providerTimeoutMs: 100,
+      sources: [leverSource("slowco-a"), leverSource("slowco-b"), leverSource("slowco-c")],
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.fetchedCount).toBe(0);
+    expect(result.matchedCount).toBe(0);
+    expect(result.jobs).toHaveLength(0);
+    expect(result.errorMessage).toContain("timed out");
+    expect(result.diagnostics).toMatchObject({
+      provider: "lever",
+      sourceCount: 3,
+      sourceSucceededCount: 0,
+      sourceTimedOutCount: 3,
+      dropReasonCounts: {
+        source_timeout: 3,
       },
     });
   });

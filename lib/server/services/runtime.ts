@@ -16,6 +16,7 @@ export type JobCrawlerRuntime = {
   refreshStaleJobLinks?: boolean;
   inlineValidationTopN?: number;
   providerTimeoutMs?: number;
+  sourceTimeoutMs?: number;
   progressUpdateIntervalMs?: number;
   earlyVisibleTarget?: number;
   initialVisibleWaitMs?: number;

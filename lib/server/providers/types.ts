@@ -62,6 +62,8 @@ export type ProviderExecutionContext = {
   filters: SearchFilters;
   signal?: AbortSignal;
   sourceTimeoutMs?: number;
+  providerTimeoutMs?: number;
+  isBackgroundRun?: boolean;
   throwIfCanceled?: () => Promise<void>;
   onBatch?: (batch: ProviderBatchProgress) => Promise<void> | void;
 };
@@ -101,13 +103,24 @@ export type ProviderBatchProgress<P extends ProviderPlatform = ProviderPlatform>
 export type ProviderDiagnostics<P extends ProviderPlatform = ProviderPlatform> = {
   provider: P;
   discoveryCount: number;
+  sourceCount?: number;
+  sourceSucceededCount?: number;
+  sourceTimedOutCount?: number;
+  sourceFailedCount?: number;
+  sourceSkippedCount?: number;
   fetchCount: number;
+  fetchedCount?: number;
   parseSuccessCount: number;
   parseFailureCount: number;
   rawFetchedCount: number;
   parsedSeedCount: number;
   validSeedCount: number;
   invalidSeedCount: number;
+  jobsEmittedViaOnBatch?: number;
+  jobsPersistedFromBatches?: number;
+  providerElapsedMs?: number;
+  providerBudgetMs?: number;
+  sourceTimeoutMs?: number;
   dropReasonCounts: Record<string, number>;
   sampleDropReasons: string[];
   sampleInvalidSeeds: Array<{
@@ -126,6 +139,7 @@ export type SourceDrivenProvider<
   TSource extends DiscoveredSource | never = ProviderSourceFor<P>,
 > = {
   provider: P;
+  sourceTimeoutIsolation?: boolean;
   supportsSource(source: DiscoveredSource): source is TSource;
   crawlSources(
     context: ProviderExecutionContext,

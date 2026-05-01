@@ -1,6 +1,5 @@
 import "server-only";
 
-import { runWithConcurrency } from "@/lib/server/crawler/helpers";
 import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import {
   createSignalAwareFetch,
@@ -29,6 +28,10 @@ export type ProviderSourceAdapterRun<
   fetchedCount: number;
   fetchCount?: number;
   sourceSucceeded?: boolean;
+  sourceTimedOut?: boolean;
+  sourceFailed?: boolean;
+  sourceSkipped?: boolean;
+  jobsEmittedViaOnBatch?: number;
   jobs: NormalizedJobSeed[];
   warnings?: string[];
   parseSuccessCount?: number;
@@ -59,6 +62,7 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
 ): CrawlProvider {
   return defineProvider({
     provider: definition.provider,
+    sourceTimeoutIsolation: true,
     supportsSource: definition.supportsSource,
     async crawlSources(context, sources) {
       await context.throwIfCanceled?.();
@@ -77,16 +81,27 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
         typeof definition.concurrency === "function"
           ? definition.concurrency(context)
           : definition.concurrency;
+      const providerStartedMs = Date.now();
+      const providerBudgetMs = Math.max(0, Math.floor(context.providerTimeoutMs ?? 0));
+      const sourceTimeoutMs = Math.max(0, Math.floor(context.sourceTimeoutMs ?? 0));
 
-      const sourceRuns = await runWithConcurrency(
+      const sourceRuns = await runSourcesWithSoftProviderBudget(
         adapterSources,
-        async (source) => {
+        async (source, remainingProviderBudgetMs) => {
           await context.throwIfCanceled?.();
+          const effectiveSourceTimeoutMs = resolveEffectiveSourceTimeoutMs(
+            sourceTimeoutMs,
+            remainingProviderBudgetMs,
+          );
+          const emittedJobs: NormalizedJobSeed[] = [];
+          let jobsEmittedViaOnBatch = 0;
+          let fetchedCountEmittedViaOnBatch = 0;
+
           try {
             const run = await runProviderSourceWithTimeout({
               provider: definition.provider,
               sourceId: source.id,
-              timeoutMs: context.sourceTimeoutMs,
+              timeoutMs: effectiveSourceTimeoutMs,
               parentSignal: context.signal,
               task: async (sourceSignal) => {
                 const run = await definition.crawlSource(
@@ -113,6 +128,18 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
                             return undefined;
                           }
 
+                          emittedJobs.push(...validation.jobs);
+                          jobsEmittedViaOnBatch += validation.jobs.length;
+                          fetchedCountEmittedViaOnBatch += batch.fetchedCount;
+                          console.info("[provider:batch-emitted]", {
+                            provider: definition.provider,
+                            sourceId: source.id,
+                            sourceCount: batch.sourceCount ?? 1,
+                            fetchedCount: batch.fetchedCount,
+                            jobCount: validation.jobs.length,
+                            droppedCount: validation.dropped.length,
+                          });
+
                           return context.onBatch?.({
                             ...batch,
                             jobs: validation.jobs,
@@ -130,25 +157,56 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
             return {
               ...run,
               jobs: run.jobs.map(normalizeProviderJobSeed),
+              sourceSucceeded:
+                run.sourceSucceeded ?? (run.jobs.length > 0 || run.fetchedCount > 0),
+              jobsEmittedViaOnBatch:
+                (run.jobsEmittedViaOnBatch ?? 0) + jobsEmittedViaOnBatch,
             };
           } catch (error) {
-            if (!isProviderSourceTimeoutError(error)) {
+            if (context.signal?.aborted) {
               throw error;
             }
 
+            if (!isProviderSourceTimeoutError(error)) {
+              const message =
+                error instanceof Error
+                  ? error.message
+                  : `Provider ${definition.provider} source ${source.id} failed unexpectedly.`;
+
+              return {
+                fetchedCount: fetchedCountEmittedViaOnBatch,
+                fetchCount: 0,
+                jobs: emittedJobs,
+                warnings: [message],
+                parseSuccessCount: emittedJobs.length,
+                parseFailureCount: emittedJobs.length > 0 ? 0 : 1,
+                dropReasons: ["source_failed"],
+                sourceSucceeded: emittedJobs.length > 0,
+                sourceFailed: emittedJobs.length === 0,
+                jobsEmittedViaOnBatch,
+              };
+            }
+
             return {
-              fetchedCount: 0,
+              fetchedCount: fetchedCountEmittedViaOnBatch,
               fetchCount: 0,
-              jobs: [],
+              jobs: emittedJobs,
               warnings: [error.message],
-              parseSuccessCount: 0,
+              parseSuccessCount: emittedJobs.length,
               parseFailureCount: 1,
               dropReasons: ["source_timeout"],
-              sourceSucceeded: false,
+              sourceSucceeded: emittedJobs.length > 0,
+              sourceTimedOut: true,
+              jobsEmittedViaOnBatch,
             };
           }
         },
         concurrency,
+        {
+          provider: definition.provider,
+          providerStartedMs,
+          providerBudgetMs,
+        },
       );
 
       const warnings = sourceRuns.flatMap((run) => run.warnings ?? []);
@@ -158,11 +216,16 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
         definition.provider,
         adapterSources.length,
         sourceRuns,
+        {
+          providerElapsedMs: Date.now() - providerStartedMs,
+          providerBudgetMs,
+          sourceTimeoutMs,
+        },
       );
 
       console.info(`[${definition.provider}:adapter-summary]`, diagnostics);
 
-      return finalizeProviderResult({
+      const result = finalizeProviderResult({
         provider: definition.provider,
         jobs,
         sourceCount: adapterSources.length,
@@ -171,6 +234,8 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
         diagnostics,
         didExecuteSuccessfully: sourceRuns.some((run) => run.sourceSucceeded ?? run.jobs.length > 0),
       });
+
+      return applyAdapterStatusRules(result, sourceRuns, diagnostics);
     },
   });
 }
@@ -208,10 +273,116 @@ function finalizeProviderSourceRun<P extends ProviderResult["provider"]>(
   };
 }
 
+async function runSourcesWithSoftProviderBudget<
+  P extends ProviderResult["provider"],
+  TSource extends ProviderSourceFor<P>,
+>(
+  sources: readonly TSource[],
+  worker: (
+    source: TSource,
+    effectiveSourceTimeoutMs: number | undefined,
+  ) => Promise<ProviderSourceAdapterRun<P>>,
+  concurrency: number,
+  budget: {
+    provider: P;
+    providerStartedMs: number;
+    providerBudgetMs: number;
+  },
+) {
+  const results: Array<ProviderSourceAdapterRun<P>> = [];
+  let currentIndex = 0;
+
+  const takeNextIndex = () => {
+    if (budget.providerBudgetMs > 0 && Date.now() - budget.providerStartedMs >= budget.providerBudgetMs) {
+      return undefined;
+    }
+
+    if (currentIndex >= sources.length) {
+      return undefined;
+    }
+
+    const index = currentIndex;
+    currentIndex += 1;
+    return index;
+  };
+
+  const markRemainingSkipped = () => {
+    while (currentIndex < sources.length) {
+      const index = currentIndex;
+      currentIndex += 1;
+      results[index] = createProviderBudgetSkippedRun(
+        budget.provider,
+        sources[index].id,
+        budget.providerBudgetMs,
+      );
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, Math.floor(concurrency)), sources.length) }, async () => {
+      while (true) {
+        const index = takeNextIndex();
+        if (index === undefined) {
+          markRemainingSkipped();
+          return;
+        }
+
+        const remainingBudgetMs =
+          budget.providerBudgetMs > 0
+            ? Math.max(1, budget.providerBudgetMs - (Date.now() - budget.providerStartedMs))
+            : undefined;
+        results[index] = await worker(sources[index], remainingBudgetMs);
+      }
+    }),
+  );
+
+  return results;
+}
+
+function createProviderBudgetSkippedRun<P extends ProviderResult["provider"]>(
+  provider: P,
+  sourceId: string,
+  providerBudgetMs: number,
+): ProviderSourceAdapterRun<P> {
+  return {
+    fetchedCount: 0,
+    fetchCount: 0,
+    jobs: [],
+    warnings: [
+      `Provider ${provider} skipped source ${sourceId} because the ${providerBudgetMs}ms provider crawl budget was exhausted.`,
+    ],
+    parseSuccessCount: 0,
+    parseFailureCount: 0,
+    dropReasons: ["source_skipped_provider_budget"],
+    sourceSucceeded: false,
+    sourceSkipped: true,
+  };
+}
+
+function resolveEffectiveSourceTimeoutMs(
+  sourceTimeoutMs: number,
+  remainingProviderBudgetMs: number | undefined,
+) {
+  if (sourceTimeoutMs > 0 && remainingProviderBudgetMs !== undefined) {
+    return Math.max(1, Math.min(sourceTimeoutMs, remainingProviderBudgetMs));
+  }
+
+  if (sourceTimeoutMs > 0) {
+    return sourceTimeoutMs;
+  }
+
+  return remainingProviderBudgetMs;
+}
+
 function buildProviderDiagnostics<P extends ProviderResult["provider"]>(
   provider: P,
   discoveryCount: number,
   sourceRuns: Array<ProviderSourceAdapterRun<P>>,
+  timing: {
+    providerElapsedMs: number;
+    providerBudgetMs: number;
+    sourceTimeoutMs: number;
+  },
 ): ProviderDiagnostics<P> {
   const dropReasonCounts = sourceRuns
     .flatMap((run) => run.dropReasons ?? [])
@@ -223,10 +394,16 @@ function buildProviderDiagnostics<P extends ProviderResult["provider"]>(
   return {
     provider,
     discoveryCount,
+    sourceCount: discoveryCount,
+    sourceSucceededCount: sourceRuns.filter((run) => run.sourceSucceeded).length,
+    sourceTimedOutCount: sourceRuns.filter((run) => run.sourceTimedOut).length,
+    sourceFailedCount: sourceRuns.filter((run) => run.sourceFailed).length,
+    sourceSkippedCount: sourceRuns.filter((run) => run.sourceSkipped).length,
     fetchCount: sourceRuns.reduce(
       (total, run) => total + (run.fetchCount ?? (run.fetchedCount > 0 || (run.warnings?.length ?? 0) > 0 ? 1 : 0)),
       0,
     ),
+    fetchedCount: sourceRuns.reduce((total, run) => total + run.fetchedCount, 0),
     parseSuccessCount: sourceRuns.reduce(
       (total, run) => total + (run.parseSuccessCount ?? run.jobs.length),
       0,
@@ -248,10 +425,100 @@ function buildProviderDiagnostics<P extends ProviderResult["provider"]>(
       (total, run) => total + (run.invalidSeedCount ?? 0),
       0,
     ),
+    jobsEmittedViaOnBatch: sourceRuns.reduce(
+      (total, run) => total + (run.jobsEmittedViaOnBatch ?? 0),
+      0,
+    ),
+    providerElapsedMs: timing.providerElapsedMs,
+    providerBudgetMs: timing.providerBudgetMs,
+    sourceTimeoutMs: timing.sourceTimeoutMs,
     dropReasonCounts,
     sampleDropReasons: Object.keys(dropReasonCounts).slice(0, 8),
     sampleInvalidSeeds: sourceRuns
       .flatMap((run) => run.sampleInvalidSeeds ?? [])
       .slice(0, 8),
   };
+}
+
+function applyAdapterStatusRules<P extends ProviderResult["provider"]>(
+  result: ProviderResult<P>,
+  sourceRuns: Array<ProviderSourceAdapterRun<P>>,
+  diagnostics: ProviderDiagnostics<P>,
+): ProviderResult<P> {
+  const sourceCount = sourceRuns.length;
+  const sourceSucceededCount = diagnostics.sourceSucceededCount ?? 0;
+  const sourceTimedOutCount = diagnostics.sourceTimedOutCount ?? 0;
+  const sourceFailedCount = diagnostics.sourceFailedCount ?? 0;
+  const sourceSkippedCount = diagnostics.sourceSkippedCount ?? 0;
+  const emittedJobCount = result.jobs.length + (diagnostics.jobsEmittedViaOnBatch ?? 0);
+  const hasSourceProblem = sourceTimedOutCount > 0 || sourceFailedCount > 0 || sourceSkippedCount > 0;
+
+  if (sourceCount > 0 && sourceSkippedCount === sourceCount && emittedJobCount === 0) {
+    return {
+      ...result,
+      status: "unsupported",
+      errorMessage:
+        result.errorMessage ??
+        `No usable ${result.provider} source could start before the provider budget was exhausted.`,
+    };
+  }
+
+  if (sourceSucceededCount > 0 && hasSourceProblem) {
+    return {
+      ...result,
+      status: "partial",
+      errorMessage:
+        result.errorMessage ??
+        summarizeAdapterSourceProblems(result.provider, diagnostics),
+    };
+  }
+
+  if (sourceSucceededCount > 0) {
+    return {
+      ...result,
+      status: result.warningCount && result.warningCount > 0 ? "partial" : "success",
+      errorMessage: result.warningCount && result.warningCount > 0 ? result.errorMessage : undefined,
+    };
+  }
+
+  if (sourceTimedOutCount === sourceCount && emittedJobCount === 0) {
+    return {
+      ...result,
+      status: "failed",
+      errorMessage: `All ${result.provider} sources timed out before emitting jobs.`,
+    };
+  }
+
+  if (sourceFailedCount + sourceTimedOutCount + sourceSkippedCount >= sourceCount && emittedJobCount === 0) {
+    return {
+      ...result,
+      status: "failed",
+      errorMessage:
+        result.errorMessage ??
+        summarizeAdapterSourceProblems(result.provider, diagnostics),
+    };
+  }
+
+  return result;
+}
+
+function summarizeAdapterSourceProblems(
+  provider: ProviderResult["provider"],
+  diagnostics: ProviderDiagnostics,
+) {
+  const parts = [
+    diagnostics.sourceTimedOutCount
+      ? `${diagnostics.sourceTimedOutCount} source(s) timed out`
+      : undefined,
+    diagnostics.sourceFailedCount
+      ? `${diagnostics.sourceFailedCount} source(s) failed`
+      : undefined,
+    diagnostics.sourceSkippedCount
+      ? `${diagnostics.sourceSkippedCount} source(s) were skipped`
+      : undefined,
+  ].filter((value): value is string => Boolean(value));
+
+  return parts.length > 0
+    ? `Provider ${provider} completed with partial source results: ${parts.join(", ")}.`
+    : `Provider ${provider} completed with partial source results.`;
 }

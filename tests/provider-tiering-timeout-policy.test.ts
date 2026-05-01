@@ -9,6 +9,7 @@ import {
   type SourceInventoryRecord,
 } from "@/lib/server/discovery/inventory";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
+import { createLeverProvider } from "@/lib/server/providers/lever";
 import type { CrawlProvider, NormalizedJobSeed } from "@/lib/server/providers/types";
 import type { ProviderPlatform } from "@/lib/types";
 import { FakeDb } from "@/tests/helpers/fake-db";
@@ -212,6 +213,173 @@ describe("provider tiering and timeout policy", () => {
       ]),
     );
   });
+
+  it("persists a Lever live batch when a later source times out", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const persistSpy = vi.spyOn(repository, "persistJobsWithStats");
+    const now = new Date("2026-04-20T12:00:00.000Z");
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes("/slowco?")) {
+        return new Promise<Response>(() => undefined);
+      }
+
+      return new Response(
+        JSON.stringify([
+          {
+            id: "lever-fast-job",
+            text: "Software Engineer",
+            hostedUrl: "https://jobs.lever.co/fastco/lever-fast-job",
+            applyUrl: "https://jobs.lever.co/fastco/lever-fast-job/apply",
+            categories: {
+              location: "Remote, United States",
+              commitment: "Full-time",
+            },
+          },
+        ]),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await runSearchIngestionFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["lever"],
+        crawlMode: "balanced",
+      },
+      {
+        repository,
+        providers: [createLeverProvider()],
+        discovery: createDiscovery([createLeverSource("fastco"), createLeverSource("slowco")]),
+        fetchImpl,
+        now,
+        providerTimeoutMs: 80,
+        sourceTimeoutMs: 25,
+      },
+    );
+    const leverResult = result.sourceResults.find((sourceResult) => sourceResult.provider === "lever");
+    const persistedJobs = await repository.getJobsByCrawlRun(result.crawlRun._id);
+    const searchSessionId = result.searchSession?._id;
+    if (!searchSessionId) {
+      throw new Error("Expected crawl response to include a search session.");
+    }
+
+    expect(persistSpy).toHaveBeenCalledWith(
+      result.crawlRun._id,
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "Software Engineer",
+          sourcePlatform: "lever",
+          sourceJobId: "lever-fast-job",
+        }),
+      ]),
+      expect.objectContaining({
+        searchSessionId,
+      }),
+    );
+    expect(persistedJobs).toHaveLength(1);
+    expect(persistedJobs[0]).toMatchObject({
+      title: "Software Engineer",
+      sourcePlatform: "lever",
+      sourceJobId: "lever-fast-job",
+    });
+    expect(leverResult).toMatchObject({
+      provider: "lever",
+      status: "partial",
+      sourceCount: 2,
+      fetchedCount: 1,
+      matchedCount: 1,
+      savedCount: 1,
+    });
+    expect(leverResult?.status).not.toBe("timed_out");
+  });
+
+  it("keeps request-time and background provider timeout budgets separate", async () => {
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const now = new Date("2026-04-20T12:00:00.000Z");
+
+    await runSearchIngestionFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+        crawlMode: "balanced",
+      },
+      {
+        repository: new JobCrawlerRepository(new FakeDb()),
+        providers: [
+          createProvider("greenhouse", async (_context, sources) =>
+            providerResult("greenhouse", sources.length, [
+              createProviderJob({
+                title: "Software Engineer",
+                sourcePlatform: "greenhouse",
+                sourceJobId: "request-budget-job",
+                now,
+              }),
+            ]),
+          ),
+        ],
+        discovery: createDiscovery([createSource("greenhouse")]),
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+        providerTimeoutMs: 123,
+        sourceTimeoutMs: 45,
+      },
+    );
+
+    const backgroundRepository = new JobCrawlerRepository(new MongoLikeNullDb());
+    await backgroundRepository.upsertSourceInventory([
+      createInventoryRecord("workday", now),
+    ]);
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository: backgroundRepository,
+      providers: [
+        createProvider("workday", async (_context, sources) =>
+          providerResult("workday", sources.length, []),
+        ),
+      ],
+      now,
+      maxSources: 1,
+      runTimeoutMs: 2_000,
+      providerTimeoutMs: 2_345,
+      sourceTimeoutMs: 678,
+      schedulingIntervalMs: 60_000,
+      refreshInventory: () => backgroundRepository.listSourceInventory(["workday"]),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected background ingestion to start.");
+    }
+    await waitForRunCompletion(backgroundRepository, triggered.crawlRunId);
+
+    expect(infoSpy).toHaveBeenCalledWith(
+      "[crawl:timeout-policy]",
+      expect.objectContaining({
+        providerTimeoutMs: 123,
+        sourceTimeoutMs: 45,
+        isRequestTimeRun: true,
+        isBackgroundRun: false,
+      }),
+    );
+    expect(infoSpy).toHaveBeenCalledWith(
+      "[crawl:timeout-policy]",
+      expect.objectContaining({
+        crawlRunId: triggered.crawlRunId,
+        providerTimeoutMs: 2_345,
+        sourceTimeoutMs: 678,
+        isRequestTimeRun: false,
+        isBackgroundRun: true,
+      }),
+    );
+  });
 });
 
 async function runDeepTimeoutScenario(
@@ -365,6 +533,16 @@ function createSource(platform: "greenhouse" | "workday" | "company_page") {
     confidence: "medium",
     discoveryMethod: "future_search",
     pageType: "html_page",
+  });
+}
+
+function createLeverSource(token: string) {
+  return classifySourceCandidate({
+    url: `https://jobs.lever.co/${token}`,
+    token,
+    companyHint: token,
+    confidence: "high",
+    discoveryMethod: "platform_registry",
   });
 }
 

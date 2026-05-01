@@ -34,6 +34,7 @@ const envSchema = z.object({
   CRAWL_MAX_SOURCES_PER_PROVIDER: z.coerce.number().int().positive().default(40),
   CRAWL_PROVIDER_TIMEOUT_MS: z.coerce.number().int().positive().default(9000),
   CRAWL_SOURCE_TIMEOUT_MS: z.coerce.number().int().positive().default(7000),
+  CRAWL_LEVER_SOURCE_CONCURRENCY: z.coerce.number().int().positive().default(3),
   CRAWL_PROVIDER_CONCURRENCY: z.coerce.number().int().positive().default(4),
   CRAWL_PROGRESS_UPDATE_INTERVAL_MS: z.coerce.number().int().positive().default(250),
   CRAWL_GLOBAL_TIMEOUT_MS: z.coerce.number().int().positive().default(60000),
@@ -57,6 +58,7 @@ const envSchema = z.object({
   BACKGROUND_INGESTION_MAX_SOURCES_PER_PROVIDER: z.coerce.number().int().positive().default(48),
   BACKGROUND_INGESTION_PROVIDER_TIMEOUT_MS: z.coerce.number().int().positive().default(120000),
   BACKGROUND_INGESTION_SOURCE_TIMEOUT_MS: z.coerce.number().int().positive().default(45000),
+  BACKGROUND_INGESTION_LEVER_SOURCE_CONCURRENCY: z.coerce.number().int().positive().default(4),
   BACKGROUND_INGESTION_PROVIDER_CONCURRENCY: z.coerce.number().int().positive().default(2),
   BACKGROUND_INGESTION_STALE_AFTER_MS: z.coerce.number().int().positive().default(1800000),
   BACKGROUND_INGESTION_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(900000),
@@ -116,6 +118,8 @@ export function getEnv() {
         process.env.CRAWL_PROVIDER_TIMEOUT_MS ?? "9000",
       CRAWL_SOURCE_TIMEOUT_MS:
         process.env.CRAWL_SOURCE_TIMEOUT_MS ?? "7000",
+      CRAWL_LEVER_SOURCE_CONCURRENCY:
+        process.env.CRAWL_LEVER_SOURCE_CONCURRENCY ?? "3",
       CRAWL_PROVIDER_CONCURRENCY:
         process.env.CRAWL_PROVIDER_CONCURRENCY ?? "4",
       CRAWL_PROGRESS_UPDATE_INTERVAL_MS:
@@ -156,6 +160,8 @@ export function getEnv() {
         process.env.BACKGROUND_INGESTION_PROVIDER_TIMEOUT_MS ?? "120000",
       BACKGROUND_INGESTION_SOURCE_TIMEOUT_MS:
         process.env.BACKGROUND_INGESTION_SOURCE_TIMEOUT_MS ?? "45000",
+      BACKGROUND_INGESTION_LEVER_SOURCE_CONCURRENCY:
+        process.env.BACKGROUND_INGESTION_LEVER_SOURCE_CONCURRENCY ?? "4",
       BACKGROUND_INGESTION_PROVIDER_CONCURRENCY:
         process.env.BACKGROUND_INGESTION_PROVIDER_CONCURRENCY ?? "2",
       BACKGROUND_INGESTION_STALE_AFTER_MS:

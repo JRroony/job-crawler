@@ -449,6 +449,7 @@ function mergeProviderSeedValidationDiagnostics<P extends ProviderResult["provid
   ].slice(0, maxDiagnosticSamples);
 
   return {
+    ...input.existing,
     provider: input.provider,
     discoveryCount: input.existing?.discoveryCount ?? input.sourceCount,
     fetchCount: input.existing?.fetchCount ?? (input.fetchedCount > 0 ? 1 : 0),
