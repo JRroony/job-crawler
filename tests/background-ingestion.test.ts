@@ -1730,6 +1730,153 @@ describe("recurring background ingestion", () => {
     expect(inventoryById.get(affirm._id)?.lastFailureReason).toBeUndefined();
   });
 
+  it("finalizes a selected provider with zero sources as unsupported", async () => {
+    const repository = new JobCrawlerRepository(new MongoLikeNullDb());
+    const now = new Date("2026-04-15T12:00:00.000Z");
+
+    await repository.upsertSourceInventory([
+      createInventoryRecord({
+        token: "openai",
+        companyHint: "OpenAI",
+        nextEligibleAt: "2026-04-15T10:00:00.000Z",
+      }),
+    ]);
+
+    const greenhouseProvider = createStubProvider("greenhouse", async (_context, sources) => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: sources.length,
+      fetchedCount: 1,
+      matchedCount: 1,
+      warningCount: 0,
+      jobs: [
+        createProviderJob({
+          title: "Software Engineer",
+          sourceJobId: "greenhouse-openai-software-engineer",
+        }),
+      ],
+    }));
+    const leverProvider = createStubProvider("lever", async () => {
+      throw new Error("Lever should not run without sources.");
+    });
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [greenhouseProvider, leverProvider],
+      now,
+      maxSources: 1,
+      schedulingIntervalMs: 60_000,
+      runTimeoutMs: 2_000,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected recurring ingestion to start.");
+    }
+
+    await waitForRunCompletion(repository, triggered.crawlRunId);
+    const sourceResults = await repository.getCrawlSourceResults(triggered.crawlRunId);
+
+    expect(sourceResults).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          provider: "greenhouse",
+          status: "success",
+          savedCount: 1,
+        }),
+        expect.objectContaining({
+          provider: "lever",
+          status: "unsupported",
+          sourceCount: 0,
+          errorMessage: "no_sources_for_provider",
+        }),
+      ]),
+    );
+    expect(sourceResults.some((result) => result.status === "running")).toBe(false);
+  });
+
+  it("keeps background live-batch persistence when a later provider failure occurs", async () => {
+    const repository = new JobCrawlerRepository(new MongoLikeNullDb());
+    const persistSpy = vi.spyOn(repository, "persistJobsWithStats");
+    const now = new Date("2026-04-15T12:00:00.000Z");
+
+    await repository.upsertSourceInventory([
+      createInventoryRecord({
+        token: "openai",
+        companyHint: "OpenAI",
+        nextEligibleAt: "2026-04-15T10:00:00.000Z",
+        inventoryRank: 0,
+      }),
+      createInventoryRecord({
+        token: "stripe",
+        companyHint: "Stripe",
+        nextEligibleAt: "2026-04-15T10:00:00.000Z",
+        inventoryRank: 1,
+      }),
+    ]);
+
+    const provider = createStubProvider("greenhouse", async (context, sources) => {
+      await context.onBatch?.({
+        provider: "greenhouse",
+        sourceCount: 1,
+        fetchedCount: 1,
+        jobs: [
+          createProviderJob({
+            title: "Software Engineer",
+            company: "OpenAI",
+            sourceJobId: "openai-live-batch",
+          }),
+        ],
+      });
+
+      expect(sources.map((source) => source.token)).toEqual(["openai", "stripe"]);
+      throw new Error("stripe source failed after the live batch was persisted");
+    });
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [provider],
+      now,
+      maxSources: 2,
+      schedulingIntervalMs: 60_000,
+      runTimeoutMs: 2_000,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected recurring ingestion to start.");
+    }
+
+    const crawlRun = await waitForRunCompletion(repository, triggered.crawlRunId);
+    const sourceResults = await repository.getCrawlSourceResults(triggered.crawlRunId);
+    const persistedJobs = await repository.getJobsByCrawlRun(triggered.crawlRunId);
+
+    expect(persistSpy).toHaveBeenCalledWith(
+      triggered.crawlRunId,
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "Software Engineer",
+          sourceJobId: "openai-live-batch",
+        }),
+      ]),
+      expect.objectContaining({
+        searchSessionId: expect.any(String),
+      }),
+    );
+    expect(crawlRun.status).toBe("partial");
+    expect(persistedJobs).toHaveLength(1);
+    expect(sourceResults[0]).toMatchObject({
+      provider: "greenhouse",
+      status: "partial",
+      sourceCount: 2,
+      fetchedCount: 1,
+      matchedCount: 1,
+      savedCount: 1,
+    });
+  });
+
   it("reserves crawl capacity for never-crawled expansion sources so old inventory cannot starve growth", async () => {
     const repository = new JobCrawlerRepository(new MongoLikeNullDb());
     const now = new Date("2026-04-15T12:00:00.000Z");

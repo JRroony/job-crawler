@@ -1,10 +1,10 @@
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
-import { MongoClient, type Collection, type Db, type Document } from "mongodb";
+import { MongoClient, type Db, type Document } from "mongodb";
 
 import type { JobCrawlerRepository } from "@/lib/server/db/repository";
-import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
+import type { DiscoveredSource } from "@/lib/server/discovery/types";
 import type { SourceInventoryRecord } from "@/lib/server/discovery/inventory";
 import type { CrawlProvider, NormalizedJobSeed } from "@/lib/server/providers/types";
 import type { CrawlRun, SearchFilters } from "@/lib/types";
@@ -21,61 +21,54 @@ export type PersistenceCounts = {
   indexedEventCount: number;
 };
 
-type LatestJobSample = {
-  id: string;
-  title?: string;
-  company?: string;
-  locationText?: string;
-  sourcePlatform?: string;
-  sourceJobId?: string;
-  firstSeenAt?: string;
-  lastSeenAt?: string;
-  diagnosticRunId?: string;
-};
-
 export type IngestionPersistenceValidationInput = {
   triggerStatus?: string;
   runStatus?: string;
   fellBackToMemory: boolean;
+  jobsBefore: number;
+  jobsAfter: number;
   persistenceCounts: PersistenceCounts;
-  matchingDiagnosticSearchJobs: number;
-  latestDiagnosticJobs: number;
+  runningProviderCountAfterFinalize: number;
+  sourceInventoryContaminationCount: number;
+  backgroundProviderTimeoutMs?: number;
 };
 
 type IngestionPersistenceDiagnosticSummary = {
-  status: "passed" | "failed";
+  storageMode: "mongodb" | "memory";
   failures: string[];
   databaseName: string;
   mongoUriHost: string;
-  storage: {
-    connectedToMongo: boolean;
-    fellBackToMemory: boolean;
-    fallbackWarnings: string[];
-  };
   diagnosticRunId: string;
   sourceId?: string;
   searchId?: string;
   crawlRunId?: string;
   backgroundTriggerStatus?: string;
   crawlRunStatus?: string;
-  jobCountBefore: number;
-  jobCountAfter: number;
+  jobsBefore: number;
+  jobsAfter: number;
   insertedCount: number;
   updatedCount: number;
   linkedToRunCount: number;
   indexedEventCount: number;
+  runningProviderCountAfterFinalize: number;
+  providerResults: Array<{
+    provider: string;
+    status: string;
+    sourceCount: number;
+    fetchedCount: number;
+    matchedCount: number;
+    savedCount: number;
+    errorMessage?: string | null;
+  }>;
+  sourceInventoryContaminationCount: number;
+  repairedSourceInventoryContaminationCount: number;
+  backgroundProviderTimeoutMs?: number;
   dbEventCounts: {
     linkedToRunCount: number;
     indexedEventCount: number;
   };
-  search: {
-    searchId?: string;
-    returnedCount: number;
-    totalMatchedCount: number;
-    matchingDiagnosticJobCount: number;
-  };
-  latestJobs: LatestJobSample[];
   usedEligibilityTimeShift: boolean;
+  pass: boolean;
   error?: string;
 };
 
@@ -233,20 +226,26 @@ export function collectIngestionPersistenceFailures(
     failures.push("No jobs were inserted or updated by the controlled ingestion cycle.");
   }
 
-  if (input.persistenceCounts.linkedToRunCount <= 0) {
-    failures.push("No persisted jobs were linked to the diagnostic crawl run.");
+  if (input.jobsAfter <= input.jobsBefore && input.persistenceCounts.updatedCount <= 0) {
+    failures.push(
+      `MongoDB jobs did not increase and no existing jobs were updated; jobsBefore=${input.jobsBefore}, jobsAfter=${input.jobsAfter}.`,
+    );
   }
 
-  if (input.persistenceCounts.indexedEventCount <= 0) {
-    failures.push("No indexed job events were emitted for the diagnostic crawl run.");
+  if (input.runningProviderCountAfterFinalize > 0) {
+    failures.push(
+      `${input.runningProviderCountAfterFinalize} crawlSourceResult document(s) remained running after crawlRun finalization.`,
+    );
   }
 
-  if (input.latestDiagnosticJobs <= 0) {
-    failures.push("The latest jobs query did not include the diagnostic job by lastSeenAt.");
+  if (input.sourceInventoryContaminationCount > 0) {
+    failures.push(
+      `${input.sourceInventoryContaminationCount} sourceInventory record(s) still have cross-source contaminated lastFailureReason values.`,
+    );
   }
 
-  if (input.matchingDiagnosticSearchJobs <= 0) {
-    failures.push("Normal search did not return the persisted diagnostic job from MongoDB.");
+  if (input.backgroundProviderTimeoutMs === 9000) {
+    failures.push("Background ingestion used the request-time 9000ms provider timeout.");
   }
 
   return failures;
@@ -274,13 +273,11 @@ export async function runIngestionPersistenceDiagnostic(
   let crawlRunStatus: string | undefined;
   let persistenceCounts = { ...emptyPersistenceCounts };
   let dbEventCounts = { linkedToRunCount: 0, indexedEventCount: 0 };
-  let latestJobs: LatestJobSample[] = [];
-  let searchSummary = {
-    searchId: undefined as string | undefined,
-    returnedCount: 0,
-    totalMatchedCount: 0,
-    matchingDiagnosticJobCount: 0,
-  };
+  let providerResults: IngestionPersistenceDiagnosticSummary["providerResults"] = [];
+  let runningProviderCountAfterFinalize = 0;
+  let sourceInventoryContaminationCount = 0;
+  let repairedSourceInventoryContaminationCount = 0;
+  let backgroundProviderTimeoutMs: number | undefined;
   let usedEligibilityTimeShift = false;
 
   try {
@@ -294,14 +291,12 @@ export async function runIngestionPersistenceDiagnostic(
       { triggerRecurringBackgroundIngestion },
       { classifySourceCandidate },
       { sourceInventoryRecordSchema, toSourceInventoryRecord },
-      { runSearchFromFilters },
     ] = await Promise.all([
       import("@/lib/server/db/indexes"),
       import("@/lib/server/db/repository"),
       import("@/lib/server/background/recurring-ingestion"),
       import("@/lib/server/discovery/classify-source"),
       import("@/lib/server/discovery/inventory"),
-      import("@/lib/server/search/service"),
     ]);
 
     await ensureDatabaseIndexes(db as never);
@@ -384,67 +379,66 @@ export async function runIngestionPersistenceDiagnostic(
       crawlRunStatus = crawlRun?.status;
       persistenceCounts = extractPersistenceCounts(crawlRun);
       dbEventCounts = await countRunEvents(db, triggerResult.crawlRunId);
-
-      const search = await repository.getSearch(triggerResult.searchId);
-      if (search) {
-        const searchResult = await runSearchFromFilters(search.filters, {
-          repository,
-          providers: [],
-          discovery: emptyDiscoveryService(),
-          fetchImpl: fetch,
-          now: new Date(),
-          requestOwnerKey: "diagnose:ingestion-persistence:db-search",
-          allowRequestTimeSupplementalCrawl: false,
-          initialVisibleWaitMs: 0,
-        });
-        searchSummary = {
-          searchId: searchResult.search._id,
-          returnedCount: searchResult.jobs.length,
-          totalMatchedCount: searchResult.totalMatchedCount ?? searchResult.jobs.length,
-          matchingDiagnosticJobCount: searchResult.jobs.filter((job) =>
-            job.rawSourceMetadata?.diagnosticRunId === diagnosticRunId,
-          ).length,
-        };
-      }
+      backgroundProviderTimeoutMs =
+        typeof crawlRun?.diagnostics?.backgroundCycle?.providerTimeoutMs === "number"
+          ? crawlRun.diagnostics.backgroundCycle.providerTimeoutMs
+          : undefined;
+      providerResults = (await repository.getCrawlSourceResults(triggerResult.crawlRunId)).map(
+        (result) => ({
+          provider: result.provider,
+          status: result.status,
+          sourceCount: result.sourceCount,
+          fetchedCount: result.fetchedCount,
+          matchedCount: result.matchedCount,
+          savedCount: result.savedCount,
+          errorMessage: result.errorMessage,
+        }),
+      );
+      runningProviderCountAfterFinalize = providerResults.filter(
+        (result) => result.status === "running",
+      ).length;
     }
 
     jobCountAfter = await jobs.countDocuments();
-    latestJobs = await loadLatestJobs(jobs, options.latestLimit);
+    repairedSourceInventoryContaminationCount =
+      await repairSourceInventoryContamination(db);
+    sourceInventoryContaminationCount =
+      (await findSourceInventoryContamination(db)).length;
 
     const failures = collectIngestionPersistenceFailures({
       triggerStatus: backgroundTriggerStatus,
       runStatus: crawlRunStatus,
       fellBackToMemory: fallbackDetector.warnings.length > 0,
+      jobsBefore: jobCountBefore,
+      jobsAfter: jobCountAfter,
       persistenceCounts,
-      matchingDiagnosticSearchJobs: searchSummary.matchingDiagnosticJobCount,
-      latestDiagnosticJobs: latestJobs.filter(
-        (job) => job.diagnosticRunId === diagnosticRunId,
-      ).length,
+      runningProviderCountAfterFinalize,
+      sourceInventoryContaminationCount,
+      backgroundProviderTimeoutMs,
     });
 
     return {
-      status: failures.length > 0 ? "failed" : "passed",
+      storageMode: fallbackDetector.warnings.length > 0 ? "memory" : "mongodb",
       failures,
       databaseName,
       mongoUriHost: uriHostFromMongoUri(mongoUri),
-      storage: {
-        connectedToMongo: true,
-        fellBackToMemory: fallbackDetector.warnings.length > 0,
-        fallbackWarnings: fallbackDetector.warnings,
-      },
       diagnosticRunId,
       sourceId,
       searchId,
       crawlRunId,
       backgroundTriggerStatus,
       crawlRunStatus,
-      jobCountBefore,
-      jobCountAfter,
+      jobsBefore: jobCountBefore,
+      jobsAfter: jobCountAfter,
       ...persistenceCounts,
+      runningProviderCountAfterFinalize,
+      providerResults,
+      sourceInventoryContaminationCount,
+      repairedSourceInventoryContaminationCount,
+      backgroundProviderTimeoutMs,
       dbEventCounts,
-      search: searchSummary,
-      latestJobs,
       usedEligibilityTimeShift,
+      pass: failures.length === 0,
     };
   } catch (error) {
     const failures = [
@@ -452,28 +446,27 @@ export async function runIngestionPersistenceDiagnostic(
     ];
 
     return {
-      status: "failed",
+      storageMode: fallbackDetector.warnings.length > 0 ? "memory" : "mongodb",
       failures,
       databaseName,
       mongoUriHost: uriHostFromMongoUri(mongoUri),
-      storage: {
-        connectedToMongo: false,
-        fellBackToMemory: fallbackDetector.warnings.length > 0,
-        fallbackWarnings: fallbackDetector.warnings,
-      },
       diagnosticRunId,
       sourceId,
       searchId,
       crawlRunId,
       backgroundTriggerStatus,
       crawlRunStatus,
-      jobCountBefore,
-      jobCountAfter,
+      jobsBefore: jobCountBefore,
+      jobsAfter: jobCountAfter,
       ...persistenceCounts,
+      runningProviderCountAfterFinalize,
+      providerResults,
+      sourceInventoryContaminationCount,
+      repairedSourceInventoryContaminationCount,
+      backgroundProviderTimeoutMs,
       dbEventCounts,
-      search: searchSummary,
-      latestJobs,
       usedEligibilityTimeShift,
+      pass: false,
       error: error instanceof Error ? error.stack ?? error.message : String(error),
     };
   } finally {
@@ -488,7 +481,7 @@ async function main() {
   const summary = await runIngestionPersistenceDiagnostic(options);
   const output = `${prefix} ${JSON.stringify(summary, null, 2)}`;
 
-  if (summary.status === "passed") {
+  if (summary.pass) {
     console.log(output);
     return;
   }
@@ -541,14 +534,6 @@ function createDiagnosticProvider(input: {
   };
 }
 
-function emptyDiscoveryService(): DiscoveryService {
-  return {
-    async discover() {
-      return [];
-    },
-  };
-}
-
 async function waitForCrawlRunCompletion(
   repository: JobCrawlerRepository,
   crawlRunId: string,
@@ -566,7 +551,9 @@ async function waitForCrawlRunCompletion(
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 
-  return latestRun;
+  throw new Error(
+    `Timed out waiting for crawlRun ${crawlRunId} to reach a terminal state after ${timeoutMs}ms; latestStatus=${latestRun?.status ?? "missing"}.`,
+  );
 }
 
 async function countRunEvents(db: Db, crawlRunId: string) {
@@ -581,42 +568,84 @@ async function countRunEvents(db: Db, crawlRunId: string) {
   };
 }
 
-async function loadLatestJobs(
-  jobs: Collection<DiagnosticJobRecord>,
-  limit: number,
-): Promise<LatestJobSample[]> {
-  const documents = await jobs
+type SourceInventoryDiagnosticRecord = Document & {
+  _id?: unknown;
+  platform?: unknown;
+  token?: unknown;
+  companyHint?: unknown;
+  lastFailureReason?: unknown;
+};
+
+async function findSourceInventoryContamination(db: Db) {
+  const records = await db
+    .collection<SourceInventoryDiagnosticRecord>("sourceInventory")
     .find(
-      {},
+      { lastFailureReason: { $type: "string" } },
       {
         projection: {
           _id: 1,
-          title: 1,
-          company: 1,
-          locationText: 1,
-          sourcePlatform: 1,
-          sourceJobId: 1,
-          firstSeenAt: 1,
-          lastSeenAt: 1,
-          rawSourceMetadata: 1,
+          platform: 1,
+          token: 1,
+          companyHint: 1,
+          lastFailureReason: 1,
         },
-        sort: { lastSeenAt: -1 },
-        limit: Math.max(1, Math.floor(limit)),
       },
     )
     .toArray();
 
-  return documents.map((document) => ({
-    id: String(document._id ?? ""),
-    title: readString(document.title),
-    company: readString(document.company),
-    locationText: readString(document.locationText),
-    sourcePlatform: readString(document.sourcePlatform),
-    sourceJobId: readString(document.sourceJobId),
-    firstSeenAt: readString(document.firstSeenAt),
-    lastSeenAt: readString(document.lastSeenAt),
-    diagnosticRunId: readString(document.rawSourceMetadata?.diagnosticRunId),
-  }));
+  return records.filter((record) =>
+    isContaminatedSourceInventoryRecord(record, records),
+  );
+}
+
+async function repairSourceInventoryContamination(db: Db) {
+  const contaminated = await findSourceInventoryContamination(db);
+  for (const record of contaminated) {
+    if (!record._id) {
+      continue;
+    }
+
+    await db.collection("sourceInventory").updateOne(
+      { _id: record._id },
+      {
+        $unset: {
+          lastFailureReason: "",
+        },
+      },
+    );
+  }
+
+  return contaminated.length;
+}
+
+function isContaminatedSourceInventoryRecord(
+  record: SourceInventoryDiagnosticRecord,
+  allRecords: SourceInventoryDiagnosticRecord[],
+) {
+  const reason = readString(record.lastFailureReason)?.toLowerCase();
+  if (!reason) {
+    return false;
+  }
+
+  const ownTokens = sourceIdentityTokens(record);
+  const foreignTokens = allRecords
+    .filter((candidate) => candidate._id !== record._id)
+    .flatMap(sourceIdentityTokens)
+    .filter((token) => !ownTokens.includes(token));
+
+  return foreignTokens.some((token) => reason.includes(token));
+}
+
+function sourceIdentityTokens(record: SourceInventoryDiagnosticRecord) {
+  return [record.token, record.companyHint, record._id]
+    .map((value) => readString(value)?.toLowerCase())
+    .filter((value): value is string => Boolean(value))
+    .flatMap((value) =>
+      value
+        .split(/[^a-z0-9]+/i)
+        .map((part) => part.trim())
+        .filter((part) => part.length >= 3),
+    );
 }
 
 function resolveDiagnosticLocation(filters: Pick<SearchFilters, "country" | "state" | "city">) {

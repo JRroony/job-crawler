@@ -1037,6 +1037,45 @@ async function executeRecurringInventoryIngestion(
         },
       );
       if (providerSources.length === 0) {
+        const finishedAt = runTimestamp();
+        const sourceResult = createSourceResult({
+          crawlRunId: target.crawlRunId,
+          searchId: target.search._id,
+          provider: provider.provider,
+          status: "unsupported",
+          sourceCount: 0,
+          fetchedCount: 0,
+          matchedCount: 0,
+          savedCount: 0,
+          warningCount: 1,
+          errorMessage: "no_sources_for_provider",
+          startedAt: finishedAt,
+          finishedAt,
+        });
+        sourceResults.push(sourceResult);
+        accumulateProviderThroughputStats(providerThroughputTotals, provider.provider, {
+          ...createEmptyPersistenceStats(),
+          sourceCount: 0,
+          fetchedCount: 0,
+          matchedCount: 0,
+          seedCount: 0,
+          warningCount: 1,
+          failedBatches: 0,
+        });
+        await repository.updateCrawlSourceResult(sourceResult);
+        logProviderLifecycleFinalize({
+          searchId: target.search._id,
+          searchSessionId: target.searchSession._id,
+          crawlRunId: target.crawlRunId,
+          provider: sourceResult.provider,
+          sourceCount: sourceResult.sourceCount,
+          fetchedCount: sourceResult.fetchedCount,
+          matchedCount: sourceResult.matchedCount,
+          savedCount: sourceResult.savedCount,
+          status: sourceResult.status,
+          reason: "no_sources_for_provider",
+          errorMessage: sourceResult.errorMessage,
+        });
         return;
       }
 
@@ -2096,7 +2135,10 @@ function buildBackgroundProviderFailureInventoryObservations(
       health: succeeded ? "healthy" : input.providerTimedOut ? "degraded" : "failing",
       failureReason: succeeded
         ? undefined
-        : buildBackgroundProviderLevelFailureReason(input.provider, input.providerStatus),
+        : buildBackgroundSourceLevelFailureReason(
+            source.id,
+            input.providerTimedOut ? "source_timeout" : "source_failed",
+          ),
     };
 
     return withBackgroundNextEligibleAt(source, observation, input);
@@ -2156,7 +2198,10 @@ function buildBackgroundProviderFallbackInventoryObservation(
         : "failing",
     failureReason: succeeded
       ? undefined
-      : buildBackgroundProviderLevelFailureReason(input.provider, input.providerStatus),
+      : buildBackgroundSourceLevelFailureReason(
+          source.id,
+          input.providerStatus === "timed_out" ? "source_timeout" : "source_failed",
+        ),
   };
 }
 
@@ -2355,10 +2400,17 @@ function resolveFinalStatus(sourceResults: CrawlSourceResult[], totalSavedJobs: 
   const failedCount = sourceResults.filter((result) =>
     result.status === "failed" || result.status === "timed_out",
   ).length;
+  const partialCount = sourceResults.filter(
+    (result) => result.status === "partial" && Boolean(result.errorMessage),
+  ).length;
   const abortedCount = sourceResults.filter((result) => result.status === "aborted").length;
 
   if (abortedCount > 0) {
     return "aborted";
+  }
+
+  if (partialCount > 0) {
+    return "partial";
   }
 
   if (failedCount === 0) {

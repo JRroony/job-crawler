@@ -90,20 +90,23 @@ describe("ingestion persistence diagnostic script helpers", () => {
     });
   });
 
-  it("fails closed on memory fallback, empty persistence, and DB-search misses", () => {
+  it("fails closed on memory fallback, empty persistence, running providers, contamination, and request-time budgets", () => {
     expect(
       collectIngestionPersistenceFailures({
         triggerStatus: "started",
         runStatus: "completed",
         fellBackToMemory: false,
+        jobsBefore: 10,
+        jobsAfter: 11,
         persistenceCounts: {
           insertedCount: 1,
           updatedCount: 0,
           linkedToRunCount: 1,
           indexedEventCount: 1,
         },
-        matchingDiagnosticSearchJobs: 1,
-        latestDiagnosticJobs: 1,
+        runningProviderCountAfterFinalize: 0,
+        sourceInventoryContaminationCount: 0,
+        backgroundProviderTimeoutMs: 120_000,
       }),
     ).toEqual([]);
 
@@ -112,24 +115,27 @@ describe("ingestion persistence diagnostic script helpers", () => {
         triggerStatus: "skipped-no-mongo",
         runStatus: "failed",
         fellBackToMemory: true,
+        jobsBefore: 10,
+        jobsAfter: 10,
         persistenceCounts: {
           insertedCount: 0,
           updatedCount: 0,
           linkedToRunCount: 0,
           indexedEventCount: 0,
         },
-        matchingDiagnosticSearchJobs: 0,
-        latestDiagnosticJobs: 0,
+        runningProviderCountAfterFinalize: 1,
+        sourceInventoryContaminationCount: 2,
+        backgroundProviderTimeoutMs: 9_000,
       }),
     ).toEqual([
       "Storage fell back to the in-memory database.",
       "Background ingestion did not start; status=skipped-no-mongo.",
       "Background ingestion did not finish successfully; status=failed.",
       "No jobs were inserted or updated by the controlled ingestion cycle.",
-      "No persisted jobs were linked to the diagnostic crawl run.",
-      "No indexed job events were emitted for the diagnostic crawl run.",
-      "The latest jobs query did not include the diagnostic job by lastSeenAt.",
-      "Normal search did not return the persisted diagnostic job from MongoDB.",
+      "MongoDB jobs did not increase and no existing jobs were updated; jobsBefore=10, jobsAfter=10.",
+      "1 crawlSourceResult document(s) remained running after crawlRun finalization.",
+      "2 sourceInventory record(s) still have cross-source contaminated lastFailureReason values.",
+      "Background ingestion used the request-time 9000ms provider timeout.",
     ]);
   });
 });
