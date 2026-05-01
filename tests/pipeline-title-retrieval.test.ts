@@ -1550,6 +1550,203 @@ describe("pipeline title retrieval", () => {
     );
   });
 
+  it("finalizes zero-source providers as unsupported instead of leaving them running", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T15:25:00.000Z");
+
+    const greenhouseProvider = createStubProvider("greenhouse", async (_context, sources) => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: sources.length,
+      fetchedCount: 1,
+      matchedCount: 1,
+      warningCount: 0,
+      jobs: [
+        {
+          title: "Software Engineer",
+          company: "Acme",
+          locationText: "Remote, United States",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "zero-source-fast-1",
+          sourceUrl: "https://example.com/jobs/zero-source-fast-1",
+          applyUrl: "https://example.com/jobs/zero-source-fast-1/apply",
+          canonicalUrl: "https://example.com/jobs/zero-source-fast-1",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+      ],
+    }));
+    const smartrecruitersProvider = createStubProvider("smartrecruiters", async () => {
+      throw new Error("SmartRecruiters should not run when no source is routed.");
+    });
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+
+    const result = await runSearchIngestionFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse", "smartrecruiters"],
+      },
+      {
+        repository,
+        providers: [greenhouseProvider, smartrecruitersProvider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+    const storedSourceResults = await repository.getCrawlSourceResults(result.crawlRun._id);
+
+    expect(result.crawlRun.status).toBe("completed");
+    expect(result.sourceResults.find((entry) => entry.provider === "smartrecruiters")).toMatchObject({
+      provider: "smartrecruiters",
+      status: "unsupported",
+      sourceCount: 0,
+      errorMessage: "no_sources_for_provider",
+    });
+    expect(storedSourceResults.some((entry) => entry.status === "running")).toBe(false);
+  });
+
+  it("finalizes an Ashby timeout instead of leaving the provider running", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T15:26:00.000Z");
+
+    const greenhouseProvider = createStubProvider("greenhouse", async (_context, sources) => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: sources.length,
+      fetchedCount: 1,
+      matchedCount: 1,
+      warningCount: 0,
+      jobs: [
+        {
+          title: "Software Engineer",
+          company: "Acme",
+          locationText: "Remote, United States",
+          sourcePlatform: "greenhouse",
+          sourceJobId: "ashby-timeout-fast-1",
+          sourceUrl: "https://example.com/jobs/ashby-timeout-fast-1",
+          applyUrl: "https://example.com/jobs/ashby-timeout-fast-1/apply",
+          canonicalUrl: "https://example.com/jobs/ashby-timeout-fast-1",
+          discoveredAt: now.toISOString(),
+          rawSourceMetadata: {},
+        },
+      ],
+    }));
+    const ashbyProvider = createStubProvider(
+      "ashby",
+      async () => new Promise<never>(() => undefined),
+    );
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+          classifySourceCandidate({
+            url: "https://jobs.ashbyhq.com/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+
+    const result = await runSearchIngestionFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse", "ashby"],
+      },
+      {
+        repository,
+        providers: [greenhouseProvider, ashbyProvider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+        providerTimeoutMs: 10,
+      },
+    );
+    const storedSourceResults = await repository.getCrawlSourceResults(result.crawlRun._id);
+
+    expect(result.crawlRun.status).toBe("partial");
+    expect(result.sourceResults.find((entry) => entry.provider === "ashby")).toMatchObject({
+      provider: "ashby",
+      status: "timed_out",
+      sourceCount: 1,
+      savedCount: 0,
+    });
+    expect(storedSourceResults.some((entry) => entry.status === "running")).toBe(false);
+  });
+
+  it("cleans up stale running providers before terminal crawlRun finalization", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-10T15:27:00.000Z");
+
+    const provider = createStubProvider("greenhouse", async (_context, sources) => ({
+      provider: "greenhouse",
+      status: "running",
+      sourceCount: sources.length,
+      fetchedCount: 0,
+      matchedCount: 0,
+      warningCount: 0,
+      jobs: [],
+    } as unknown as Awaited<ReturnType<CrawlProvider["crawlSources"]>>));
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/acme",
+            token: "acme",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+
+    const result = await runSearchIngestionFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+    const storedSourceResults = await repository.getCrawlSourceResults(result.crawlRun._id);
+
+    expect(result.crawlRun.status).toBe("failed");
+    expect(storedSourceResults).toEqual([
+      expect.objectContaining({
+        provider: "greenhouse",
+        status: "failed",
+        errorMessage: "provider_lifecycle_stale_finalized",
+      }),
+    ]);
+    expect(storedSourceResults.some((entry) => entry.status === "running")).toBe(false);
+  });
+
   it.each([
     {
       query: "Software Engineer",

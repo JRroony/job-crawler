@@ -1017,6 +1017,93 @@ describe("recurring background ingestion", () => {
     });
   });
 
+  it("allows an isolated controlled recurring run while the normal scheduler owner is active", async () => {
+    const repository = new JobCrawlerRepository(new MongoLikeNullDb());
+    const now = new Date("2026-04-15T12:00:00.000Z");
+    let releaseProvider: () => void = () => undefined;
+    const providerGate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    let providerCalls = 0;
+
+    await repository.upsertSourceInventory([
+      toSourceInventoryRecord(
+        classifySourceCandidate({
+          url: "https://boards.greenhouse.io/openai",
+          token: "openai",
+          companyHint: "OpenAI",
+          confidence: "high",
+          discoveryMethod: "platform_registry",
+        }),
+        {
+          now: now.toISOString(),
+          inventoryOrigin: "greenhouse_registry",
+          inventoryRank: 0,
+        },
+      ),
+    ]);
+
+    const provider = createStubProvider("greenhouse", async (_context, sources) => {
+      providerCalls += 1;
+      const sourceJobId = `isolated-${providerCalls}`;
+      await providerGate;
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: sources.length,
+        fetchedCount: 1,
+        matchedCount: 1,
+        warningCount: 0,
+        jobs: [
+          createProviderJob({
+            title: "Software Engineer",
+            company: "OpenAI",
+            sourcePlatform: "greenhouse",
+            sourceJobId,
+          }),
+        ],
+      };
+    });
+
+    const normalRun = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [provider],
+      now,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+      runTimeoutMs: 2_000,
+    });
+    expect(normalRun.status).toBe("started");
+
+    const isolatedRun = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [provider],
+      now,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+      isolationKey: "diagnostic-test",
+      runTimeoutMs: 2_000,
+    });
+    expect(isolatedRun.status).toBe("started");
+
+    releaseProvider();
+
+    if (normalRun.status !== "started" || isolatedRun.status !== "started") {
+      throw new Error("Expected both recurring runs to start.");
+    }
+
+    await Promise.all([
+      waitForRunCompletion(repository, normalRun.crawlRunId),
+      waitForRunCompletion(repository, isolatedRun.crawlRunId),
+    ]);
+
+    const isolatedSearch = await repository.getSearch(isolatedRun.searchId);
+    const isolatedQueueEntry = await repository.getCrawlQueueEntryByRunId(
+      isolatedRun.crawlRunId,
+    );
+
+    expect(isolatedSearch?.systemProfileId).toContain(":isolated:diagnostic-test");
+    expect(isolatedQueueEntry?.ownerKey).toContain(":isolated:");
+  });
+
   it("reports bootstrap/index initialization failures separately from generic Mongo unavailability", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const bootstrapError = new Error(
@@ -1422,6 +1509,225 @@ describe("recurring background ingestion", () => {
         healthy: 1,
       },
     });
+  });
+
+  it("records an OpenAI 404 only on the OpenAI source inventory record", async () => {
+    const repository = new JobCrawlerRepository(new MongoLikeNullDb());
+    const now = new Date("2026-04-15T12:00:00.000Z");
+    const openai = createInventoryRecord({
+      token: "openai",
+      companyHint: "OpenAI",
+      nextEligibleAt: "2026-04-15T10:00:00.000Z",
+      inventoryRank: 0,
+    });
+    const stripe = createInventoryRecord({
+      token: "stripe",
+      companyHint: "Stripe",
+      nextEligibleAt: "2026-04-15T10:00:00.000Z",
+      inventoryRank: 1,
+    });
+
+    await repository.upsertSourceInventory([openai, stripe]);
+
+    const provider = createStubProvider("greenhouse", async (_context, sources) => ({
+      provider: "greenhouse",
+      status: "partial",
+      sourceCount: sources.length,
+      fetchedCount: 1,
+      matchedCount: 1,
+      warningCount: 1,
+      errorMessage:
+        "Greenhouse returned 404 for openai, coinbase, affirm, airbnb, benchling.",
+      jobs: [
+        createProviderJob({
+          title: "Software Engineer",
+          company: "Stripe",
+          sourceJobId: "stripe-software-engineer",
+        }),
+      ],
+      diagnostics: {
+        provider: "greenhouse",
+        discoveryCount: sources.length,
+        sourceCount: sources.length,
+        sourceSucceededCount: 1,
+        sourceFailedCount: 1,
+        sourceTimedOutCount: 0,
+        sourceSkippedCount: 0,
+        fetchCount: sources.length,
+        fetchedCount: 1,
+        parseSuccessCount: 1,
+        parseFailureCount: 1,
+        rawFetchedCount: 1,
+        parsedSeedCount: 1,
+        validSeedCount: 1,
+        invalidSeedCount: 0,
+        dropReasonCounts: {
+          board_fetch_failed: 1,
+        },
+        sampleDropReasons: ["board_fetch_failed"],
+        sampleInvalidSeeds: [],
+        sourceObservations: sources.map((source) =>
+          source.id === openai._id
+            ? {
+                sourceId: source.id,
+                succeeded: false,
+                errorType: "source_failed" as const,
+                failureReason: "Greenhouse returned 404 for openai.",
+              }
+            : {
+                sourceId: source.id,
+                succeeded: true,
+                errorType: "none" as const,
+              },
+        ),
+      },
+    }));
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [provider],
+      now,
+      maxSources: 2,
+      schedulingIntervalMs: 60_000,
+      runTimeoutMs: 2_000,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected recurring ingestion to start.");
+    }
+
+    await waitForRunCompletion(repository, triggered.crawlRunId);
+    const inventoryById = new Map(
+      (await repository.listSourceInventory(["greenhouse"])).map((record) => [
+        record._id,
+        record,
+      ]),
+    );
+
+    expect(inventoryById.get(openai._id)).toMatchObject({
+      consecutiveFailures: 1,
+      lastFailureReason: "Greenhouse returned 404 for openai.",
+    });
+    expect(inventoryById.get(stripe._id)).toMatchObject({
+      consecutiveFailures: 0,
+    });
+    expect(inventoryById.get(stripe._id)?.lastFailureReason).toBeUndefined();
+  });
+
+  it("records a timed-out source only on that source inventory record", async () => {
+    const repository = new JobCrawlerRepository(new MongoLikeNullDb());
+    const now = new Date("2026-04-15T12:00:00.000Z");
+    const openai = createInventoryRecord({
+      token: "openai",
+      companyHint: "OpenAI",
+      nextEligibleAt: "2026-04-15T10:00:00.000Z",
+      inventoryRank: 0,
+    });
+    const stripe = createInventoryRecord({
+      token: "stripe",
+      companyHint: "Stripe",
+      nextEligibleAt: "2026-04-15T10:00:00.000Z",
+      inventoryRank: 1,
+    });
+    const affirm = createInventoryRecord({
+      token: "affirm",
+      companyHint: "Affirm",
+      nextEligibleAt: "2026-04-15T10:00:00.000Z",
+      inventoryRank: 2,
+    });
+
+    await repository.upsertSourceInventory([openai, stripe, affirm]);
+
+    const provider = createStubProvider("greenhouse", async (_context, sources) => ({
+      provider: "greenhouse",
+      status: "partial",
+      sourceCount: sources.length,
+      fetchedCount: 2,
+      matchedCount: 2,
+      warningCount: 1,
+      errorMessage:
+        "Provider greenhouse completed with partial source results: 1 source(s) timed out.",
+      jobs: [
+        createProviderJob({
+          title: "Software Engineer",
+          company: "OpenAI",
+          sourceJobId: "openai-software-engineer",
+        }),
+        createProviderJob({
+          title: "Software Engineer",
+          company: "Affirm",
+          sourceJobId: "affirm-software-engineer",
+        }),
+      ],
+      diagnostics: {
+        provider: "greenhouse",
+        discoveryCount: sources.length,
+        sourceCount: sources.length,
+        sourceSucceededCount: 2,
+        sourceFailedCount: 0,
+        sourceTimedOutCount: 1,
+        sourceSkippedCount: 0,
+        fetchCount: sources.length,
+        fetchedCount: 2,
+        parseSuccessCount: 2,
+        parseFailureCount: 1,
+        rawFetchedCount: 2,
+        parsedSeedCount: 2,
+        validSeedCount: 2,
+        invalidSeedCount: 0,
+        dropReasonCounts: {
+          source_timeout: 1,
+        },
+        sampleDropReasons: ["source_timeout"],
+        sampleInvalidSeeds: [],
+        sourceObservations: sources.map((source) =>
+          source.id === stripe._id
+            ? {
+                sourceId: source.id,
+                succeeded: false,
+                errorType: "source_timeout" as const,
+                failureReason:
+                  "Provider greenhouse source greenhouse:stripe exceeded the 25ms source crawl budget.",
+              }
+            : {
+                sourceId: source.id,
+                succeeded: true,
+                errorType: "none" as const,
+              },
+        ),
+      },
+    }));
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [provider],
+      now,
+      maxSources: 3,
+      schedulingIntervalMs: 60_000,
+      runTimeoutMs: 2_000,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected recurring ingestion to start.");
+    }
+
+    await waitForRunCompletion(repository, triggered.crawlRunId);
+    const inventoryById = new Map(
+      (await repository.listSourceInventory(["greenhouse"])).map((record) => [
+        record._id,
+        record,
+      ]),
+    );
+
+    expect(inventoryById.get(stripe._id)?.lastFailureReason).toContain("greenhouse:stripe");
+    expect(inventoryById.get(stripe._id)?.lastFailureReason).not.toContain("openai");
+    expect(inventoryById.get(stripe._id)?.lastFailureReason).not.toContain("affirm");
+    expect(inventoryById.get(openai._id)?.lastFailureReason).toBeUndefined();
+    expect(inventoryById.get(affirm._id)?.lastFailureReason).toBeUndefined();
   });
 
   it("reserves crawl capacity for never-crawled expansion sources so old inventory cannot starve growth", async () => {

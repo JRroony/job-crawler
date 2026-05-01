@@ -355,6 +355,25 @@ describe("provider crawl status and live parsing", () => {
       experienceLevel: "intern",
     });
     expect(result.errorMessage).toContain("Board unavailable");
+    expect(result.diagnostics?.sourceObservations).toEqual([
+      expect.objectContaining({
+        sourceId: "greenhouse:openai",
+        succeeded: false,
+        errorType: "source_failed",
+        failureReason: expect.stringContaining("Board unavailable"),
+      }),
+      expect.objectContaining({
+        sourceId: "greenhouse:stripe",
+        succeeded: true,
+        errorType: "none",
+      }),
+      expect.objectContaining({
+        sourceId: "greenhouse:coinbase",
+        succeeded: false,
+        errorType: "source_failed",
+        failureReason: expect.stringContaining("Board unavailable"),
+      }),
+    ]);
   });
 
   it("parses current Ashby app data pages into normalized jobs", async () => {
@@ -655,6 +674,24 @@ describe("provider crawl status and live parsing", () => {
         source_timeout: 1,
       },
     });
+    expect(result.diagnostics?.sourceObservations).toEqual([
+      expect.objectContaining({
+        sourceId: "lever:fastco-a",
+        succeeded: true,
+        errorType: "none",
+      }),
+      expect.objectContaining({
+        sourceId: "lever:slowco",
+        succeeded: false,
+        errorType: "source_timeout",
+        failureReason: expect.stringContaining("lever:slowco"),
+      }),
+      expect.objectContaining({
+        sourceId: "lever:fastco-c",
+        succeeded: true,
+        errorType: "none",
+      }),
+    ]);
     expect(result.status).not.toBe("failed");
   });
 

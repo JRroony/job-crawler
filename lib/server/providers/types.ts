@@ -93,6 +93,19 @@ export type ProviderResult<P extends ProviderPlatform = ProviderPlatform> = {
   diagnostics?: ProviderDiagnostics<P>;
 };
 
+export type ProviderSourceObservationErrorType =
+  | "none"
+  | "source_failed"
+  | "source_skipped"
+  | "source_timeout";
+
+export type ProviderSourceObservation = {
+  sourceId: string;
+  succeeded: boolean;
+  errorType: ProviderSourceObservationErrorType;
+  failureReason?: string;
+};
+
 export type ProviderBatchProgress<P extends ProviderPlatform = ProviderPlatform> = {
   provider: P;
   jobs: NormalizedJobSeed[];
@@ -121,6 +134,7 @@ export type ProviderDiagnostics<P extends ProviderPlatform = ProviderPlatform> =
   providerElapsedMs?: number;
   providerBudgetMs?: number;
   sourceTimeoutMs?: number;
+  sourceObservations?: ProviderSourceObservation[];
   dropReasonCounts: Record<string, number>;
   sampleDropReasons: string[];
   sampleInvalidSeeds: Array<{

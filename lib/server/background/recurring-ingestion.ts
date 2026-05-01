@@ -28,11 +28,16 @@ import {
   type ProviderSeedValidationDrop,
 } from "@/lib/server/providers/shared";
 import { selectProvidersForTieredCrawl } from "@/lib/server/providers/tiers";
-import type { CrawlProvider, NormalizedJobSeed } from "@/lib/server/providers/types";
+import type {
+  CrawlProvider,
+  NormalizedJobSeed,
+  ProviderSourceObservation,
+} from "@/lib/server/providers/types";
 import type {
   JobCrawlerRepository,
   PersistableJob,
   PersistJobsWithStatsResult,
+  SourceInventoryObservation,
 } from "@/lib/server/db/repository";
 import type {
   CrawlDiagnostics,
@@ -59,6 +64,7 @@ type BackgroundIngestionRuntime = {
   sourceTimeoutMs?: number;
   providerConcurrency?: number;
   schedulingIntervalMs?: number;
+  isolationKey?: string;
   refreshInventory?: (runtime: {
     repository: JobCrawlerRepository;
     now: Date;
@@ -450,11 +456,18 @@ async function startRecurringBackgroundProfileIngestion(input: {
     providerConcurrency,
     cycleDiagnostics,
   } = input;
-  const search = await ensureBackgroundSearch(repository, now, systemProfile);
+  const search = await ensureBackgroundSearch(
+    repository,
+    now,
+    systemProfile,
+    runtime.isolationKey,
+  );
 
   await recoverStaleBackgroundRunIfNeeded(search._id, repository, now, staleAfterMs);
 
-  const ownerKey = resolveBackgroundRunOwnerKey(systemProfile.id, cycleDiagnostics.selectedProfiles);
+  const ownerKey = runtime.isolationKey
+    ? resolveIsolatedBackgroundRunOwnerKey(systemProfile.id, runtime.isolationKey)
+    : resolveBackgroundRunOwnerKey(systemProfile.id, cycleDiagnostics.selectedProfiles);
   const activeBackgroundQueueEntry =
     await repository.getActiveCrawlQueueEntryForOwner(ownerKey);
   if (activeBackgroundQueueEntry && activeBackgroundQueueEntry.searchId !== search._id) {
@@ -1032,6 +1045,15 @@ async function executeRecurringInventoryIngestion(
       const providerStartedAt = runTimestamp();
       const providerStartedMs = Date.now();
       let emittedLiveBatch = false;
+      logProviderLifecycleStart({
+        searchId: target.search._id,
+        searchSessionId: target.searchSession._id,
+        crawlRunId: target.crawlRunId,
+        provider: provider.provider,
+        sourceCount: providerSources.length,
+        status: "running",
+        reason: "sources_enqueued",
+      });
 
       try {
         const providerContext = (providerSignal: AbortSignal): Parameters<CrawlProvider["crawlSources"]>[0] => ({
@@ -1093,17 +1115,22 @@ async function executeRecurringInventoryIngestion(
           emittedLiveBatch
             ? sourceStatus
             : mapProviderStatus(batchPersistence?.effectiveProviderStatus ?? result.status, result);
+        const savedCount = providerTotals?.linkedToRunCount ?? savedJobs.length;
+        const finalProviderStatus = normalizeTerminalProviderStatusForSavedCount(
+          effectiveProviderStatus,
+          savedCount,
+        );
 
         const finishedAt = runTimestamp();
         const sourceResult = createSourceResult({
           crawlRunId: target.crawlRunId,
           searchId: target.search._id,
           provider: provider.provider,
-          status: effectiveProviderStatus,
+          status: finalProviderStatus,
           sourceCount: providerSources.length,
           fetchedCount: providerTotals?.fetchedCount ?? result.fetchedCount,
           matchedCount: validMatchedCount,
-          savedCount: providerTotals?.linkedToRunCount ?? savedJobs.length,
+          savedCount,
           warningCount: effectiveWarningCount,
           errorMessage: result.errorMessage,
           startedAt: providerStartedAt,
@@ -1111,6 +1138,19 @@ async function executeRecurringInventoryIngestion(
         });
         sourceResults.push(sourceResult);
         await repository.updateCrawlSourceResult(sourceResult);
+        logProviderLifecycleFinalize({
+          searchId: target.search._id,
+          searchSessionId: target.searchSession._id,
+          crawlRunId: target.crawlRunId,
+          provider: sourceResult.provider,
+          sourceCount: sourceResult.sourceCount,
+          fetchedCount: sourceResult.fetchedCount,
+          matchedCount: sourceResult.matchedCount,
+          savedCount: sourceResult.savedCount,
+          status: sourceResult.status,
+          reason: "provider_result",
+          errorMessage: sourceResult.errorMessage,
+        });
 
         console.info("[background-ingestion:provider-summary]", {
           systemProfileId: target.systemProfile.id,
@@ -1121,54 +1161,30 @@ async function executeRecurringInventoryIngestion(
           fetchedCount: providerTotals?.fetchedCount ?? result.fetchedCount,
           matchedCount: validMatchedCount,
           seedCount: result.jobs.length,
-          savedCount: providerTotals?.linkedToRunCount ?? savedJobs.length,
+          savedCount,
           insertedCount: providerTotals?.insertedCount ?? batchPersistence?.persistence.insertedCount ?? 0,
           updatedCount: providerTotals?.updatedCount ?? batchPersistence?.persistence.updatedCount ?? 0,
           linkedToRunCount: providerTotals?.linkedToRunCount ?? batchPersistence?.persistence.linkedToRunCount ?? 0,
           indexedEventCount: providerTotals?.indexedEventCount ?? batchPersistence?.persistence.indexedEventCount ?? 0,
-          status: effectiveProviderStatus,
+          status: sourceResult.status,
           warningCount: effectiveWarningCount,
           errorMessage: result.errorMessage,
         });
         await repository.recordSourceInventoryObservations(
-          providerSources.map((source) => ({
-            sourceId: source.id,
+          buildBackgroundSourceInventoryObservations(providerSources, result, {
             observedAt: finishedAt,
-            succeeded: effectiveProviderStatus === "success" || effectiveProviderStatus === "partial",
-            health:
-              effectiveProviderStatus === "failed" || effectiveProviderStatus === "timed_out"
-                ? "failing"
-                : effectiveProviderStatus === "partial"
-                  ? "degraded"
-                  : "healthy",
-            lastFailureReason:
-              effectiveProviderStatus === "failed" || effectiveProviderStatus === "timed_out"
-                ? result.errorMessage
-                : undefined,
-            nextEligibleAt: resolveObservedSourceNextEligibleAt({
-              record: selectedRecordById.get(source.id) ?? inventory.find((record) => record._id === source.id)!,
-              observedAt: finishedAt,
-              intervalMs: runtime.schedulingIntervalMs,
-              health:
-                effectiveProviderStatus === "failed" || effectiveProviderStatus === "timed_out"
-                  ? "failing"
-                  : effectiveProviderStatus === "partial"
-                    ? "degraded"
-                    : "healthy",
-              consecutiveFailures:
-                effectiveProviderStatus === "failed" || effectiveProviderStatus === "timed_out"
-                  ? (selectedRecordById.get(source.id)?.consecutiveFailures ?? 0) + 1
-                  : 0,
-              succeeded: effectiveProviderStatus === "success" || effectiveProviderStatus === "partial",
-            }),
-          })),
+            providerStatus: sourceResult.status,
+            inventory,
+            selectedRecordById,
+            intervalMs: runtime.schedulingIntervalMs,
+          }),
         );
 
         providerTimings.push({
           provider: provider.provider,
           duration: Date.now() - providerStartedMs,
           sourceCount: providerSources.length,
-          timedOut: effectiveProviderStatus === "timed_out",
+          timedOut: sourceResult.status === "timed_out",
         });
       } catch (error) {
         const providerTimedOut = isBackgroundProviderTimeout(error);
@@ -1183,9 +1199,12 @@ async function executeRecurringInventoryIngestion(
           (providerTotals?.fetchedCount ?? 0) > 0 ||
           (providerTotals?.matchedCount ?? 0) > 0 ||
           (providerTotals?.linkedToRunCount ?? 0) > 0;
+        const hasSavedProviderWork = (providerTotals?.linkedToRunCount ?? 0) > 0;
         const recoveredStatus: CrawlSourceResult["status"] =
           providerTimedOut && hasPreservedProviderWork
             ? "partial"
+            : hasSavedProviderWork
+              ? "partial"
             : providerTimedOut
               ? "timed_out"
               : abortLike
@@ -1224,25 +1243,29 @@ async function executeRecurringInventoryIngestion(
         });
         sourceResults.push(sourceResult);
         await repository.updateCrawlSourceResult(sourceResult);
+        logProviderLifecycleFinalize({
+          searchId: target.search._id,
+          searchSessionId: target.searchSession._id,
+          crawlRunId: target.crawlRunId,
+          provider: sourceResult.provider,
+          sourceCount: sourceResult.sourceCount,
+          fetchedCount: sourceResult.fetchedCount,
+          matchedCount: sourceResult.matchedCount,
+          savedCount: sourceResult.savedCount,
+          status: sourceResult.status,
+          reason: providerTimedOut ? "provider_timeout" : abortLike ? "provider_aborted" : "provider_failed",
+          errorMessage: sourceResult.errorMessage,
+        });
         await repository.recordSourceInventoryObservations(
-          providerSources.map((source) => ({
-            sourceId: source.id,
+          buildBackgroundProviderFailureInventoryObservations(providerSources, {
             observedAt: finishedAt,
-            succeeded: recoveredStatus === "partial" ? undefined : false,
-            health: recoveredStatus === "partial" || providerTimedOut ? "degraded" : "failing",
-            lastFailureReason: sourceResult.errorMessage,
-            nextEligibleAt: resolveObservedSourceNextEligibleAt({
-              record: selectedRecordById.get(source.id) ?? inventory.find((record) => record._id === source.id)!,
-              observedAt: finishedAt,
-              intervalMs: runtime.schedulingIntervalMs,
-              health: recoveredStatus === "partial" || providerTimedOut ? "degraded" : "failing",
-              consecutiveFailures:
-                recoveredStatus === "partial"
-                  ? selectedRecordById.get(source.id)?.consecutiveFailures ?? 0
-                  : (selectedRecordById.get(source.id)?.consecutiveFailures ?? 0) + 1,
-              succeeded: recoveredStatus === "partial" ? undefined : false,
-            }),
-          })),
+            provider: provider.provider,
+            providerStatus: recoveredStatus,
+            providerTimedOut,
+            inventory,
+            selectedRecordById,
+            intervalMs: runtime.schedulingIntervalMs,
+          }),
         );
 
         providerTimings.push({
@@ -1366,7 +1389,18 @@ async function finalizeBackgroundRun(input: {
   sourceResults: CrawlSourceResult[];
   errorMessage?: string;
 }) {
-  const providerSummary = input.sourceResults.map((sourceResult) => ({
+  const finalizedSourceResults =
+    await input.repository.finalizeRunningCrawlSourceResultsForTerminalRun(
+      input.crawlRunId,
+      {
+        finishedAt: input.finishedAt,
+        fallbackStatus: input.status === "aborted" ? "aborted" : "failed",
+        reason: input.errorMessage ?? "provider_lifecycle_stale_finalized",
+      },
+    );
+  const sourceResultsForSummary =
+    finalizedSourceResults.length > 0 ? finalizedSourceResults : input.sourceResults;
+  const providerSummary = sourceResultsForSummary.map((sourceResult) => ({
     provider: sourceResult.provider,
     status: sourceResult.status,
     sourceCount: sourceResult.sourceCount,
@@ -1415,17 +1449,24 @@ async function ensureBackgroundSearch(
   repository: JobCrawlerRepository,
   now: Date,
   systemProfile: SystemSearchProfile,
+  isolationKey?: string,
 ) {
+  const systemProfileId = isolationKey
+    ? `${systemProfile.id}:isolated:${isolationKey}`
+    : systemProfile.id;
+  const systemProfileLabel = isolationKey
+    ? `${systemProfile.label} / isolated ${isolationKey}`
+    : systemProfile.label;
   const existing = await repository.findMostRecentSearchByFilters(systemProfile.filters, {
-    systemProfileId: systemProfile.id,
+    systemProfileId,
   });
   if (existing) {
     return existing;
   }
 
   return repository.createSearch(systemProfile.filters, now.toISOString(), {
-    systemProfileId: systemProfile.id,
-    systemProfileLabel: systemProfile.label,
+    systemProfileId,
+    systemProfileLabel,
   });
 }
 
@@ -1997,10 +2038,207 @@ function createSourceResult(input: Omit<CrawlSourceResult, "_id">): CrawlSourceR
   };
 }
 
+function buildBackgroundSourceInventoryObservations(
+  sources: readonly DiscoveredSource[],
+  result: Awaited<ReturnType<CrawlProvider["crawlSources"]>>,
+  input: {
+    observedAt: string;
+    providerStatus: CrawlSourceResult["status"];
+    inventory: SourceInventoryRecord[];
+    selectedRecordById: Map<string, SourceInventoryRecord>;
+    intervalMs: number;
+  },
+): SourceInventoryObservation[] {
+  const sourceObservationById = new Map(
+    (result.diagnostics?.sourceObservations ?? []).map((observation) => [
+      observation.sourceId,
+      observation,
+    ]),
+  );
+
+  return sources.map((source) => {
+    const sourceObservation = sourceObservationById.get(source.id);
+    const observation = sourceObservation
+      ? toBackgroundSourceInventoryObservation(source, sourceObservation, input.observedAt)
+      : buildBackgroundProviderFallbackInventoryObservation(source, {
+          provider: result.provider,
+          providerStatus: input.providerStatus,
+          observedAt: input.observedAt,
+        });
+
+    return withBackgroundNextEligibleAt(source, observation, input);
+  });
+}
+
+function buildBackgroundProviderFailureInventoryObservations(
+  sources: readonly DiscoveredSource[],
+  input: {
+    observedAt: string;
+    provider: CrawlSourceResult["provider"];
+    providerStatus: CrawlSourceResult["status"];
+    providerTimedOut: boolean;
+    inventory: SourceInventoryRecord[];
+    selectedRecordById: Map<string, SourceInventoryRecord>;
+    intervalMs: number;
+  },
+): SourceInventoryObservation[] {
+  return sources.map((source) => {
+    const succeeded = input.providerStatus === "partial";
+    const observation: SourceInventoryObservation = {
+      sourceId: source.id,
+      observedAt: input.observedAt,
+      succeeded,
+      errorType: succeeded
+        ? "none"
+        : input.providerTimedOut
+          ? "provider_timeout"
+          : "provider_failed",
+      health: succeeded ? "healthy" : input.providerTimedOut ? "degraded" : "failing",
+      failureReason: succeeded
+        ? undefined
+        : buildBackgroundProviderLevelFailureReason(input.provider, input.providerStatus),
+    };
+
+    return withBackgroundNextEligibleAt(source, observation, input);
+  });
+}
+
+function toBackgroundSourceInventoryObservation(
+  source: DiscoveredSource,
+  observation: ProviderSourceObservation,
+  observedAt: string,
+): SourceInventoryObservation {
+  return {
+    sourceId: source.id,
+    observedAt,
+    succeeded: observation.succeeded,
+    errorType: observation.errorType,
+    health: observation.succeeded
+      ? "healthy"
+      : observation.errorType === "source_timeout" || observation.errorType === "source_skipped"
+        ? "degraded"
+        : undefined,
+    failureReason: observation.succeeded
+      ? undefined
+      : observation.failureReason ??
+        buildBackgroundSourceLevelFailureReason(source.id, observation.errorType),
+  };
+}
+
+function buildBackgroundProviderFallbackInventoryObservation(
+  source: DiscoveredSource,
+  input: {
+    provider: CrawlSourceResult["provider"];
+    providerStatus: CrawlSourceResult["status"];
+    observedAt: string;
+  },
+): SourceInventoryObservation {
+  const succeeded =
+    input.providerStatus === "success" ||
+    input.providerStatus === "partial" ||
+    input.providerStatus === "running";
+  const errorType =
+    input.providerStatus === "timed_out"
+      ? "provider_timeout"
+      : succeeded
+        ? "none"
+        : "provider_failed";
+
+  return {
+    sourceId: source.id,
+    observedAt: input.observedAt,
+    succeeded,
+    errorType,
+    health: succeeded
+      ? "healthy"
+      : input.providerStatus === "timed_out"
+        ? "degraded"
+        : "failing",
+    failureReason: succeeded
+      ? undefined
+      : buildBackgroundProviderLevelFailureReason(input.provider, input.providerStatus),
+  };
+}
+
+function withBackgroundNextEligibleAt(
+  source: DiscoveredSource,
+  observation: SourceInventoryObservation,
+  input: {
+    inventory: SourceInventoryRecord[];
+    selectedRecordById: Map<string, SourceInventoryRecord>;
+    observedAt: string;
+    intervalMs: number;
+  },
+): SourceInventoryObservation {
+  const record =
+    input.selectedRecordById.get(source.id) ??
+    input.inventory.find((candidate) => candidate._id === source.id);
+  if (!record) {
+    return observation;
+  }
+
+  const consecutiveFailures = observation.succeeded ? 0 : record.consecutiveFailures + 1;
+  const health =
+    observation.health ??
+    (observation.succeeded
+      ? "healthy"
+      : consecutiveFailures >= 3
+        ? "failing"
+        : "degraded");
+
+  return {
+    ...observation,
+    health,
+    nextEligibleAt: resolveObservedSourceNextEligibleAt({
+      record,
+      observedAt: input.observedAt,
+      intervalMs: input.intervalMs,
+      health,
+      consecutiveFailures,
+      succeeded: observation.succeeded,
+    }),
+  };
+}
+
+function buildBackgroundSourceLevelFailureReason(
+  sourceId: string,
+  errorType: SourceInventoryObservation["errorType"],
+) {
+  switch (errorType) {
+    case "source_timeout":
+      return `Source ${sourceId} exceeded its crawl budget.`;
+    case "source_skipped":
+      return `Source ${sourceId} was skipped before crawling.`;
+    case "source_failed":
+      return `Source ${sourceId} failed while crawling.`;
+    default:
+      return `Source ${sourceId} failed while crawling.`;
+  }
+}
+
+function buildBackgroundProviderLevelFailureReason(
+  provider: CrawlSourceResult["provider"],
+  status: CrawlSourceResult["status"],
+) {
+  if (status === "timed_out") {
+    return `Provider ${provider} timed out before source-specific observations were reported; provider crawl budget was exhausted.`;
+  }
+
+  if (status === "unsupported") {
+    return `Provider ${provider} could not crawl these sources before source-specific observations were reported.`;
+  }
+
+  return `Provider ${provider} failed before source-specific observations were reported.`;
+}
+
 function resolveBackgroundRunOwnerKey(systemProfileId: string, selectedProfiles: number) {
   return selectedProfiles > 1
     ? `${backgroundIngestionOwnerKey}:${systemProfileId}`
     : backgroundIngestionOwnerKey;
+}
+
+function resolveIsolatedBackgroundRunOwnerKey(systemProfileId: string, isolationKey: string) {
+  return `${backgroundIngestionOwnerKey}:isolated:${systemProfileId}:${isolationKey}`;
 }
 
 function capBackgroundProviderSources(
@@ -2152,7 +2390,7 @@ function mapProviderResultToSourceStatus(
   if (
     result.status === "failed" &&
     sourceCount > 0 &&
-    sourceTimedOutCount >= sourceCount &&
+    sourceTimedOutCount === sourceCount &&
     result.fetchedCount === 0 &&
     emittedJobs === 0
   ) {
@@ -2160,6 +2398,48 @@ function mapProviderResultToSourceStatus(
   }
 
   return result.status;
+}
+
+function normalizeTerminalProviderStatusForSavedCount(
+  status: CrawlSourceResult["status"],
+  savedCount: number,
+): CrawlSourceResult["status"] {
+  if (
+    savedCount > 0 &&
+    (status === "failed" || status === "timed_out" || status === "unsupported")
+  ) {
+    return "partial";
+  }
+
+  return status;
+}
+
+function logProviderLifecycleStart(input: {
+  searchId: string;
+  searchSessionId?: string;
+  crawlRunId: string;
+  provider: CrawlSourceResult["provider"];
+  sourceCount: number;
+  status: CrawlSourceResult["status"];
+  reason: string;
+}) {
+  console.info("[provider:lifecycle-start]", input);
+}
+
+function logProviderLifecycleFinalize(input: {
+  searchId: string;
+  searchSessionId?: string;
+  crawlRunId: string;
+  provider: CrawlSourceResult["provider"];
+  sourceCount: number;
+  fetchedCount: number;
+  matchedCount: number;
+  savedCount: number;
+  status: CrawlSourceResult["status"];
+  reason: string;
+  errorMessage?: string;
+}) {
+  console.info("[provider:lifecycle-finalize]", input);
 }
 
 function mergeSignals(...signals: Array<AbortSignal | undefined>) {

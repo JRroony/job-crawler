@@ -172,10 +172,17 @@ export type SearchSessionControlState = Pick<
 export type SourceInventoryObservation = {
   sourceId: string;
   observedAt: string;
+  succeeded: boolean;
+  errorType:
+    | "none"
+    | "provider_failed"
+    | "provider_timeout"
+    | "source_failed"
+    | "source_skipped"
+    | "source_timeout";
+  failureReason?: string;
   status?: SourceInventoryRecord["status"];
   health?: SourceInventoryRecord["health"];
-  lastFailureReason?: string;
-  succeeded?: boolean;
   nextEligibleAt?: string;
 };
 
@@ -723,6 +730,21 @@ export class JobCrawlerRepository {
     },
   ) {
     const diagnostics = normalizeCrawlDiagnostics(payload.diagnostics);
+    const finishedAt = payload.finishedAt ?? new Date().toISOString();
+    const finalizedSourceResults = await this.finalizeRunningCrawlSourceResultsForTerminalRun(
+      crawlRunId,
+      {
+        finishedAt,
+        fallbackStatus: payload.status === "aborted" ? "aborted" : "failed",
+        reason: payload.errorMessage ?? "provider_lifecycle_stale_finalized",
+      },
+    );
+    const providerSummary =
+      finalizedSourceResults.length > 0
+        ? finalizedSourceResults.map((sourceResult) =>
+            crawlSourceResultToProviderSummary(sourceResult),
+          )
+        : normalizeProviderSummary(payload.providerSummary);
 
     await this.crawlRuns().updateOne(
       { _id: crawlRunId },
@@ -734,8 +756,8 @@ export class JobCrawlerRepository {
           crawledSourcesCount: diagnostics.crawledSources,
           stage: payload.stage,
           validationMode: payload.validationMode ?? "deferred",
-          providerSummary: normalizeProviderSummary(payload.providerSummary),
-          finishedAt: payload.finishedAt ?? new Date().toISOString(),
+          providerSummary,
+          finishedAt,
         },
       },
     );
@@ -744,13 +766,61 @@ export class JobCrawlerRepository {
       {
         $set: {
           status: payload.status,
-          updatedAt: payload.finishedAt ?? new Date().toISOString(),
-          finishedAt: payload.finishedAt ?? new Date().toISOString(),
-          lastHeartbeatAt: payload.finishedAt ?? new Date().toISOString(),
+          updatedAt: finishedAt,
+          finishedAt,
+          lastHeartbeatAt: finishedAt,
           cancelReason: payload.status === "aborted" ? payload.errorMessage : undefined,
         },
       },
     );
+  }
+
+  async finalizeRunningCrawlSourceResultsForTerminalRun(
+    crawlRunId: string,
+    input: {
+      finishedAt: string;
+      fallbackStatus: Extract<CrawlSourceResult["status"], "failed" | "timed_out" | "aborted">;
+      reason: string;
+    },
+  ) {
+    const sourceResults = await this.getCrawlSourceResults(crawlRunId);
+    const finalized: CrawlSourceResult[] = [];
+
+    for (const sourceResult of sourceResults) {
+      if (sourceResult.status !== "running") {
+        finalized.push(sourceResult);
+        continue;
+      }
+
+      const updated = finalizeRunningCrawlSourceResult(sourceResult, input);
+      finalized.push(updated);
+      await this.updateCrawlSourceResult(updated);
+      logProviderLifecycleStaleFinalized({
+        searchId: updated.searchId,
+        crawlRunId: updated.crawlRunId,
+        provider: updated.provider,
+        sourceCount: updated.sourceCount,
+        fetchedCount: updated.fetchedCount,
+        matchedCount: updated.matchedCount,
+        savedCount: updated.savedCount,
+        status: updated.status,
+        reason: input.reason,
+      });
+      logProviderLifecycleFinalize({
+        searchId: updated.searchId,
+        crawlRunId: updated.crawlRunId,
+        provider: updated.provider,
+        sourceCount: updated.sourceCount,
+        fetchedCount: updated.fetchedCount,
+        matchedCount: updated.matchedCount,
+        savedCount: updated.savedCount,
+        status: updated.status,
+        reason: input.reason,
+        errorMessage: updated.errorMessage,
+      });
+    }
+
+    return finalized.sort((left, right) => left.provider.localeCompare(right.provider));
   }
 
   async updateCrawlRunProgress(
@@ -1351,23 +1421,16 @@ export class JobCrawlerRepository {
       }
 
       const parsedExisting = parseStoredSourceInventory(existing);
-      const hasOutcome = typeof observation.succeeded === "boolean";
-      const succeeded = observation.succeeded === true;
-      const nextFailureCount = !hasOutcome
-        ? parsedExisting.failureCount
-        : succeeded
+      const succeeded = observation.succeeded;
+      const nextFailureCount = succeeded
           ? parsedExisting.failureCount
           : parsedExisting.failureCount + 1;
-      const nextConsecutiveFailures = !hasOutcome
-        ? parsedExisting.consecutiveFailures
-        : succeeded
+      const nextConsecutiveFailures = succeeded
           ? 0
           : parsedExisting.consecutiveFailures + 1;
       const health =
         observation.health ??
-        (!hasOutcome
-          ? parsedExisting.health
-          : succeeded
+        (succeeded
           ? "healthy"
           : nextConsecutiveFailures >= 3
             ? "failing"
@@ -1375,46 +1438,50 @@ export class JobCrawlerRepository {
       const status = observation.status ?? parsedExisting.status;
       const nextEligibleAt =
         observation.nextEligibleAt ??
-        (!hasOutcome
-          ? parsedExisting.nextEligibleAt
-          : resolveObservedSourceNextEligibleAt({
+        resolveObservedSourceNextEligibleAt({
               record: parsedExisting,
               observedAt: observation.observedAt,
               intervalMs: getEnv().BACKGROUND_INGESTION_INTERVAL_MS,
               health,
               consecutiveFailures: nextConsecutiveFailures,
               succeeded,
-            }));
+            });
       const merged = sourceInventoryRecordSchema.parse({
         ...parsedExisting,
         status,
         health,
         failureCount: nextFailureCount,
         consecutiveFailures: nextConsecutiveFailures,
-        lastFailureReason: !hasOutcome || succeeded
+        lastFailureReason: succeeded
           ? undefined
-          : observation.lastFailureReason ?? parsedExisting.lastFailureReason,
+          : observation.failureReason ?? parsedExisting.lastFailureReason,
         lastSeenAt: observation.observedAt,
         lastCrawledAt: observation.observedAt,
         lastSucceededAt: succeeded ? observation.observedAt : parsedExisting.lastSucceededAt,
         lastFailedAt:
-          hasOutcome && !succeeded ? observation.observedAt : parsedExisting.lastFailedAt,
+          !succeeded ? observation.observedAt : parsedExisting.lastFailedAt,
         nextEligibleAt,
       });
       const { _id, ...updateFields } = merged;
+      if (succeeded) {
+        (updateFields as Record<string, unknown>).lastFailureReason = null;
+      }
       await this.sourceInventory().updateOne({ _id }, { $set: updateFields });
       console.info("[inventory:observation]", {
         sourceId: observation.sourceId,
         provider: merged.platform,
+        succeeded: observation.succeeded,
+        errorType: observation.errorType,
         status: merged.status,
         health: merged.health,
         lastFailureReason: merged.lastFailureReason,
         nextEligibleAt: merged.nextEligibleAt,
       });
-      if (hasOutcome && !succeeded) {
+      if (!succeeded) {
         console.warn("[inventory:timeout-observation]", {
           sourceId: observation.sourceId,
           provider: merged.platform,
+          errorType: observation.errorType,
           health: merged.health,
           lastFailureReason: merged.lastFailureReason,
           nextEligibleAt: merged.nextEligibleAt,
@@ -2400,6 +2467,93 @@ function parseStoredCrawlSourceResult(document: Record<string, unknown>) {
     ...normalizedDocument,
     errorMessage: normalizeOptionalDocumentString(normalizedDocument.errorMessage),
   });
+}
+
+function finalizeRunningCrawlSourceResult(
+  sourceResult: CrawlSourceResult,
+  input: {
+    finishedAt: string;
+    fallbackStatus: Extract<CrawlSourceResult["status"], "failed" | "timed_out" | "aborted">;
+    reason: string;
+  },
+) {
+  const status = resolveStaleCrawlSourceStatus(sourceResult, input.fallbackStatus);
+  const errorMessage = resolveStaleCrawlSourceErrorMessage(sourceResult, status, input.reason);
+  const shouldCountWarning =
+    status !== "success" &&
+    !sourceResult.errorMessage &&
+    (status !== "partial" || Boolean(errorMessage));
+
+  return crawlSourceResultSchema.parse({
+    ...sourceResult,
+    status,
+    warningCount: sourceResult.warningCount + (shouldCountWarning ? 1 : 0),
+    errorMessage,
+    finishedAt: input.finishedAt,
+  });
+}
+
+function resolveStaleCrawlSourceStatus(
+  sourceResult: CrawlSourceResult,
+  fallbackStatus: Extract<CrawlSourceResult["status"], "failed" | "timed_out" | "aborted">,
+): CrawlSourceResult["status"] {
+  if (sourceResult.sourceCount === 0 && sourceResult.savedCount === 0) {
+    return "unsupported";
+  }
+
+  if (
+    sourceResult.savedCount > 0 &&
+    (fallbackStatus === "failed" || fallbackStatus === "timed_out")
+  ) {
+    return "partial";
+  }
+
+  return fallbackStatus;
+}
+
+function resolveStaleCrawlSourceErrorMessage(
+  sourceResult: CrawlSourceResult,
+  status: CrawlSourceResult["status"],
+  reason: string,
+) {
+  if (status === "unsupported" && sourceResult.sourceCount === 0) {
+    return "no_sources_for_provider";
+  }
+
+  if (status === "success") {
+    return undefined;
+  }
+
+  return sourceResult.errorMessage ?? reason;
+}
+
+function logProviderLifecycleFinalize(input: {
+  searchId: string;
+  crawlRunId: string;
+  provider: CrawlSourceResult["provider"];
+  sourceCount: number;
+  fetchedCount: number;
+  matchedCount: number;
+  savedCount: number;
+  status: CrawlSourceResult["status"];
+  reason: string;
+  errorMessage?: string;
+}) {
+  console.info("[provider:lifecycle-finalize]", input);
+}
+
+function logProviderLifecycleStaleFinalized(input: {
+  searchId: string;
+  crawlRunId: string;
+  provider: CrawlSourceResult["provider"];
+  sourceCount: number;
+  fetchedCount: number;
+  matchedCount: number;
+  savedCount: number;
+  status: CrawlSourceResult["status"];
+  reason: string;
+}) {
+  console.warn("[provider:lifecycle-stale-finalized]", input);
 }
 
 function parseStoredCrawlRunJobEvent(document: Record<string, unknown>): CrawlRunJobEvent {

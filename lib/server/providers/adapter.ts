@@ -19,6 +19,7 @@ import {
   type ProviderDiagnostics,
   type ProviderExecutionContext,
   type ProviderResult,
+  type ProviderSourceObservation,
   type ProviderSourceFor,
 } from "@/lib/server/providers/types";
 
@@ -158,7 +159,11 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
               ...run,
               jobs: run.jobs.map(normalizeProviderJobSeed),
               sourceSucceeded:
-                run.sourceSucceeded ?? (run.jobs.length > 0 || run.fetchedCount > 0),
+                run.sourceSucceeded ??
+                (run.jobs.length > 0 ||
+                  run.fetchedCount > 0 ||
+                  jobsEmittedViaOnBatch > 0 ||
+                  fetchedCountEmittedViaOnBatch > 0),
               jobsEmittedViaOnBatch:
                 (run.jobsEmittedViaOnBatch ?? 0) + jobsEmittedViaOnBatch,
             };
@@ -214,7 +219,7 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
       const fetchedCount = sourceRuns.reduce((total, run) => total + run.fetchedCount, 0);
       const diagnostics = buildProviderDiagnostics(
         definition.provider,
-        adapterSources.length,
+        adapterSources,
         sourceRuns,
         {
           providerElapsedMs: Date.now() - providerStartedMs,
@@ -376,7 +381,7 @@ function resolveEffectiveSourceTimeoutMs(
 
 function buildProviderDiagnostics<P extends ProviderResult["provider"]>(
   provider: P,
-  discoveryCount: number,
+  sources: Array<ProviderSourceFor<P>>,
   sourceRuns: Array<ProviderSourceAdapterRun<P>>,
   timing: {
     providerElapsedMs: number;
@@ -390,15 +395,18 @@ function buildProviderDiagnostics<P extends ProviderResult["provider"]>(
       counts[reason] = (counts[reason] ?? 0) + 1;
       return counts;
     }, {});
+  const sourceObservations = sourceRuns.map((run, index) =>
+    buildProviderSourceObservation(provider, sources[index]?.id ?? `unknown:${index}`, run),
+  );
 
   return {
     provider,
-    discoveryCount,
-    sourceCount: discoveryCount,
-    sourceSucceededCount: sourceRuns.filter((run) => run.sourceSucceeded).length,
-    sourceTimedOutCount: sourceRuns.filter((run) => run.sourceTimedOut).length,
-    sourceFailedCount: sourceRuns.filter((run) => run.sourceFailed).length,
-    sourceSkippedCount: sourceRuns.filter((run) => run.sourceSkipped).length,
+    discoveryCount: sources.length,
+    sourceCount: sources.length,
+    sourceSucceededCount: sourceObservations.filter((observation) => observation.succeeded).length,
+    sourceTimedOutCount: sourceObservations.filter((observation) => observation.errorType === "source_timeout").length,
+    sourceFailedCount: sourceObservations.filter((observation) => observation.errorType === "source_failed").length,
+    sourceSkippedCount: sourceObservations.filter((observation) => observation.errorType === "source_skipped").length,
     fetchCount: sourceRuns.reduce(
       (total, run) => total + (run.fetchCount ?? (run.fetchedCount > 0 || (run.warnings?.length ?? 0) > 0 ? 1 : 0)),
       0,
@@ -432,12 +440,76 @@ function buildProviderDiagnostics<P extends ProviderResult["provider"]>(
     providerElapsedMs: timing.providerElapsedMs,
     providerBudgetMs: timing.providerBudgetMs,
     sourceTimeoutMs: timing.sourceTimeoutMs,
+    sourceObservations,
     dropReasonCounts,
     sampleDropReasons: Object.keys(dropReasonCounts).slice(0, 8),
     sampleInvalidSeeds: sourceRuns
       .flatMap((run) => run.sampleInvalidSeeds ?? [])
       .slice(0, 8),
   };
+}
+
+function buildProviderSourceObservation<P extends ProviderResult["provider"]>(
+  provider: P,
+  sourceId: string,
+  run: ProviderSourceAdapterRun<P>,
+): ProviderSourceObservation {
+  if (run.sourceSucceeded) {
+    return {
+      sourceId,
+      succeeded: true,
+      errorType: "none",
+    };
+  }
+
+  if (run.sourceTimedOut) {
+    return {
+      sourceId,
+      succeeded: false,
+      errorType: "source_timeout",
+      failureReason:
+        firstNonEmptyString(run.warnings) ??
+        `Provider ${provider} source ${sourceId} exceeded the source crawl budget.`,
+    };
+  }
+
+  if (run.sourceSkipped) {
+    return {
+      sourceId,
+      succeeded: false,
+      errorType: "source_skipped",
+      failureReason:
+        firstNonEmptyString(run.warnings) ??
+        `Provider ${provider} skipped source ${sourceId}.`,
+    };
+  }
+
+  if (
+    run.sourceFailed ||
+    (run.jobs.length === 0 &&
+      ((run.warnings?.length ?? 0) > 0 ||
+        (run.dropReasons?.length ?? 0) > 0 ||
+        (run.parseFailureCount ?? 0) > 0))
+  ) {
+    return {
+      sourceId,
+      succeeded: false,
+      errorType: "source_failed",
+      failureReason:
+        firstNonEmptyString(run.warnings) ??
+        `Provider ${provider} source ${sourceId} failed without emitting jobs.`,
+    };
+  }
+
+  return {
+    sourceId,
+    succeeded: true,
+    errorType: "none",
+  };
+}
+
+function firstNonEmptyString(values: string[] | undefined) {
+  return values?.find((value) => value.trim().length > 0);
 }
 
 function applyAdapterStatusRules<P extends ProviderResult["provider"]>(

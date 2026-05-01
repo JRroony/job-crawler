@@ -9,6 +9,7 @@ import {
   type SourceInventoryRecord,
 } from "@/lib/server/discovery/inventory";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
+import { getEnv } from "@/lib/server/env";
 import { createLeverProvider } from "@/lib/server/providers/lever";
 import type { CrawlProvider, NormalizedJobSeed } from "@/lib/server/providers/types";
 import type { ProviderPlatform } from "@/lib/types";
@@ -83,6 +84,7 @@ describe("provider tiering and timeout policy", () => {
     const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const repository = new JobCrawlerRepository(new MongoLikeNullDb());
     const now = new Date("2026-04-20T12:00:00.000Z");
+    const env = getEnv();
     const calls: ProviderPlatform[] = [];
     await repository.upsertSourceInventory([
       createInventoryRecord("workday", now),
@@ -104,8 +106,6 @@ describe("provider tiering and timeout policy", () => {
       now,
       maxSources: 2,
       runTimeoutMs: 123_456,
-      providerTimeoutMs: 2_345,
-      sourceTimeoutMs: 1_234,
       schedulingIntervalMs: 60_000,
       refreshInventory: () => repository.listSourceInventory(["workday", "company_page"]),
     });
@@ -124,8 +124,8 @@ describe("provider tiering and timeout policy", () => {
         crawlRunId: triggered.crawlRunId,
         crawlMode: "deep",
         globalTimeoutMs: 123_456,
-        providerTimeoutMs: 2_345,
-        sourceTimeoutMs: 1_234,
+        providerTimeoutMs: env.BACKGROUND_INGESTION_PROVIDER_TIMEOUT_MS,
+        sourceTimeoutMs: env.BACKGROUND_INGESTION_SOURCE_TIMEOUT_MS,
         isBackgroundRun: true,
         isRequestTimeRun: false,
       }),
@@ -299,6 +299,49 @@ describe("provider tiering and timeout policy", () => {
       savedCount: 1,
     });
     expect(leverResult?.status).not.toBe("timed_out");
+  });
+
+  it("marks Lever timed_out only when every source times out and no jobs were saved", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-04-20T12:05:00.000Z");
+    const fetchImpl = vi.fn(async () => {
+      return new Promise<Response>(() => undefined);
+    }) as unknown as typeof fetch;
+
+    const result = await runSearchIngestionFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["lever"],
+        crawlMode: "balanced",
+      },
+      {
+        repository,
+        providers: [createLeverProvider()],
+        discovery: createDiscovery([
+          createLeverSource("slowco-a"),
+          createLeverSource("slowco-b"),
+        ]),
+        fetchImpl,
+        now,
+        providerTimeoutMs: 100,
+        sourceTimeoutMs: 20,
+      },
+    );
+    const leverResult = result.sourceResults.find((sourceResult) => sourceResult.provider === "lever");
+    const persistedJobs = await repository.getJobsByCrawlRun(result.crawlRun._id);
+
+    expect(result.crawlRun.status).toBe("failed");
+    expect(persistedJobs).toHaveLength(0);
+    expect(leverResult).toMatchObject({
+      provider: "lever",
+      status: "timed_out",
+      sourceCount: 2,
+      fetchedCount: 0,
+      matchedCount: 0,
+      savedCount: 0,
+      errorMessage: expect.stringContaining("timed out"),
+    });
   });
 
   it("keeps request-time and background provider timeout budgets separate", async () => {

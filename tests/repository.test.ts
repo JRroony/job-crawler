@@ -1633,8 +1633,9 @@ describe("JobCrawlerRepository", () => {
         sourceId: greenhouse._id,
         observedAt: failedAt,
         health: "failing",
-        lastFailureReason: "Timed out fetching board payload",
         succeeded: false,
+        errorType: "source_timeout",
+        failureReason: "Timed out fetching board payload",
       },
     ]);
     await repository.recordSourceInventoryObservations([
@@ -1643,6 +1644,7 @@ describe("JobCrawlerRepository", () => {
         observedAt: recoveredAt,
         health: "healthy",
         succeeded: true,
+        errorType: "none",
       },
     ]);
 
@@ -1654,11 +1656,11 @@ describe("JobCrawlerRepository", () => {
       health: "healthy",
       failureCount: 1,
       consecutiveFailures: 0,
-      lastFailureReason: "Timed out fetching board payload",
       lastCrawledAt: recoveredAt,
       lastSucceededAt: recoveredAt,
       lastFailedAt: failedAt,
     });
+    expect(inventory[0]?.lastFailureReason).toBeUndefined();
     expect(Date.parse(String(inventory[0]?.nextEligibleAt))).toBeGreaterThan(Date.parse(recoveredAt));
   });
 });

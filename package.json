@@ -8,6 +8,9 @@
     "start": "node scripts/run-next.js start",
     "backfill:search-index": "tsx scripts/backfill-search-index.ts",
     "benchmark:crawler": "tsx scripts/benchmark-crawler.ts",
+    "diagnose:provider-lifecycle": "tsx scripts/diagnose-provider-lifecycle.ts",
+    "diagnose:source-inventory": "tsx scripts/diagnose-source-inventory.ts",
+    "diagnose:ingestion-persistence": "tsx scripts/diagnose-ingestion-persistence.ts",
     "diagnose:search": "tsx scripts/diagnose-search-coverage.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
