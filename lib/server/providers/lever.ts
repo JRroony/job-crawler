@@ -62,9 +62,14 @@ export function normalizeLeverJob(input: {
   const explicitExperienceLevel = resolveLeverExplicitExperienceLevel(input.job);
   const structuredExperienceHints = collectLeverStructuredExperienceHints(input.job);
   const descriptionExperienceHints = collectLeverDescriptionExperienceHints(input.job);
+  const sourceJobUrl =
+    input.job.hostedUrl ??
+    input.job.applyUrl ??
+    (input.job.id ? buildCanonicalLeverJobUrl(input.siteToken, input.job.id) : undefined);
+  const boardUrl = input.hostedUrl ?? `https://jobs.lever.co/${input.siteToken}`;
 
   return buildSeed({
-    title: input.job.text ?? "Untitled role",
+    title: input.job.text ?? "",
     companyToken: input.siteToken,
     company: defaultCompanyName(input.siteToken, input.companyName),
     locationText,
@@ -73,18 +78,10 @@ export function normalizeLeverJob(input: {
       input.job.id ??
       input.job.hostedUrl ??
       input.job.applyUrl ??
-      input.hostedUrl ??
-      input.siteToken,
-    sourceUrl:
-      input.job.hostedUrl ??
-      input.hostedUrl ??
-      `https://jobs.lever.co/${input.siteToken}`,
-    applyUrl:
-      input.job.applyUrl ??
-      input.job.hostedUrl ??
-      input.hostedUrl ??
-      `https://jobs.lever.co/${input.siteToken}`,
-    canonicalUrl: input.job.hostedUrl,
+      "",
+    sourceUrl: sourceJobUrl ?? boardUrl,
+    applyUrl: input.job.applyUrl ?? sourceJobUrl ?? boardUrl,
+    canonicalUrl: sourceJobUrl,
     postedAt: coercePostedAt(input.job.createdAt),
     rawSourceMetadata: {
       leverJob: input.job,

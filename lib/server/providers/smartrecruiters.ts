@@ -56,10 +56,9 @@ export function normalizeSmartRecruitersJob(input: {
   const boardUrl = input.boardUrl ?? `https://careers.smartrecruiters.com/${input.companyToken}`;
   const sourceUrl =
     input.candidate.jobUrl ??
-    buildCanonicalSmartRecruitersJobUrl(
-      input.companyToken,
-      input.candidate.id ?? normalizeComparableText(input.candidate.title ?? "role"),
-    );
+    (input.candidate.id
+      ? buildCanonicalSmartRecruitersJobUrl(input.companyToken, input.candidate.id)
+      : "");
   const descriptionSections = input.candidate.jobAd?.sections
     ?.map((section) => stripHtml(section.text))
     .filter(Boolean);
@@ -69,7 +68,7 @@ export function normalizeSmartRecruitersJob(input: {
     descriptionSections?.join("\n");
 
   return buildSeed({
-    title: input.candidate.title ?? "Untitled role",
+    title: input.candidate.title ?? "",
     companyToken: input.companyToken,
     company:
       input.candidate.company ??

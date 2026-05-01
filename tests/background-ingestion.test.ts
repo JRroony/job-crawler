@@ -156,6 +156,94 @@ describe("recurring background ingestion", () => {
     expect(await repository.getIndexedJobDeliveryCursor()).toBe(1);
   });
 
+  it("continues recurring Greenhouse ingestion when a mixed batch contains malformed seeds", async () => {
+    const db = new MongoLikeNullDb();
+    const repository = new JobCrawlerRepository(db);
+    const now = new Date("2026-04-15T12:00:00.000Z");
+
+    await repository.upsertSourceInventory([
+      createInventoryRecord({
+        token: "openai",
+        companyHint: "OpenAI",
+        nextEligibleAt: "2026-04-15T11:00:00.000Z",
+      }),
+    ]);
+
+    const provider = createStubProvider("greenhouse", async (_context, sources) => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: sources.length,
+      fetchedCount: 2,
+      matchedCount: 2,
+      warningCount: 0,
+      jobs: [
+        createProviderJob({
+          title: "   ",
+          normalizedTitle: "",
+          titleNormalized: "",
+          sourceJobId: "malformed-title",
+        }),
+        createProviderJob({
+          title: "Software Engineer",
+          sourceJobId: "valid-title",
+        }),
+      ],
+    }));
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [provider],
+      now,
+      maxSources: 1,
+      schedulingIntervalMs: 60_000,
+      runTimeoutMs: 2_000,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected recurring ingestion to start.");
+    }
+
+    const crawlRun = await waitForRunCompletion(repository, triggered.crawlRunId);
+    const sourceResults = await repository.getCrawlSourceResults(triggered.crawlRunId);
+    const storedJobs = db.snapshot<Record<string, unknown>>(collectionNames.jobs);
+
+    expect(crawlRun.status).toBe("completed");
+    expect(storedJobs).toEqual([
+      expect.objectContaining({
+        title: "Software Engineer",
+        sourceJobId: "valid-title",
+      }),
+    ]);
+    expect(crawlRun.diagnostics.dropReasonCounts).toMatchObject({
+      seed_invalid_empty_title: 1,
+    });
+    expect(crawlRun.diagnostics.backgroundPersistence).toMatchObject({
+      jobsInserted: 1,
+      failedBatches: 0,
+      providerStats: [
+        expect.objectContaining({
+          provider: "greenhouse",
+          fetchedCount: 2,
+          matchedCount: 1,
+          seedCount: 2,
+          insertedCount: 1,
+          failedBatches: 0,
+          warningCount: 1,
+        }),
+      ],
+    });
+    expect(sourceResults[0]).toMatchObject({
+      provider: "greenhouse",
+      status: "partial",
+      fetchedCount: 2,
+      matchedCount: 1,
+      savedCount: 1,
+      warningCount: 1,
+    });
+  });
+
   it("persists and logs structured Canada expansion filters from the recurring inventory path", async () => {
     const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const repository = new JobCrawlerRepository(new MongoLikeNullDb());

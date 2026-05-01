@@ -104,8 +104,21 @@ export type ProviderDiagnostics<P extends ProviderPlatform = ProviderPlatform> =
   fetchCount: number;
   parseSuccessCount: number;
   parseFailureCount: number;
+  rawFetchedCount: number;
+  parsedSeedCount: number;
+  validSeedCount: number;
+  invalidSeedCount: number;
   dropReasonCounts: Record<string, number>;
   sampleDropReasons: string[];
+  sampleInvalidSeeds: Array<{
+    provider?: ProviderPlatform;
+    sourceUrl?: string;
+    sourceJobId?: string;
+    company?: string;
+    rawTitle?: string;
+    applyUrl?: string;
+    reason: string;
+  }>;
 };
 
 export type SourceDrivenProvider<

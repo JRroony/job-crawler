@@ -4,8 +4,31 @@ import { normalizeAshbyCandidate } from "@/lib/server/providers/ashby";
 import { normalizeGreenhouseJob } from "@/lib/server/providers/greenhouse";
 import { normalizeLeverJob } from "@/lib/server/providers/lever";
 import { normalizeSmartRecruitersJob } from "@/lib/server/providers/smartrecruiters";
-import { buildSeed, normalizeProviderJobSeed } from "@/lib/server/providers/shared";
+import {
+  buildSeed,
+  finalizeProviderResult,
+  normalizeProviderJobSeed,
+  validateProviderSeedCandidate,
+} from "@/lib/server/providers/shared";
 import { normalizeWorkdayJob } from "@/lib/server/providers/workday";
+import type { NormalizedJobSeed } from "@/lib/server/providers/types";
+
+function providerSeed(overrides: Partial<NormalizedJobSeed> = {}): NormalizedJobSeed {
+  return {
+    title: "Software Engineer",
+    company: "OpenAI",
+    normalizedTitle: "software engineer",
+    titleNormalized: "software engineer",
+    locationText: "Remote, United States",
+    sourcePlatform: "greenhouse",
+    sourceJobId: "role-1",
+    sourceUrl: "https://boards.greenhouse.io/openai/jobs/role-1",
+    applyUrl: "https://boards.greenhouse.io/openai/jobs/role-1/apply",
+    discoveredAt: "2026-03-29T00:00:00.000Z",
+    rawSourceMetadata: {},
+    ...overrides,
+  };
+}
 
 describe("provider normalization", () => {
   it("builds provider seeds with consistent normalized title aliases", () => {
@@ -47,7 +70,7 @@ describe("provider normalization", () => {
     expect(job.titleNormalized).toBe("backend engineer");
   });
 
-  it("guarantees non-empty normalized title aliases for blank or non-comparable provider titles", () => {
+  it("does not invent placeholder titles for blank provider titles", () => {
     const blankTitle = normalizeProviderJobSeed({
       title: "   ",
       company: "OpenAI",
@@ -61,24 +84,90 @@ describe("provider normalization", () => {
       discoveredAt: "2026-03-29T00:00:00.000Z",
       rawSourceMetadata: {},
     });
-    const symbolicTitle = normalizeProviderJobSeed({
-      title: "  ///  ",
-      company: "OpenAI",
-      locationText: "Remote, United States",
-      sourcePlatform: "greenhouse",
-      sourceJobId: "symbolic-title-role",
-      sourceUrl: "https://boards.greenhouse.io/openai/jobs/symbolic-title-role",
-      applyUrl: "https://boards.greenhouse.io/openai/jobs/symbolic-title-role/apply",
-      discoveredAt: "2026-03-29T00:00:00.000Z",
-      rawSourceMetadata: {},
+
+    expect(blankTitle.title).toBe("");
+    expect(blankTitle.normalizedTitle).toBe("");
+    expect(blankTitle.titleNormalized).toBe("");
+  });
+
+  it("validates provider seed candidates before hydration", () => {
+    expect(validateProviderSeedCandidate(providerSeed({ title: "" }))).toMatchObject({
+      ok: false,
+      drop: { reason: "seed_invalid_empty_title" },
+    });
+    expect(validateProviderSeedCandidate(providerSeed({ title: "   " }))).toMatchObject({
+      ok: false,
+      drop: { reason: "seed_invalid_empty_title" },
+    });
+    expect(validateProviderSeedCandidate(providerSeed({ title: "Untitled role" }))).toMatchObject({
+      ok: false,
+      drop: { reason: "seed_invalid_placeholder_title" },
+    });
+    expect(validateProviderSeedCandidate(providerSeed({ company: "" }))).toMatchObject({
+      ok: false,
+      drop: { reason: "seed_invalid_missing_company" },
+    });
+    expect(validateProviderSeedCandidate(providerSeed({ sourceJobId: "" }))).toMatchObject({
+      ok: false,
+      drop: { reason: "seed_invalid_missing_source_job_id" },
+    });
+    expect(validateProviderSeedCandidate(providerSeed({ sourceUrl: "not a url" }))).toMatchObject({
+      ok: false,
+      drop: { reason: "seed_invalid_invalid_source_url" },
+    });
+    expect(validateProviderSeedCandidate(providerSeed({ applyUrl: "not a url" }))).toMatchObject({
+      ok: false,
+      drop: { reason: "seed_invalid_invalid_apply_url" },
+    });
+    expect(validateProviderSeedCandidate(providerSeed())).toMatchObject({
+      ok: true,
+      seed: {
+        title: "Software Engineer",
+        normalizedTitle: "software engineer",
+        titleNormalized: "software engineer",
+      },
+    });
+  });
+
+  it("finalizes mixed provider batches without letting one malformed seed fail the result", () => {
+    const result = finalizeProviderResult({
+      provider: "greenhouse",
+      jobs: [
+        providerSeed({
+          title: "",
+          normalizedTitle: "",
+          titleNormalized: "",
+          sourceJobId: "empty-title",
+        }),
+        providerSeed({
+          sourceJobId: "valid-title",
+          sourceUrl: "https://boards.greenhouse.io/openai/jobs/valid-title",
+          applyUrl: "https://boards.greenhouse.io/openai/jobs/valid-title/apply",
+        }),
+      ],
+      sourceCount: 1,
+      fetchedCount: 2,
+      warnings: [],
+      didExecuteSuccessfully: true,
     });
 
-    expect(blankTitle.title).toBe("Untitled role");
-    expect(blankTitle.normalizedTitle).toBe("untitled role");
-    expect(blankTitle.titleNormalized).toBe("untitled role");
-    expect(symbolicTitle.title).toBe("///");
-    expect(symbolicTitle.normalizedTitle).toBe("///");
-    expect(symbolicTitle.titleNormalized).toBe("///");
+    expect(result.status).toBe("partial");
+    expect(result.warningCount).toBe(1);
+    expect(result.jobs.map((job) => job.sourceJobId)).toEqual(["valid-title"]);
+    expect(result.diagnostics).toMatchObject({
+      parsedSeedCount: 2,
+      validSeedCount: 1,
+      invalidSeedCount: 1,
+      dropReasonCounts: {
+        seed_invalid_empty_title: 1,
+      },
+      sampleInvalidSeeds: [
+        expect.objectContaining({
+          sourceJobId: "empty-title",
+          reason: "seed_invalid_empty_title",
+        }),
+      ],
+    });
   });
 
   it("normalizes greenhouse jobs into the common model", () => {

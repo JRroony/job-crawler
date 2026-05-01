@@ -224,7 +224,15 @@ function extractCompanyHtmlJobs(input: {
   discoveredAt: string;
 }): NormalizedJobSeed[] {
   const jsonLdJobs = collectJsonLdJobPostings(input.html)
-    .map((record, index) => normalizeJsonLdJob(input.company, input.discoveredAt, record, index))
+    .map((record, index) =>
+      normalizeJsonLdJob(
+        input.company,
+        input.sourcePageUrl,
+        input.discoveredAt,
+        record,
+        index,
+      ),
+    )
     .filter(isDefined);
 
   const embeddedJsonJobs = extractEmbeddedJsonJobs(input);
@@ -494,16 +502,13 @@ function normalizeCompanyFeedJob(
 
 function normalizeJsonLdJob(
   company: string,
+  sourcePageUrl: string,
   discoveredAt: string,
   record: Record<string, unknown>,
   index: number,
 ) {
-  const title = firstString(record, ["title", "name"]);
-  const sourceUrl = firstString(record, ["url"]);
-
-  if (!title || !sourceUrl) {
-    return undefined;
-  }
+  const title = firstString(record, ["title", "name"]) ?? "";
+  const sourceUrl = resolveUrl(firstString(record, ["url"]), sourcePageUrl) ?? "";
 
   return buildSeed({
     title,

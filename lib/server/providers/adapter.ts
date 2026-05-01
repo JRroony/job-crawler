@@ -11,6 +11,7 @@ import {
   finalizeProviderResult,
   normalizeProviderJobSeed,
   unsupportedProviderResult,
+  validateProviderSeedBatch,
 } from "@/lib/server/providers/shared";
 import {
   defineProvider,
@@ -27,11 +28,16 @@ export type ProviderSourceAdapterRun<
 > = {
   fetchedCount: number;
   fetchCount?: number;
+  sourceSucceeded?: boolean;
   jobs: NormalizedJobSeed[];
   warnings?: string[];
   parseSuccessCount?: number;
   parseFailureCount?: number;
   dropReasons?: string[];
+  parsedSeedCount?: number;
+  validSeedCount?: number;
+  invalidSeedCount?: number;
+  sampleInvalidSeeds?: ProviderDiagnostics<P>["sampleInvalidSeeds"];
 };
 
 export type ProviderSourceAdapterDefinition<
@@ -97,17 +103,27 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
                       }
                     },
                     onBatch: context.onBatch
-                      ? (batch) =>
-                          context.onBatch?.({
-                            ...batch,
+                      ? (batch) => {
+                          const validation = validateProviderSeedBatch({
+                            provider: batch.provider,
                             jobs: batch.jobs.map(normalizeProviderJobSeed),
-                          })
+                          });
+
+                          if (validation.jobs.length === 0) {
+                            return undefined;
+                          }
+
+                          return context.onBatch?.({
+                            ...batch,
+                            jobs: validation.jobs,
+                          });
+                        }
                       : undefined,
                   },
                   source,
                 );
 
-                return run;
+                return finalizeProviderSourceRun(definition.provider, run);
               },
             });
 
@@ -128,6 +144,7 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
               parseSuccessCount: 0,
               parseFailureCount: 1,
               dropReasons: ["source_timeout"],
+              sourceSucceeded: false,
             };
           }
         },
@@ -152,9 +169,43 @@ export function createAdapterProvider<P extends ProviderResult["provider"]>(
         fetchedCount,
         warnings,
         diagnostics,
+        didExecuteSuccessfully: sourceRuns.some((run) => run.sourceSucceeded ?? run.jobs.length > 0),
       });
     },
   });
+}
+
+function finalizeProviderSourceRun<P extends ProviderResult["provider"]>(
+  provider: P,
+  run: ProviderSourceAdapterRun<P>,
+): ProviderSourceAdapterRun<P> {
+  const parsedSeedCount = run.parsedSeedCount ?? run.jobs.length;
+  const validation = validateProviderSeedBatch({
+    provider,
+    jobs: run.jobs,
+    warnings: run.warnings,
+  });
+  const existingInvalidSeedCount = run.invalidSeedCount ?? 0;
+
+  return {
+    ...run,
+    jobs: validation.jobs,
+    warnings: validation.warnings,
+    parseSuccessCount: validation.jobs.length,
+    parseFailureCount:
+      (run.parseFailureCount ?? 0) + validation.dropped.length,
+    dropReasons: [
+      ...(run.dropReasons ?? []),
+      ...validation.dropped.map((drop) => drop.reason),
+    ],
+    parsedSeedCount,
+    validSeedCount: validation.jobs.length,
+    invalidSeedCount: existingInvalidSeedCount + validation.dropped.length,
+    sampleInvalidSeeds: [
+      ...(run.sampleInvalidSeeds ?? []),
+      ...validation.sampleInvalidSeeds,
+    ].slice(0, 8),
+  };
 }
 
 function buildProviderDiagnostics<P extends ProviderResult["provider"]>(
@@ -184,7 +235,23 @@ function buildProviderDiagnostics<P extends ProviderResult["provider"]>(
       (total, run) => total + (run.parseFailureCount ?? 0),
       0,
     ),
+    rawFetchedCount: sourceRuns.reduce((total, run) => total + run.fetchedCount, 0),
+    parsedSeedCount: sourceRuns.reduce(
+      (total, run) => total + (run.parsedSeedCount ?? run.jobs.length),
+      0,
+    ),
+    validSeedCount: sourceRuns.reduce(
+      (total, run) => total + (run.validSeedCount ?? run.jobs.length),
+      0,
+    ),
+    invalidSeedCount: sourceRuns.reduce(
+      (total, run) => total + (run.invalidSeedCount ?? 0),
+      0,
+    ),
     dropReasonCounts,
     sampleDropReasons: Object.keys(dropReasonCounts).slice(0, 8),
+    sampleInvalidSeeds: sourceRuns
+      .flatMap((run) => run.sampleInvalidSeeds ?? [])
+      .slice(0, 8),
   };
 }

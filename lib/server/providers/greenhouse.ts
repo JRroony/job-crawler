@@ -21,8 +21,7 @@ import {
   buildSeed,
   coercePostedAt,
   defaultCompanyName,
-  finalizeProviderResult,
-  unsupportedProviderResult,
+  validateProviderSeedBatch,
 } from "@/lib/server/providers/shared";
 import {
   type NormalizedJobSeed,
@@ -79,6 +78,7 @@ export function normalizeGreenhouseJob(input: {
   companyToken: string;
   boardUrl?: string;
   companyName?: string;
+  sourceId?: string;
   discoveredAt: string;
   job: GreenhouseJob;
 }) {
@@ -91,7 +91,7 @@ export function normalizeGreenhouseJob(input: {
     `https://boards.greenhouse.io/${input.companyToken}`;
 
   return buildSeed({
-    title: readGreenhouseText(input.job.title) ?? "Untitled role",
+    title: readGreenhouseText(input.job.title) ?? "",
     companyToken: input.companyToken,
     company: defaultCompanyName(
       input.companyToken,
@@ -109,6 +109,8 @@ export function normalizeGreenhouseJob(input: {
     ),
     rawSourceMetadata: {
       greenhouseJob: input.job,
+      greenhouseSourceId: input.sourceId,
+      greenhouseBoardUrl: boardUrl,
       greenhouseBoardToken: input.companyToken,
       greenhouseJobId: String(input.job.id),
       greenhouseStructuredExperienceHints: structuredExperienceHints,
@@ -239,35 +241,63 @@ async function crawlGreenhouseSource(
     companyToken ?? buildProviderCompanyToken(source.companyHint) ?? "greenhouse";
   const normalizationInput = rawJobs;
   const normalizationStartedMs = Date.now();
-  const jobs = normalizationInput.map((job) =>
-    normalizeGreenhouseJob({
-      companyToken: normalizedCompanyToken,
-      boardUrl,
-      companyName: source.companyHint,
-      discoveredAt,
-      job,
-    }),
-  );
+  const seedValidation = validateProviderSeedBatch({
+    provider: "greenhouse",
+    jobs: normalizationInput.map((job) =>
+      normalizeGreenhouseJob({
+        companyToken: normalizedCompanyToken,
+        boardUrl,
+        companyName: source.companyHint,
+        sourceId: source.id,
+        discoveredAt,
+        job,
+      }),
+    ),
+    warnings,
+  });
+  warnings.splice(0, warnings.length, ...seedValidation.warnings);
+  dropReasons.push(...seedValidation.dropped.map((drop) => drop.reason));
+  const jobs = seedValidation.jobs;
+  let invalidSeedCount = seedValidation.dropped.length;
+  const sampleInvalidSeeds = [...seedValidation.sampleInvalidSeeds];
   const normalizationMs = Date.now() - normalizationStartedMs;
 
-  const detailFallbackJob =
+  const detailFallbackSeed =
     jobs.length === 0 && source.jobId && companyToken
       ? await (async () => {
           await context.throwIfCanceled?.();
           return extractGreenhouseJobFromDetailUrl({
-          detailUrl:
-            parseGreenhouseUrl(source.url)?.canonicalJobUrl ??
-            `https://job-boards.greenhouse.io/${companyToken}/jobs/${source.jobId}`,
-          boardSlug: companyToken,
-          jobId: source.jobId!,
-          companyHint: source.companyHint,
-          discoveredAt,
-          fetchImpl: context.fetchImpl,
+            detailUrl:
+              parseGreenhouseUrl(source.url)?.canonicalJobUrl ??
+              `https://job-boards.greenhouse.io/${companyToken}/jobs/${source.jobId}`,
+            boardSlug: companyToken,
+            jobId: source.jobId!,
+            companyHint: source.companyHint,
+            discoveredAt,
+            fetchImpl: context.fetchImpl,
           });
         })()
       : undefined;
+  let detailFallbackJob: NormalizedJobSeed | undefined;
 
-  if (source.jobId && !detailFallbackJob && jobs.length === 0) {
+  if (detailFallbackSeed) {
+    const detailValidation = validateProviderSeedBatch({
+      provider: "greenhouse",
+      jobs: [detailFallbackSeed],
+      warnings,
+    });
+    warnings.splice(0, warnings.length, ...detailValidation.warnings);
+
+    if (detailValidation.jobs[0]) {
+      detailFallbackJob = detailValidation.jobs[0];
+    } else {
+      invalidSeedCount += detailValidation.dropped.length;
+      dropReasons.push(...detailValidation.dropped.map((drop) => drop.reason));
+      sampleInvalidSeeds.push(...detailValidation.sampleInvalidSeeds);
+    }
+  }
+
+  if (source.jobId && !detailFallbackSeed && !detailFallbackJob && jobs.length === 0) {
     dropReasons.push("detail_fallback_failed");
   } else if (rawJobs.length === 0 && !source.jobId) {
     dropReasons.push("empty_board_payload");
@@ -283,6 +313,7 @@ async function crawlGreenhouseSource(
     preselectedCount: preselectedRawJobs.length,
     normalizationInputCount: normalizationInput.length,
     normalizedCount: normalizedJobs.length,
+    invalidSeedCount,
     preselectionSkippedCount: Math.max(0, rawJobs.length - preselectedRawJobs.length),
     preselectionWouldHaveDroppedBoard: rawJobs.length > 0 && preselectedRawJobs.length === 0,
     usedDetailFallback: Boolean(detailFallbackJob),
@@ -312,9 +343,14 @@ async function crawlGreenhouseSource(
     warnings,
     parseSuccessCount: normalizedJobs.length,
     parseFailureCount:
-      Math.max(0, normalizationInput.length - jobs.length) +
-      (source.jobId && !detailFallbackJob && jobs.length === 0 ? 1 : 0),
+      invalidSeedCount +
+      (source.jobId && !detailFallbackSeed && !detailFallbackJob && jobs.length === 0 ? 1 : 0),
     dropReasons,
+    sourceSucceeded: result.ok || Boolean(detailFallbackJob),
+    parsedSeedCount: normalizationInput.length + (detailFallbackSeed ? 1 : 0),
+    validSeedCount: normalizedJobs.length,
+    invalidSeedCount,
+    sampleInvalidSeeds,
   };
 }
 

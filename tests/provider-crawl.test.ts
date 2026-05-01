@@ -197,6 +197,80 @@ describe("provider crawl status and live parsing", () => {
     });
   });
 
+  it("drops malformed Greenhouse job seeds without failing the provider batch", async () => {
+    const provider = createGreenhouseProvider();
+    const fetchImpl = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          jobs: [
+            {
+              id: "empty-title-role",
+              title: "",
+              absolute_url: "https://boards.greenhouse.io/openai/jobs/empty-title-role",
+              company_name: "OpenAI",
+              location: {
+                name: "San Francisco, CA",
+              },
+            },
+            {
+              id: "backend-role",
+              title: "Software Engineer, Backend",
+              absolute_url: "https://boards.greenhouse.io/openai/jobs/backend-role",
+              first_published: "2026-03-10T00:00:00.000Z",
+              company_name: "OpenAI",
+              location: {
+                name: "San Francisco, CA",
+              },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Software Engineer",
+      },
+      sources: [greenhouseSource("openai")],
+    });
+
+    expect(result.status).toBe("partial");
+    expect(result.fetchedCount).toBe(2);
+    expect(result.matchedCount).toBe(1);
+    expect(result.warningCount).toBe(1);
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0]).toMatchObject({
+      title: "Software Engineer, Backend",
+      sourceJobId: "backend-role",
+    });
+    expect(result.diagnostics).toMatchObject({
+      parsedSeedCount: 2,
+      validSeedCount: 1,
+      invalidSeedCount: 1,
+      dropReasonCounts: {
+        seed_invalid_empty_title: 1,
+      },
+      sampleInvalidSeeds: [
+        expect.objectContaining({
+          provider: "greenhouse",
+          sourceJobId: "empty-title-role",
+          company: "OpenAI",
+          rawTitle: "",
+          applyUrl: "https://boards.greenhouse.io/openai/jobs/empty-title-role",
+          reason: "seed_invalid_empty_title",
+        }),
+      ],
+    });
+  });
+
   it("marks a Greenhouse crawl as failed when every configured board fetch fails", async () => {
     const provider = createGreenhouseProvider();
     const fetchImpl = vi.fn(async () => {
@@ -342,6 +416,64 @@ describe("provider crawl status and live parsing", () => {
     });
   });
 
+  it("drops malformed Ashby jobs without failing valid jobs in the same batch", async () => {
+    const provider = createAshbyProvider();
+    const html = `
+      <!DOCTYPE html>
+      <html lang="en">
+        <body>
+          <script>
+            window.__appData = {
+              "jobBoard": {
+                "jobPostings": [
+                  {
+                    "id": "missing-title",
+                    "title": "",
+                    "locationName": "Remote, United States"
+                  },
+                  {
+                    "id": "role-1",
+                    "title": "Data Analyst",
+                    "locationName": "Remote, United States"
+                  }
+                ]
+              }
+            };
+          </script>
+        </body>
+      </html>
+    `;
+    const fetchImpl = vi.fn(async () => {
+      return new Response(html, {
+        status: 200,
+        headers: {
+          "content-type": "text/html",
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Data Analyst",
+        country: "United States",
+      },
+      sources: [ashbySource("notion")],
+    });
+
+    expect(result.status).toBe("partial");
+    expect(result.jobs.map((job) => job.title)).toEqual(["Data Analyst"]);
+    expect(result.diagnostics).toMatchObject({
+      parsedSeedCount: 2,
+      validSeedCount: 1,
+      invalidSeedCount: 1,
+      dropReasonCounts: {
+        seed_invalid_empty_title: 1,
+      },
+    });
+  });
+
   it("crawls Lever postings into normalized jobs and preserves hosted URLs", async () => {
     const provider = createLeverProvider();
     const fetchImpl = vi.fn(async () => {
@@ -398,6 +530,61 @@ describe("provider crawl status and live parsing", () => {
       fetchCount: 1,
       parseSuccessCount: 1,
       parseFailureCount: 0,
+    });
+  });
+
+  it("drops malformed Lever postings without failing the provider batch", async () => {
+    const provider = createLeverProvider();
+    const fetchImpl = vi.fn(async () => {
+      return new Response(
+        JSON.stringify([
+          {
+            id: "empty-title",
+            text: "   ",
+            hostedUrl: "https://jobs.lever.co/figma/empty-title",
+            applyUrl: "https://jobs.lever.co/figma/empty-title/apply",
+            categories: {
+              location: "Remote, United States",
+            },
+          },
+          {
+            id: "role-1",
+            text: "Backend Engineer",
+            hostedUrl: "https://jobs.lever.co/figma/role-1",
+            applyUrl: "https://jobs.lever.co/figma/role-1/apply",
+            categories: {
+              location: "Remote, United States",
+            },
+          },
+        ]),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Backend Engineer",
+        country: "United States",
+      },
+      sources: [leverSource("figma")],
+    });
+
+    expect(result.status).toBe("partial");
+    expect(result.jobs.map((job) => job.sourceJobId)).toEqual(["role-1"]);
+    expect(result.diagnostics).toMatchObject({
+      parsedSeedCount: 2,
+      validSeedCount: 1,
+      invalidSeedCount: 1,
+      dropReasonCounts: {
+        seed_invalid_empty_title: 1,
+      },
     });
   });
 
@@ -518,6 +705,60 @@ describe("provider crawl status and live parsing", () => {
       fetchCount: 1,
       parseSuccessCount: 1,
       parseFailureCount: 0,
+    });
+  });
+
+  it("drops incomplete Workday rows without failing valid rows in the same batch", async () => {
+    const provider = createWorkdayProvider();
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url === "https://acme.wd1.myworkdayjobs.com/wday/cxs/acme/Careers/jobs") {
+        return new Response(
+          JSON.stringify({
+            jobPostings: [
+              {
+                externalPath: "job/Austin-TX/Missing-Title_R000",
+                locationsText: "Austin, TX",
+              },
+              {
+                title: "Business Analyst",
+                externalPath: "job/Austin-TX/Business-Analyst_R123",
+                locationsText: "Austin, TX",
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+
+      return new Response("", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const result = await crawlProvider(provider, {
+      fetchImpl,
+      now: new Date("2026-03-30T12:00:00.000Z"),
+      filters: {
+        title: "Business Analyst",
+        country: "United States",
+      },
+      sources: [workdaySource("https://acme.wd1.myworkdayjobs.com/en-US/Careers")],
+    });
+
+    expect(result.status).toBe("partial");
+    expect(result.jobs.map((job) => job.title)).toEqual(["Business Analyst"]);
+    expect(result.diagnostics).toMatchObject({
+      parsedSeedCount: 2,
+      validSeedCount: 1,
+      invalidSeedCount: 1,
+      dropReasonCounts: {
+        seed_invalid_empty_title: 1,
+      },
     });
   });
 

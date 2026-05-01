@@ -25,7 +25,79 @@ import {
 } from "@/lib/server/crawler/helpers";
 import { isUnitedStatesValue, resolveUsState } from "@/lib/server/locations/us";
 
-const fallbackProviderJobTitle = "Untitled role";
+export type ProviderSeedDropReason =
+  | "seed_invalid_empty_title"
+  | "seed_invalid_placeholder_title"
+  | "seed_invalid_missing_company"
+  | "seed_invalid_missing_source_job_id"
+  | "seed_invalid_invalid_source_url"
+  | "seed_invalid_invalid_apply_url"
+  | "seed_invalid_empty_location"
+  | "seed_normalization_failed"
+  | "hydrate_invalid_search_index"
+  | "persistable_schema_validation_failed";
+
+export type ProviderSeedDiagnosticContext = {
+  provider?: NormalizedJobSeed["sourcePlatform"];
+  sourceUrl?: string;
+  sourceId?: string;
+  sourceJobId?: string;
+  company?: string;
+  rawTitle?: unknown;
+  applyUrl?: string;
+};
+
+export type ProviderSeedValidationDrop = {
+  seed: NormalizedJobSeed;
+  reason: ProviderSeedDropReason | string;
+  message: string;
+  context: ProviderSeedDiagnosticContext;
+};
+
+export type ProviderSeedValidationResult =
+  | {
+      ok: true;
+      seed: NormalizedJobSeed;
+    }
+  | {
+      ok: false;
+      drop: ProviderSeedValidationDrop;
+    };
+
+export type ProviderInvalidSeedSample = {
+  provider?: NormalizedJobSeed["sourcePlatform"];
+  sourceUrl?: string;
+  sourceJobId?: string;
+  company?: string;
+  rawTitle?: string;
+  applyUrl?: string;
+  reason: string;
+};
+
+export type ProviderSeedBatchValidationResult = {
+  jobs: NormalizedJobSeed[];
+  dropped: ProviderSeedValidationDrop[];
+  warnings: string[];
+  dropReasonCounts: Record<string, number>;
+  sampleDropReasons: string[];
+  sampleInvalidSeeds: ProviderInvalidSeedSample[];
+};
+
+const placeholderProviderTitleComparables = new Set([
+  "untitled role",
+  "unknown",
+  "n a",
+  "na",
+  "job opening",
+]);
+
+const placeholderCompanyComparables = new Set([
+  "unknown",
+  "n a",
+  "na",
+]);
+
+const maxDiagnosticSamples = 8;
 
 export function coercePostedAt(value: unknown) {
   if (!value) {
@@ -52,7 +124,7 @@ export function deriveNormalizedTitle(title: string) {
     return comparableTitle;
   }
 
-  return trimmedTitle.toLowerCase().replace(/\s+/g, " ").trim() || "untitled role";
+  return trimmedTitle.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 export function normalizeProviderJobSeed(seed: NormalizedJobSeed): NormalizedJobSeed {
@@ -68,6 +140,377 @@ export function normalizeProviderJobSeed(seed: NormalizedJobSeed): NormalizedJob
     normalizedTitle,
     titleNormalized: normalizedTitle,
   };
+}
+
+export function validateProviderSeedCandidate(
+  seed: NormalizedJobSeed,
+  context: Partial<ProviderSeedDiagnosticContext> = {},
+): ProviderSeedValidationResult {
+  const seedRecord = seed as NormalizedJobSeed & Record<string, unknown>;
+  const rawTitle = context.rawTitle ?? seedRecord.title;
+  const diagnosticContext = buildProviderSeedDiagnosticContext(seed, {
+    ...context,
+    rawTitle,
+  });
+
+  if (typeof rawTitle !== "string" || rawTitle.trim().length === 0) {
+    return {
+      ok: false,
+      drop: {
+        seed,
+        reason: "seed_invalid_empty_title",
+        message: "Job seed title is empty after trimming.",
+        context: diagnosticContext,
+      },
+    };
+  }
+
+  if (isPlaceholderProviderTitle(rawTitle)) {
+    return {
+      ok: false,
+      drop: {
+        seed,
+        reason: "seed_invalid_placeholder_title",
+        message: "Job seed title is a placeholder fallback.",
+        context: diagnosticContext,
+      },
+    };
+  }
+
+  if (!readDiagnosticString(seed.company) || isPlaceholderCompany(seed.company)) {
+    return {
+      ok: false,
+      drop: {
+        seed,
+        reason: "seed_invalid_missing_company",
+        message: "Job seed is missing a real company name.",
+        context: diagnosticContext,
+      },
+    };
+  }
+
+  if (!readDiagnosticString(seed.sourceJobId)) {
+    return {
+      ok: false,
+      drop: {
+        seed,
+        reason: "seed_invalid_missing_source_job_id",
+        message: "Job seed is missing a stable source job id.",
+        context: diagnosticContext,
+      },
+    };
+  }
+
+  if (!isValidAbsoluteUrl(seed.sourceUrl)) {
+    return {
+      ok: false,
+      drop: {
+        seed,
+        reason: "seed_invalid_invalid_source_url",
+        message: "Job seed sourceUrl is missing or invalid.",
+        context: diagnosticContext,
+      },
+    };
+  }
+
+  if (!isValidAbsoluteUrl(seed.applyUrl)) {
+    return {
+      ok: false,
+      drop: {
+        seed,
+        reason: "seed_invalid_invalid_apply_url",
+        message: "Job seed applyUrl is missing or invalid.",
+        context: diagnosticContext,
+      },
+    };
+  }
+
+  if (!readDiagnosticString(seed.locationText)) {
+    return {
+      ok: false,
+      drop: {
+        seed,
+        reason: "seed_invalid_empty_location",
+        message: "Job seed locationText is empty after trimming.",
+        context: diagnosticContext,
+      },
+    };
+  }
+
+  if (!readDiagnosticString(seed.sourcePlatform)) {
+    return {
+      ok: false,
+      drop: {
+        seed,
+        reason: "seed_normalization_failed",
+        message: "Job seed is missing a source platform.",
+        context: diagnosticContext,
+      },
+    };
+  }
+
+  return normalizeValidProviderSeed(seed, diagnosticContext);
+}
+
+export function normalizeValidProviderSeed(
+  seed: NormalizedJobSeed,
+  context: Partial<ProviderSeedDiagnosticContext> = {},
+): ProviderSeedValidationResult {
+  let normalizedSeed: NormalizedJobSeed;
+
+  try {
+    normalizedSeed = normalizeProviderJobSeed(seed);
+  } catch (error) {
+    return {
+      ok: false,
+      drop: {
+        seed,
+        reason: "seed_normalization_failed",
+        message: error instanceof Error ? error.message : "Job seed normalization failed.",
+        context: buildProviderSeedDiagnosticContext(seed, context),
+      },
+    };
+  }
+
+  const diagnosticContext = buildProviderSeedDiagnosticContext(normalizedSeed, context);
+  const titleSearchText = normalizeComparableText(
+    normalizedSeed.normalizedTitle || normalizedSeed.title,
+  );
+  const strippedTitleSearchText = normalizeComparableText(normalizedSeed.title);
+
+  if (!titleSearchText || !strippedTitleSearchText) {
+    return {
+      ok: false,
+      drop: {
+        seed: normalizedSeed,
+        reason: "hydrate_invalid_search_index",
+        message: "Job seed title cannot produce a non-empty search index title.",
+        context: diagnosticContext,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    seed: normalizedSeed,
+  };
+}
+
+export function validateNormalizedJobSeedForHydration(
+  seed: NormalizedJobSeed,
+  context: Partial<ProviderSeedDiagnosticContext> = {},
+): ProviderSeedValidationResult {
+  return validateProviderSeedCandidate(seed, context);
+}
+
+export function validateProviderSeedBatch(input: {
+  provider: NormalizedJobSeed["sourcePlatform"];
+  jobs: NormalizedJobSeed[];
+  warnings?: string[];
+  context?: Partial<ProviderSeedDiagnosticContext>;
+}): ProviderSeedBatchValidationResult {
+  const jobs: NormalizedJobSeed[] = [];
+  const dropped: ProviderSeedValidationDrop[] = [];
+  const warnings = [...(input.warnings ?? [])];
+
+  for (const seed of input.jobs) {
+    const validation = validateProviderSeedCandidate(seed, {
+      provider: input.provider,
+      ...input.context,
+    });
+
+    if (validation.ok) {
+      jobs.push(validation.seed);
+      continue;
+    }
+
+    dropped.push(validation.drop);
+    warnings.push(
+      `Dropped ${input.provider} job seed ${validation.drop.context.sourceJobId ?? "unknown"}: ${validation.drop.reason}`,
+    );
+  }
+
+  const dropReasonCounts = buildDropReasonCounts(dropped);
+
+  return {
+    jobs,
+    dropped,
+    warnings,
+    dropReasonCounts,
+    sampleDropReasons: Object.keys(dropReasonCounts).slice(0, maxDiagnosticSamples),
+    sampleInvalidSeeds: sampleInvalidSeeds(dropped, maxDiagnosticSamples),
+  };
+}
+
+export function finalizeProviderResultWithSeedValidation<
+  P extends ProviderResult["provider"],
+>(input: {
+  provider: P;
+  jobs: NormalizedJobSeed[];
+  sourceCount: number;
+  fetchedCount: number;
+  warnings: string[];
+  diagnostics?: ProviderDiagnostics<P>;
+  didExecuteSuccessfully?: boolean;
+}): ProviderResult<P> {
+  const validation = validateProviderSeedBatch({
+    provider: input.provider,
+    jobs: input.jobs,
+    warnings: input.warnings,
+  });
+  const diagnostics = mergeProviderSeedValidationDiagnostics({
+    provider: input.provider,
+    sourceCount: input.sourceCount,
+    fetchedCount: input.fetchedCount,
+    parsedSeedCount: input.jobs.length,
+    validSeedCount: validation.jobs.length,
+    validation,
+    existing: input.diagnostics,
+  });
+  const warningCount = validation.warnings.length;
+  const hasWarningsOrDrops = warningCount > 0 || diagnostics.invalidSeedCount > 0;
+  const executedSuccessfully =
+    input.didExecuteSuccessfully || input.fetchedCount > 0 || validation.jobs.length > 0;
+
+  return {
+    provider: input.provider,
+    status: hasWarningsOrDrops
+      ? validation.jobs.length > 0 || executedSuccessfully
+        ? "partial"
+        : "failed"
+      : "success",
+    jobs: validation.jobs,
+    sourceCount: input.sourceCount,
+    fetchedCount: input.fetchedCount,
+    matchedCount: validation.jobs.length,
+    warningCount,
+    errorMessage: hasWarningsOrDrops
+      ? validation.warnings.join(" ") || "One or more provider job seeds were dropped."
+      : undefined,
+    diagnostics,
+  } satisfies ProviderResult<P>;
+}
+
+export function buildProviderSeedDiagnosticContext(
+  seed: NormalizedJobSeed,
+  context: Partial<ProviderSeedDiagnosticContext> = {},
+): ProviderSeedDiagnosticContext {
+  const metadata = isRecord(seed.rawSourceMetadata) ? seed.rawSourceMetadata : {};
+  const sourceId =
+    context.sourceId ??
+    readDiagnosticString(metadata.sourceId) ??
+    readDiagnosticString(metadata.greenhouseSourceId);
+
+  return {
+    provider: context.provider ?? seed.sourcePlatform,
+    sourceUrl:
+      context.sourceUrl ??
+      seed.sourceUrl ??
+      readDiagnosticString(metadata.sourceUrl) ??
+      readDiagnosticString(metadata.greenhouseBoardUrl),
+    sourceId,
+    sourceJobId:
+      context.sourceJobId ??
+      seed.sourceJobId ??
+      readDiagnosticString(metadata.sourceJobId) ??
+      readDiagnosticString(metadata.greenhouseJobId),
+    company:
+      context.company ??
+      seed.company ??
+      readDiagnosticString(metadata.company) ??
+      readDiagnosticString(metadata.companyName),
+    rawTitle: context.rawTitle ?? (seed as NormalizedJobSeed & Record<string, unknown>).title,
+    applyUrl: context.applyUrl ?? seed.applyUrl,
+  };
+}
+
+function mergeProviderSeedValidationDiagnostics<P extends ProviderResult["provider"]>(input: {
+  provider: P;
+  sourceCount: number;
+  fetchedCount: number;
+  parsedSeedCount: number;
+  validSeedCount: number;
+  validation: ProviderSeedBatchValidationResult;
+  existing?: ProviderDiagnostics<P>;
+}): ProviderDiagnostics<P> {
+  const dropReasonCounts = {
+    ...(input.existing?.dropReasonCounts ?? {}),
+  };
+
+  Object.entries(input.validation.dropReasonCounts).forEach(([reason, count]) => {
+    dropReasonCounts[reason] = (dropReasonCounts[reason] ?? 0) + count;
+  });
+
+  const existingInvalidSeedCount = input.existing?.invalidSeedCount ?? 0;
+  const invalidSeedCount = existingInvalidSeedCount + input.validation.dropped.length;
+  const sampleInvalidSeeds = [
+    ...(input.existing?.sampleInvalidSeeds ?? []),
+    ...input.validation.sampleInvalidSeeds,
+  ].slice(0, maxDiagnosticSamples);
+
+  return {
+    provider: input.provider,
+    discoveryCount: input.existing?.discoveryCount ?? input.sourceCount,
+    fetchCount: input.existing?.fetchCount ?? (input.fetchedCount > 0 ? 1 : 0),
+    parseSuccessCount: input.validSeedCount,
+    parseFailureCount:
+      (input.existing?.parseFailureCount ?? 0) + input.validation.dropped.length,
+    rawFetchedCount: input.existing?.rawFetchedCount ?? input.fetchedCount,
+    parsedSeedCount: input.existing?.parsedSeedCount ?? input.parsedSeedCount,
+    validSeedCount: input.validSeedCount,
+    invalidSeedCount,
+    dropReasonCounts,
+    sampleDropReasons: Object.keys(dropReasonCounts).slice(0, maxDiagnosticSamples),
+    sampleInvalidSeeds,
+  };
+}
+
+function buildDropReasonCounts(dropped: ProviderSeedValidationDrop[]) {
+  return dropped.reduce<Record<string, number>>((counts, drop) => {
+    counts[drop.reason] = (counts[drop.reason] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function sampleInvalidSeeds(
+  dropped: ProviderSeedValidationDrop[],
+  limit: number,
+): ProviderInvalidSeedSample[] {
+  return dropped.slice(0, limit).map((drop) => {
+    const rawTitle =
+      typeof drop.context.rawTitle === "string"
+        ? truncateRawTitleDiagnostic(drop.context.rawTitle)
+        : typeof drop.seed.title === "string"
+          ? truncateRawTitleDiagnostic(drop.seed.title)
+          : undefined;
+
+    return {
+      provider: drop.context.provider,
+      sourceUrl: truncateDiagnosticValue(drop.context.sourceUrl),
+      sourceJobId: truncateDiagnosticValue(drop.context.sourceJobId),
+      company: truncateDiagnosticValue(drop.context.company),
+      rawTitle,
+      applyUrl: truncateDiagnosticValue(drop.context.applyUrl),
+      reason: drop.reason,
+    };
+  });
+}
+
+function truncateDiagnosticValue(value: unknown, maxLength = 240) {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  return trimmed.length <= maxLength ? trimmed : `${trimmed.slice(0, maxLength - 3)}...`;
+}
+
+function truncateRawTitleDiagnostic(value: string, maxLength = 240) {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 3)}...`;
 }
 
 export function buildSeed(input: {
@@ -193,14 +636,50 @@ export function buildSeed(input: {
   };
 }
 
-function normalizeProviderTitle(value: string) {
-  const title = value.trim();
-  return title || fallbackProviderJobTitle;
+function normalizeProviderTitle(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function normalizeTitleAlias(value?: string) {
   const normalized = normalizeComparableText(value);
   return normalized || undefined;
+}
+
+function readDiagnosticString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPlaceholderProviderTitle(value: unknown) {
+  if (typeof value !== "string") {
+    return false;
+  }
+
+  return placeholderProviderTitleComparables.has(normalizeComparableText(value));
+}
+
+function isPlaceholderCompany(value: unknown) {
+  if (typeof value !== "string") {
+    return false;
+  }
+
+  return placeholderCompanyComparables.has(normalizeComparableText(value));
+}
+
+function isValidAbsoluteUrl(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) {
+    return false;
+  }
+
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 function normalizeSourceCompanySlug(value: string) {
@@ -560,21 +1039,9 @@ export function finalizeProviderResult<P extends ProviderResult["provider"]>(inp
   fetchedCount: number;
   warnings: string[];
   diagnostics?: ProviderDiagnostics<P>;
+  didExecuteSuccessfully?: boolean;
 }): ProviderResult<P> {
-  const hasWarnings = input.warnings.length > 0;
-  const jobs = input.jobs.map(normalizeProviderJobSeed);
-
-  return {
-    provider: input.provider,
-    status: hasWarnings ? (jobs.length > 0 ? "partial" : "failed") : "success",
-    jobs,
-    sourceCount: input.sourceCount,
-    fetchedCount: input.fetchedCount,
-    matchedCount: jobs.length,
-    warningCount: input.warnings.length,
-    errorMessage: hasWarnings ? input.warnings.join(" ") : undefined,
-    diagnostics: input.diagnostics,
-  } satisfies ProviderResult<P>;
+  return finalizeProviderResultWithSeedValidation(input);
 }
 
 export function unsupportedProviderResult<P extends ProviderResult["provider"]>(

@@ -372,6 +372,97 @@ describe("crawl diagnostics", () => {
     });
   });
 
+  it("drops whitespace-title seeds before hydration without failing the crawl", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const now = new Date("2026-03-29T12:00:00.000Z");
+
+    const provider = createStubProvider("greenhouse", async () => {
+      return {
+        provider: "greenhouse",
+        status: "success",
+        sourceCount: 1,
+        fetchedCount: 2,
+        matchedCount: 2,
+        warningCount: 0,
+        jobs: [
+          {
+            title: "   ",
+            normalizedTitle: "",
+            titleNormalized: "",
+            company: "Acme",
+            country: "United States",
+            locationText: "Remote, United States",
+            sourcePlatform: "greenhouse",
+            sourceJobId: "empty-title-seed",
+            sourceUrl: "https://example.com/jobs/empty-title-seed",
+            applyUrl: "https://example.com/jobs/empty-title-seed/apply",
+            canonicalUrl: "https://example.com/jobs/empty-title-seed",
+            discoveredAt: now.toISOString(),
+            rawSourceMetadata: {},
+          },
+          {
+            title: "Software Engineer",
+            company: "Acme",
+            country: "United States",
+            locationText: "Remote, United States",
+            sourcePlatform: "greenhouse",
+            sourceJobId: "valid-seed",
+            sourceUrl: "https://example.com/jobs/valid-seed",
+            applyUrl: "https://example.com/jobs/valid-seed/apply",
+            canonicalUrl: "https://example.com/jobs/valid-seed",
+            discoveredAt: now.toISOString(),
+            rawSourceMetadata: {},
+          },
+        ],
+      };
+    });
+
+    const discovery: DiscoveryService = {
+      async discover() {
+        return [
+          classifySourceCandidate({
+            url: "https://boards.greenhouse.io/openai",
+            token: "openai",
+            confidence: "high",
+            discoveryMethod: "configured_env",
+          }),
+        ];
+      },
+    };
+
+    const result = await runSearchIngestionFromFilters(
+      {
+        title: "Software Engineer",
+        country: "United States",
+        platforms: ["greenhouse"],
+      },
+      {
+        repository,
+        providers: [provider],
+        discovery,
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        now,
+      },
+    );
+
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0]).toMatchObject({
+      title: "Software Engineer",
+      sourceJobId: "valid-seed",
+    });
+    expect(result.diagnostics.dropReasonCounts).toMatchObject({
+      seed_invalid_empty_title: 1,
+    });
+    expect(result.sourceResults[0]).toMatchObject({
+      provider: "greenhouse",
+      status: "partial",
+      fetchedCount: 2,
+      matchedCount: 1,
+      savedCount: 1,
+      warningCount: 1,
+    });
+  });
+
   it("emits ingestion trace logs across discovery, provider execution, and persistence", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const now = new Date("2026-03-29T12:00:00.000Z");

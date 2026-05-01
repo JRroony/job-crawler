@@ -101,16 +101,15 @@ export function normalizeWorkdayJob(input: {
   const sourceUrl =
     resolveWorkdayJobUrl(input.source, input.candidate, input.detailUrl) ??
     input.detailUrl ??
-    input.source.url;
+    "";
   const company =
     resolveWorkdayCompanyName(input.candidate) ??
-    input.source.companyHint ??
-    "Workday";
+    input.source.companyHint;
   const structuredExperienceHints = collectWorkdayStructuredExperienceHints(input.candidate);
   const descriptionExperienceHints = collectWorkdayDescriptionHints(input.candidate);
 
   return buildSeed({
-    title: resolveWorkdayTitle(input.candidate) ?? "Untitled role",
+    title: resolveWorkdayTitle(input.candidate) ?? "",
     companyToken:
       input.source.careerSitePath ??
       input.source.token ??
@@ -119,9 +118,9 @@ export function normalizeWorkdayJob(input: {
     company,
     locationText,
     sourcePlatform: "workday",
-    sourceJobId: resolveWorkdayJobId(input.candidate, sourceUrl),
+    sourceJobId: resolveWorkdayJobId(input.candidate) ?? sourceUrl,
     sourceUrl,
-    applyUrl: resolveWorkdayApplyUrl(input.candidate, sourceUrl),
+    applyUrl: resolveWorkdayApplyUrl(input.candidate, sourceUrl) ?? sourceUrl,
     canonicalUrl: sourceUrl,
     postedAt: coercePostedAt(resolveWorkdayPostedAt(input.candidate)),
     rawSourceMetadata: {
@@ -659,28 +658,26 @@ function resolveWorkdayPostedAt(record: WorkdayRecord) {
   ]);
 }
 
-function resolveWorkdayJobId(record: WorkdayRecord, sourceUrl: string) {
-  return (
-    firstString(record, [
-      "id",
-      "jobId",
-      "jobPostingId",
-      "externalJobPostingId",
-      "bulletinId",
-      "requisitionId",
-      "jobReqId",
-      "questionId",
-      "externalPath",
-      "url",
-    ]) ?? sourceUrl
-  );
+function resolveWorkdayJobId(record: WorkdayRecord) {
+  return firstString(record, [
+    "id",
+    "jobId",
+    "jobPostingId",
+    "externalJobPostingId",
+    "bulletinId",
+    "requisitionId",
+    "jobReqId",
+    "questionId",
+    "externalPath",
+    "url",
+  ]);
 }
 
 function resolveWorkdayApplyUrl(record: WorkdayRecord, fallbackUrl: string) {
   return (
     resolveWorkdayCandidateUrl(record, fallbackUrl) ??
     firstString(record, ["applyUrl", "externalUrl", "url"]) ??
-    fallbackUrl
+    (fallbackUrl.trim() ? fallbackUrl : undefined)
   );
 }
 

@@ -22,6 +22,11 @@ import {
 } from "@/lib/server/inventory/service";
 import { resolveObservedSourceNextEligibleAt } from "@/lib/server/inventory/selection";
 import { createDefaultProviders } from "@/lib/server/providers";
+import {
+  buildProviderSeedDiagnosticContext,
+  validateNormalizedJobSeedForHydration,
+  type ProviderSeedValidationDrop,
+} from "@/lib/server/providers/shared";
 import { selectProvidersForTieredCrawl } from "@/lib/server/providers/tiers";
 import type { CrawlProvider, NormalizedJobSeed } from "@/lib/server/providers/types";
 import type {
@@ -908,8 +913,10 @@ async function executeRecurringInventoryIngestion(
         );
 
         totalFetchedJobs += result.fetchedCount;
-        totalMatchedJobs += result.matchedCount;
-        diagnostics.jobsBeforeDedupe += result.jobs.length;
+        mergeBackgroundProviderDropReasonCounts(
+          diagnostics,
+          result.diagnostics?.dropReasonCounts,
+        );
 
         diagnostics.performance.persistenceBatchCount += 1;
         console.info("[background-ingestion:persistence-batch-start]", {
@@ -924,8 +931,11 @@ async function executeRecurringInventoryIngestion(
         });
 
         let persistence: PersistJobsWithStatsResult;
+        let validMatchedCount = 0;
+        let hydrationDroppedCount = 0;
         try {
           const hydration = hydrateBackgroundJobs(result.jobs, runtime.now);
+          hydrationDroppedCount = hydration.dropped.length;
           for (const drop of hydration.dropped) {
             diagnostics.dropReasonCounts[drop.reason] =
               (diagnostics.dropReasonCounts[drop.reason] ?? 0) + 1;
@@ -933,14 +943,15 @@ async function executeRecurringInventoryIngestion(
               searchId: target.search._id,
               crawlRunId: target.crawlRunId,
               provider: provider.provider,
-              sourcePlatform: drop.seed.sourcePlatform,
-              sourceJobId: drop.seed.sourceJobId,
-              title: drop.seed.title,
               reason: drop.reason,
               errorMessage: drop.message,
+              ...drop.context,
             });
           }
           const persistableJobs = hydration.jobs;
+          validMatchedCount = persistableJobs.length;
+          totalMatchedJobs += validMatchedCount;
+          diagnostics.jobsBeforeDedupe += persistableJobs.length;
           persistence = await repository.persistJobsWithStats(target.crawlRunId, persistableJobs, {
             searchSessionId: target.searchSession._id,
           });
@@ -968,14 +979,17 @@ async function executeRecurringInventoryIngestion(
           throw error;
         }
         const savedJobs = persistence.jobs;
+        const effectiveWarningCount = (result.warningCount ?? 0) + hydrationDroppedCount;
+        const effectiveProviderStatus =
+          hydrationDroppedCount > 0 && result.status === "success" ? "partial" : result.status;
         totalSavedJobs += persistence.linkedToRunCount;
         accumulatePersistenceStats(totalPersistenceStats, persistence);
         accumulateProviderThroughputStats(providerThroughputTotals, provider.provider, {
           sourceCount: providerSources.length,
           fetchedCount: result.fetchedCount,
-          matchedCount: result.matchedCount,
+          matchedCount: validMatchedCount,
           seedCount: result.jobs.length,
-          warningCount: result.warningCount ?? 0,
+          warningCount: effectiveWarningCount,
           failedBatches: 0,
           ...persistence,
         });
@@ -993,12 +1007,12 @@ async function executeRecurringInventoryIngestion(
           crawlRunId: target.crawlRunId,
           searchId: target.search._id,
           provider: provider.provider,
-          status: mapProviderStatus(result.status),
+          status: mapProviderStatus(effectiveProviderStatus),
           sourceCount: providerSources.length,
           fetchedCount: result.fetchedCount,
-          matchedCount: result.matchedCount,
+          matchedCount: validMatchedCount,
           savedCount: savedJobs.length,
-          warningCount: result.warningCount ?? 0,
+          warningCount: effectiveWarningCount,
           errorMessage: result.errorMessage,
           startedAt: providerStartedAt,
           finishedAt,
@@ -1013,15 +1027,15 @@ async function executeRecurringInventoryIngestion(
           provider: provider.provider,
           sourceCount: providerSources.length,
           fetchedCount: result.fetchedCount,
-          matchedCount: result.matchedCount,
+          matchedCount: validMatchedCount,
           seedCount: result.jobs.length,
           savedCount: savedJobs.length,
           insertedCount: persistence.insertedCount,
           updatedCount: persistence.updatedCount,
           linkedToRunCount: persistence.linkedToRunCount,
           indexedEventCount: persistence.indexedEventCount,
-          status: result.status,
-          warningCount: result.warningCount ?? 0,
+          status: effectiveProviderStatus,
+          warningCount: effectiveWarningCount,
           errorMessage: result.errorMessage,
         });
         console.info("[crawl:persistence-confirmed]", {
@@ -1038,29 +1052,29 @@ async function executeRecurringInventoryIngestion(
           providerSources.map((source) => ({
             sourceId: source.id,
             observedAt: finishedAt,
-            succeeded: result.status === "success" || result.status === "partial",
+            succeeded: effectiveProviderStatus === "success" || effectiveProviderStatus === "partial",
             health:
-              result.status === "failed"
+              effectiveProviderStatus === "failed"
                 ? "failing"
-                : result.status === "partial"
+                : effectiveProviderStatus === "partial"
                   ? "degraded"
                   : "healthy",
-            lastFailureReason: result.status === "failed" ? result.errorMessage : undefined,
+            lastFailureReason: effectiveProviderStatus === "failed" ? result.errorMessage : undefined,
             nextEligibleAt: resolveObservedSourceNextEligibleAt({
               record: selectedRecordById.get(source.id) ?? inventory.find((record) => record._id === source.id)!,
               observedAt: finishedAt,
               intervalMs: runtime.schedulingIntervalMs,
               health:
-                result.status === "failed"
+                effectiveProviderStatus === "failed"
                   ? "failing"
-                  : result.status === "partial"
+                  : effectiveProviderStatus === "partial"
                     ? "degraded"
                     : "healthy",
               consecutiveFailures:
-                result.status === "failed"
+                effectiveProviderStatus === "failed"
                   ? (selectedRecordById.get(source.id)?.consecutiveFailures ?? 0) + 1
                   : 0,
-              succeeded: result.status === "success" || result.status === "partial",
+              succeeded: effectiveProviderStatus === "success" || effectiveProviderStatus === "partial",
             }),
           })),
         );
@@ -1428,22 +1442,39 @@ function accumulateProviderThroughputStats(
   totals.set(provider, current);
 }
 
+function mergeBackgroundProviderDropReasonCounts(
+  diagnostics: CrawlDiagnostics,
+  dropReasonCounts?: Record<string, number>,
+) {
+  if (!dropReasonCounts) {
+    return;
+  }
+
+  Object.entries(dropReasonCounts).forEach(([reason, count]) => {
+    diagnostics.dropReasonCounts[reason] =
+      (diagnostics.dropReasonCounts[reason] ?? 0) + count;
+  });
+}
+
 function hydrateBackgroundJobs(seeds: NormalizedJobSeed[], now: Date) {
   const jobs: PersistableJob[] = [];
-  const dropped: Array<{
-    seed: NormalizedJobSeed;
-    reason: string;
-    message: string;
-  }> = [];
+  const dropped: ProviderSeedValidationDrop[] = [];
 
   for (const seed of seeds) {
+    const validation = validateNormalizedJobSeedForHydration(seed);
+    if (!validation.ok) {
+      dropped.push(validation.drop);
+      continue;
+    }
+
     try {
-      jobs.push(persistableJobSchema.parse(seedToPersistableJob(seed, now)));
+      jobs.push(persistableJobSchema.parse(seedToPersistableJob(validation.seed, now)));
     } catch (error) {
       dropped.push({
-        seed,
-        reason: "normalization:invalid_persistable_job",
+        seed: validation.seed,
+        reason: classifyBackgroundSeedHydrationError(error),
         message: error instanceof Error ? error.message : "Seed could not be hydrated.",
+        context: buildProviderSeedDiagnosticContext(validation.seed),
       });
     }
   }
@@ -1452,6 +1483,19 @@ function hydrateBackgroundJobs(seeds: NormalizedJobSeed[], now: Date) {
     jobs,
     dropped,
   };
+}
+
+function classifyBackgroundSeedHydrationError(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+
+  if (
+    message.includes("searchIndex.titleNormalized") ||
+    message.includes("searchIndex.titleStrippedNormalized")
+  ) {
+    return "hydrate_invalid_search_index";
+  }
+
+  return "persistable_schema_validation_failed";
 }
 
 function buildBackgroundPersistenceDiagnostics(

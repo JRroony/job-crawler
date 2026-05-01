@@ -63,10 +63,11 @@ export function normalizeAshbyCandidate(input: {
     input.candidate.jobUrl ??
     input.candidate.absoluteUrl ??
     input.candidate.url ??
-    boardUrl;
+    buildAshbyCandidateUrl(input.companyToken, input.candidate.id) ??
+    "";
 
   return buildSeed({
-    title: input.candidate.title ?? "Untitled role",
+    title: input.candidate.title ?? "",
     companyToken: input.companyToken,
     company: input.companyName,
     locationText:
@@ -334,10 +335,9 @@ function extractAshbyCandidates(html: string, companyToken: string): AshbyCandid
     .filter(Boolean);
 
   return links.map(
-    (link, index) =>
+    (link) =>
       ({
-        id: `${companyToken}-${index}`,
-        title: `Ashby role ${index + 1}`,
+        id: firstAshbyJobPathSegment(link),
         location: "Location unavailable",
         jobUrl: link,
       }) satisfies AshbyCandidate,
@@ -361,8 +361,9 @@ function extractAshbyCandidatesFromAppData(
     ? postings
     : deepCollect(appData, (record) =>
         Boolean(
-          firstString(record, ["title", "jobTitle", "name"]) &&
-            firstString(record, ["id", "jobId", "slug", "jobUrl", "absoluteUrl", "url"]),
+          firstString(record, ["id", "jobId", "slug", "jobUrl", "absoluteUrl", "url"]) &&
+            (firstString(record, ["title", "jobTitle", "name"]) ||
+              firstString(record, ["locationName", "location", "employmentType"])),
         ),
       );
 
@@ -372,10 +373,7 @@ function extractAshbyCandidatesFromAppData(
 
   return postingCandidates
     .filter((posting) =>
-      Boolean(
-        firstString(posting, ["title", "jobTitle", "name"]) &&
-          firstString(posting, ["id", "jobId", "slug", "jobUrl", "absoluteUrl", "url"]),
-      ),
+      Boolean(firstString(posting, ["id", "jobId", "slug", "jobUrl", "absoluteUrl", "url"])),
     )
     .map((posting) => {
       const postingId = firstString(posting, ["id", "jobId", "slug"]);
@@ -385,7 +383,7 @@ function extractAshbyCandidatesFromAppData(
 
       return {
         id: postingId,
-        title: firstString(posting, ["title"]),
+        title: firstString(posting, ["title", "jobTitle", "name"]),
         locationName: firstString(posting, ["locationName", "location"]),
         employmentType: firstString(posting, ["employmentType"]),
         departmentName: firstString(posting, ["departmentName", "department"]),
@@ -405,6 +403,15 @@ function extractAshbyCandidatesFromAppData(
 
 function buildAshbyCandidateUrl(companyToken: string, jobPath?: string) {
   return jobPath ? buildCanonicalAshbyJobUrl(companyToken, jobPath) : undefined;
+}
+
+function firstAshbyJobPathSegment(value: string) {
+  try {
+    const url = new URL(value);
+    return cleanString(url.pathname.split("/").filter(Boolean)[1]);
+  } catch {
+    return undefined;
+  }
 }
 
 function resolveAshbyExplicitExperienceLevel(candidate: AshbyCandidate) {

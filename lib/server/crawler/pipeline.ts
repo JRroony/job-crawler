@@ -29,7 +29,12 @@ import {
 import { sortJobsForPersistence, sortJobsWithDiagnostics } from "@/lib/server/crawler/sort";
 import { capSourcesWithPlatformDiversity } from "@/lib/server/crawler/source-capper";
 import { getEnv } from "@/lib/server/env";
-import { normalizeProviderJobSeed } from "@/lib/server/providers/shared";
+import {
+  buildProviderSeedDiagnosticContext,
+  normalizeProviderJobSeed,
+  validateNormalizedJobSeedForHydration,
+  type ProviderSeedValidationDrop,
+} from "@/lib/server/providers/shared";
 import { selectProvidersForTieredCrawl } from "@/lib/server/providers/tiers";
 import { normalizeJobGeoLocation } from "@/lib/server/geo/match";
 import type {
@@ -546,7 +551,21 @@ export async function executeCrawlPipeline(
           fetchedCount: payload.fetchedCount,
           seedCount: payload.seeds.length,
         });
-        const filteredSeeds = filterSeedsForSearch(payload.seeds, normalizedFilters, {
+        const logSeedDrop = (drop: ProviderSeedValidationDrop) => {
+          incrementDropReasonCount(diagnostics, drop.reason);
+          console.warn("[crawl:seed-normalization-drop]", {
+            searchId: search._id,
+            batch: payload.batchLabel,
+            provider: payload.provider ?? "discovery_harvest",
+            traceId: getPipelineTraceId(drop.seed),
+            reason: drop.reason,
+            errorMessage: drop.message,
+            ...drop.context,
+          });
+        };
+        const seedValidation = validateSeedsForHydration(payload.seeds);
+        seedValidation.dropped.forEach(logSeedDrop);
+        const filteredSeeds = filterSeedsForSearch(seedValidation.jobs, normalizedFilters, {
           deepExperienceInference: input.deepExperienceInference ?? false,
         });
         stageTimingsMs.filtering += Date.now() - filteringStartedMs;
@@ -558,7 +577,6 @@ export async function executeCrawlPipeline(
         Object.entries(filteredSeeds.dropReasonCounts).forEach(([reason, count]) => {
           diagnostics.dropReasonCounts[reason] = (diagnostics.dropReasonCounts[reason] ?? 0) + count;
         });
-        totalMatchedJobs += filteredSeeds.jobs.length;
         logIngestionTrace("filter-result", {
           searchId: search._id,
           searchSessionId: searchSession._id,
@@ -566,6 +584,7 @@ export async function executeCrawlPipeline(
           batchLabel: payload.batchLabel,
           provider: traceProvider,
           seedCount: payload.seeds.length,
+          seedValidationDroppedCount: seedValidation.dropped.length,
           matchedCount: filteredSeeds.jobs.length,
           excludedByTitle: filteredSeeds.excludedByTitle,
           excludedByLocation: filteredSeeds.excludedByLocation,
@@ -584,21 +603,15 @@ export async function executeCrawlPipeline(
 
         const dedupeStartedMs = Date.now();
         const hydration = hydrateJobs(filteredSeeds.jobs, input.now);
-        hydration.dropped.forEach((drop) => {
-          incrementDropReasonCount(diagnostics, drop.reason);
-          console.warn("[crawl:seed-normalization-drop]", {
-            searchId: search._id,
-            batch: payload.batchLabel,
-            provider: payload.provider ?? "discovery_harvest",
-            traceId: getPipelineTraceId(drop.seed),
-            reason: drop.reason,
-            errorMessage: drop.message,
-            title: drop.seed.title,
-            sourcePlatform: drop.seed.sourcePlatform,
-            sourceJobId: drop.seed.sourceJobId,
-          });
-        });
+        hydration.dropped.forEach(logSeedDrop);
         const hydratedJobs = hydration.jobs;
+        const hydrationDroppedCount = seedValidation.dropped.length + hydration.dropped.length;
+        const effectiveWarningCount = (payload.warningCount ?? 0) + hydrationDroppedCount;
+        const effectiveStatus =
+          hydrationDroppedCount > 0 && (payload.status === "success" || payload.status === "running")
+            ? "partial"
+            : payload.status;
+        totalMatchedJobs += hydratedJobs.length;
         logIngestionTrace("hydrate-result", {
           searchId: search._id,
           searchSessionId: searchSession._id,
@@ -607,8 +620,11 @@ export async function executeCrawlPipeline(
           provider: traceProvider,
           inputCount: filteredSeeds.jobs.length,
           hydratedCount: hydratedJobs.length,
-          droppedCount: hydration.dropped.length,
-          sampleDroppedReasons: sampleHydrationDropReasons(hydration.dropped, 5),
+          droppedCount: hydrationDroppedCount,
+          sampleDroppedReasons: sampleHydrationDropReasons(
+            [...seedValidation.dropped, ...hydration.dropped],
+            5,
+          ),
         });
         diagnostics.jobsBeforeDedupe += hydratedJobs.length;
         const dedupeResult = dedupeJobsWithDiagnostics(
@@ -756,18 +772,18 @@ export async function executeCrawlPipeline(
 
             const updated = crawlSourceResultSchema.parse({
               ...existing,
-              status: payload.status ?? existing.status,
+              status: effectiveStatus ?? existing.status,
               sourceCount: payload.accumulateProviderTotals ? existing.sourceCount : payload.sourceCount,
               fetchedCount: payload.accumulateProviderTotals
                 ? existing.fetchedCount + payload.fetchedCount
                 : payload.fetchedCount,
               matchedCount: payload.accumulateProviderTotals
-                ? existing.matchedCount + filteredSeeds.jobs.length
-                : filteredSeeds.jobs.length,
+                ? existing.matchedCount + hydratedJobs.length
+                : hydratedJobs.length,
               savedCount: providerSavedCount,
               warningCount: payload.accumulateProviderTotals
-                ? existing.warningCount + (payload.warningCount ?? 0)
-                : payload.warningCount ?? existing.warningCount,
+                ? existing.warningCount + effectiveWarningCount
+                : effectiveWarningCount,
               errorMessage: payload.errorMessage ?? existing.errorMessage,
               finishedAt: payload.finishedAt,
             });
@@ -782,8 +798,8 @@ export async function executeCrawlPipeline(
           provider: payload.provider ?? "discovery_harvest",
           sourceCount: payload.sourceCount,
           fetchedCount: payload.fetchedCount,
-          matchedCount: filteredSeeds.jobs.length,
-          normalizationDroppedCount: hydration.dropped.length,
+          matchedCount: hydratedJobs.length,
+          normalizationDroppedCount: hydrationDroppedCount,
           dedupeInputCount: hydratedJobs.length,
           dedupeOutputCount: dedupedJobs.length,
           touchedSavedCount: savedJobs.length,
@@ -793,12 +809,12 @@ export async function executeCrawlPipeline(
           indexedEventCount: persistence.indexedEventCount,
           newVisibleJobCount,
           totalVisibleJobCount: savedJobIds.size,
-          warningCount: payload.warningCount ?? 0,
+          warningCount: effectiveWarningCount,
           errorMessage: payload.errorMessage,
         });
 
         scheduleProgressUpdate("crawling", payload.finishedAt, {
-          immediate: newVisibleJobCount > 0 || payload.status !== "running",
+          immediate: newVisibleJobCount > 0 || effectiveStatus !== "running",
         });
       } catch (error) {
         const message =
@@ -965,8 +981,9 @@ export async function executeCrawlPipeline(
           errorMessage: result.errorMessage,
           durationMs,
         });
+        mergeProviderDropReasonCounts(diagnostics, result.diagnostics?.dropReasonCounts);
 
-        if (result.status === "failed" || result.status === "partial") {
+        if (result.status === "failed") {
           diagnostics.providerFailures += 1;
         }
 
@@ -2467,11 +2484,7 @@ function sampleDroppedFilterTraces(
 }
 
 function sampleHydrationDropReasons(
-  dropped: Array<{
-    seed: NormalizedJobSeed;
-    reason: string;
-    message: string;
-  }>,
+  dropped: ProviderSeedValidationDrop[],
   limit: number,
 ) {
   return dropped.slice(0, limit).map((drop) => ({
@@ -2481,6 +2494,7 @@ function sampleHydrationDropReasons(
     company: drop.seed.company,
     reason: drop.reason,
     message: truncateTraceText(drop.message, 300),
+    context: drop.context,
   }));
 }
 
@@ -2524,6 +2538,20 @@ function incrementCount(counts: Record<string, number>, key: string) {
 
 function incrementDropReasonCount(diagnostics: CrawlDiagnostics, reason: string) {
   diagnostics.dropReasonCounts[reason] = (diagnostics.dropReasonCounts[reason] ?? 0) + 1;
+}
+
+function mergeProviderDropReasonCounts(
+  diagnostics: CrawlDiagnostics,
+  dropReasonCounts?: Record<string, number>,
+) {
+  if (!dropReasonCounts) {
+    return;
+  }
+
+  Object.entries(dropReasonCounts).forEach(([reason, count]) => {
+    diagnostics.dropReasonCounts[reason] =
+      (diagnostics.dropReasonCounts[reason] ?? 0) + count;
+  });
 }
 
 function buildDedupeTraceRecords(
@@ -2605,20 +2633,23 @@ function hydrateJobs(
   now: Date,
 ) {
   const jobs: PersistableJob[] = [];
-  const dropped: Array<{
-    seed: NormalizedJobSeed;
-    reason: string;
-    message: string;
-  }> = [];
+  const dropped: ProviderSeedValidationDrop[] = [];
 
   for (const seed of seeds) {
+    const validation = validateNormalizedJobSeedForHydration(seed);
+    if (!validation.ok) {
+      dropped.push(validation.drop);
+      continue;
+    }
+
     try {
-      jobs.push(persistableJobSchema.parse(seedToPersistableJob(seed, now)));
+      jobs.push(persistableJobSchema.parse(seedToPersistableJob(validation.seed, now)));
     } catch (error) {
       dropped.push({
-        seed,
-        reason: "normalization:invalid_persistable_job",
+        seed: validation.seed,
+        reason: classifySeedHydrationError(error),
         message: error instanceof Error ? error.message : "Seed could not be hydrated.",
+        context: buildProviderSeedDiagnosticContext(validation.seed),
       });
     }
   }
@@ -2627,6 +2658,38 @@ function hydrateJobs(
     jobs,
     dropped,
   };
+}
+
+function validateSeedsForHydration(seeds: NormalizedJobSeed[]) {
+  const jobs: NormalizedJobSeed[] = [];
+  const dropped: ProviderSeedValidationDrop[] = [];
+
+  for (const seed of seeds) {
+    const validation = validateNormalizedJobSeedForHydration(seed);
+    if (validation.ok) {
+      jobs.push(validation.seed);
+    } else {
+      dropped.push(validation.drop);
+    }
+  }
+
+  return {
+    jobs,
+    dropped,
+  };
+}
+
+function classifySeedHydrationError(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+
+  if (
+    message.includes("searchIndex.titleNormalized") ||
+    message.includes("searchIndex.titleStrippedNormalized")
+  ) {
+    return "hydrate_invalid_search_index";
+  }
+
+  return "persistable_schema_validation_failed";
 }
 
 async function applyInlineValidationStrategy(

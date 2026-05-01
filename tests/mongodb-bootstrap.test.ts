@@ -84,14 +84,14 @@ describe("MongoDB bootstrap", () => {
       requireIndexes: true,
       bootstrapRetryDelaysMs: [0, 0, 0],
     });
+
+    await vi.waitFor(() => {
+      expect(ensureDatabaseIndexesMock).toHaveBeenCalledTimes(1);
+    });
     const second = getMongoDb({
       ensureIndexes: true,
       requireIndexes: true,
       bootstrapRetryDelaysMs: [0, 0, 0],
-    });
-
-    await vi.waitFor(() => {
-      expect(ensureDatabaseIndexesMock).toHaveBeenCalledTimes(1);
     });
     resolveBootstrap?.();
 
