@@ -1,12 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ensureDatabaseIndexes, collectionNames } from "@/lib/server/db/indexes";
+import {
+  ensureDatabaseIndexes,
+  collectionNames,
+  resetDatabaseIndexesForTests,
+} from "@/lib/server/db/indexes";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { toSourceInventoryRecord } from "@/lib/server/discovery/inventory";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import type { JobListing } from "@/lib/types";
 
 import { FakeDb } from "@/tests/helpers/fake-db";
+
+afterEach(() => {
+  resetDatabaseIndexesForTests();
+  vi.restoreAllMocks();
+});
 
 type PersistableTestJob = Omit<JobListing, "_id" | "crawlRunIds">;
 
@@ -251,6 +260,176 @@ describe("JobCrawlerRepository", () => {
     expect(first.jobs[0]?._id).toBe(second.jobs[0]?._id);
     expect(second.jobs[0]?._id).toBe(changed.jobs[0]?._id);
     expect(await repository.getIndexedJobDeliveryCursor()).toBe(2);
+  });
+
+  it("allocates indexed job event sequences safely across concurrent persistence batches", async () => {
+    const db = new FakeDb();
+    await ensureDatabaseIndexes(db);
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      { title: "Software Engineer" },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const crawlRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+    );
+
+    await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        repository.persistJobsWithStats(crawlRun._id, [
+          createPersistableJob({
+            sourceJobId: `concurrent-indexed-${index}`,
+            sourceUrl: `https://example.com/jobs/concurrent-indexed-${index}`,
+            applyUrl: `https://example.com/jobs/concurrent-indexed-${index}/apply`,
+            canonicalUrl: `https://example.com/jobs/concurrent-indexed-${index}`,
+            resolvedUrl: `https://example.com/jobs/concurrent-indexed-${index}/apply`,
+            contentHash: `content-hash:concurrent-indexed-${index}`,
+          }),
+        ]),
+      ),
+    );
+
+    const events = db.snapshot<Record<string, unknown>>(collectionNames.indexedJobEvents);
+    const sequences = events.map((event) => Number(event.sequence));
+
+    expect(events).toHaveLength(8);
+    expect(new Set(sequences).size).toBe(8);
+    expect([...sequences].sort((left, right) => left - right)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it("allocates strictly unique indexed event sequences for concurrent multi-job batches", async () => {
+    const db = new FakeDb();
+    await ensureDatabaseIndexes(db);
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      { title: "Software Engineer" },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const crawlRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+    );
+
+    await Promise.all(
+      Array.from({ length: 4 }, (_, batchIndex) =>
+        repository.persistJobsWithStats(
+          crawlRun._id,
+          Array.from({ length: 3 }, (_, jobIndex) => {
+            const id = `concurrent-batch-${batchIndex}-${jobIndex}`;
+            return createPersistableJob({
+              sourceJobId: id,
+              sourceUrl: `https://example.com/jobs/${id}`,
+              applyUrl: `https://example.com/jobs/${id}/apply`,
+              canonicalUrl: `https://example.com/jobs/${id}`,
+              resolvedUrl: `https://example.com/jobs/${id}/apply`,
+              contentHash: `content-hash:${id}`,
+            });
+          }),
+        ),
+      ),
+    );
+
+    const sequences = db
+      .snapshot<Record<string, unknown>>(collectionNames.indexedJobEvents)
+      .map((event) => Number(event.sequence))
+      .sort((left, right) => left - right);
+
+    expect(sequences).toHaveLength(12);
+    expect(sequences).toEqual(Array.from({ length: 12 }, (_, index) => index + 1));
+  });
+
+  it("allocates unique crawl-run event sequences per crawl run", async () => {
+    const db = new FakeDb();
+    await ensureDatabaseIndexes(db);
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      { title: "Software Engineer" },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const crawlRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+    );
+
+    await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        repository.persistJobsWithStats(crawlRun._id, [
+          createPersistableJob({
+            sourceJobId: `concurrent-run-event-${index}`,
+            sourceUrl: `https://example.com/jobs/concurrent-run-event-${index}`,
+            applyUrl: `https://example.com/jobs/concurrent-run-event-${index}/apply`,
+            canonicalUrl: `https://example.com/jobs/concurrent-run-event-${index}`,
+            resolvedUrl: `https://example.com/jobs/concurrent-run-event-${index}/apply`,
+            contentHash: `content-hash:concurrent-run-event-${index}`,
+          }),
+        ]),
+      ),
+    );
+
+    const sequences = db
+      .snapshot<Record<string, unknown>>(collectionNames.crawlRunJobEvents)
+      .filter((event) => event.crawlRunId === crawlRun._id)
+      .map((event) => Number(event.sequence))
+      .sort((left, right) => left - right);
+
+    expect(sequences).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
+  it("retries stale indexed event counter duplicate errors and persists valid jobs", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const db = new FakeDb();
+    await ensureDatabaseIndexes(db);
+    const repository = new JobCrawlerRepository(db);
+    const search = await repository.createSearch(
+      { title: "Software Engineer" },
+      "2026-03-29T00:00:00.000Z",
+    );
+    const crawlRun = await repository.createCrawlRun(
+      search._id,
+      "2026-03-29T00:00:00.000Z",
+    );
+
+    await db.collection(collectionNames.indexedJobEvents).insertOne({
+      _id: "stale-indexed-event",
+      jobId: "already-indexed",
+      crawlRunId: "other-run",
+      sequence: 1,
+      createdAt: "2026-03-29T00:00:00.000Z",
+    });
+    await db.collection(collectionNames.counters).insertOne({
+      _id: "indexedJobEvents",
+      sequence: 0,
+      updatedAt: "2026-03-29T00:00:00.000Z",
+    });
+
+    const result = await repository.persistJobsWithStats(crawlRun._id, [
+      createPersistableJob({
+        sourceJobId: "retry-indexed-sequence",
+        sourceUrl: "https://example.com/jobs/retry-indexed-sequence",
+        applyUrl: "https://example.com/jobs/retry-indexed-sequence/apply",
+        canonicalUrl: "https://example.com/jobs/retry-indexed-sequence",
+        resolvedUrl: "https://example.com/jobs/retry-indexed-sequence/apply",
+        contentHash: "content-hash:retry-indexed-sequence",
+      }),
+    ]);
+
+    const indexedEvents = db.snapshot<Record<string, unknown>>(collectionNames.indexedJobEvents);
+
+    expect(result).toMatchObject({
+      insertedCount: 1,
+      linkedToRunCount: 1,
+      indexedEventCount: 1,
+    });
+    expect(indexedEvents.map((event) => Number(event.sequence)).sort()).toEqual([1, 2]);
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[db:event-sequence-duplicate-retry]",
+      expect.objectContaining({
+        eventCollection: "indexedJobEvents",
+        retryCount: 1,
+      }),
+    );
+    warnSpy.mockRestore();
   });
 
   it("creates durable search sessions and tracks session-scoped job deltas independently from crawl runs", async () => {

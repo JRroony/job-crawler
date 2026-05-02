@@ -62,6 +62,10 @@ const envSchema = z.object({
   BACKGROUND_INGESTION_PROVIDER_CONCURRENCY: z.coerce.number().int().positive().default(2),
   BACKGROUND_INGESTION_STALE_AFTER_MS: z.coerce.number().int().positive().default(1800000),
   BACKGROUND_INGESTION_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(900000),
+  SOURCE_DISCOVERY_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
 });
 
 type ParsedEnv = z.infer<typeof envSchema>;
@@ -168,6 +172,8 @@ export function getEnv() {
         process.env.BACKGROUND_INGESTION_STALE_AFTER_MS ?? "1800000",
       BACKGROUND_INGESTION_RUN_TIMEOUT_MS:
         process.env.BACKGROUND_INGESTION_RUN_TIMEOUT_MS ?? "900000",
+      SOURCE_DISCOVERY_ENABLED:
+        process.env.SOURCE_DISCOVERY_ENABLED ?? "true",
     });
   }
 

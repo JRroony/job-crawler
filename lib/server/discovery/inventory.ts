@@ -362,10 +362,6 @@ function resolveSourceInventorySourceType(
     return "company_page";
   }
 
-  if ("jobId" in source && source.jobId) {
-    return "job_detail";
-  }
-
   if (source.platform === "workday") {
     return source.careerSitePath ? "career_site" : "unknown";
   }
@@ -377,6 +373,10 @@ function resolveSourceInventorySourceType(
     source.platform === "smartrecruiters"
   ) {
     return "ats_board";
+  }
+
+  if ("jobId" in source && source.jobId) {
+    return "job_detail";
   }
 
   return "unknown";

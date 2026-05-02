@@ -31,6 +31,7 @@ import {
   resolvePublicSearchExecutionOptions,
   selectBackgroundInventoryExpansionFilters,
 } from "@/lib/server/discovery/service";
+import { runRecurringSourceDiscovery } from "@/lib/server/discovery/source-discovery";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { buildUsDiscoveryLocationTokens } from "@/lib/server/locations/us";
 import { capSourcesWithPlatformDiversity } from "@/lib/server/crawler/source-capper";
@@ -51,6 +52,7 @@ const discoveryEnvDefaults = {
   PUBLIC_SEARCH_DISCOVERY_MAX_QUERIES: 96,
   PUBLIC_SEARCH_DISCOVERY_QUERY_CONCURRENCY: 4,
   GREENHOUSE_DISCOVERY_MAX_LOCATION_CLAUSES: 32,
+  SOURCE_DISCOVERY_ENABLED: true,
 };
 
 describe("source discovery", () => {
@@ -246,6 +248,151 @@ describe("source discovery", () => {
       careerSitePath: "Careers",
       sitePath: "en-US/Careers",
       url: "https://acme.wd1.myworkdayjobs.com/en-US/Careers",
+    });
+  });
+
+  it("runs source-only discovery and converts Greenhouse job detail URLs into board inventory", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+
+    const result = await runRecurringSourceDiscovery({
+      repository,
+      env: discoveryEnvDefaults,
+      now: new Date("2026-04-20T00:00:00.000Z"),
+      candidateUrls: [
+        "https://job-boards.greenhouse.io/gitlab/jobs/8455464002?utm_source=linkedin",
+      ],
+    });
+
+    expect(result.stats).toMatchObject({
+      discoveredSourceCount: 1,
+      newSourceCount: 1,
+      updatedSourceCount: 0,
+      duplicateSourceCount: 0,
+      invalidSourceCount: 0,
+      platformCounts: { greenhouse: 1 },
+    });
+    expect(result.inventory).toContainEqual(
+      expect.objectContaining({
+        _id: "greenhouse:gitlab",
+        platform: "greenhouse",
+        token: "gitlab",
+        sourceType: "ats_board",
+        url: "https://boards.greenhouse.io/gitlab",
+        health: "unknown",
+      }),
+    );
+  });
+
+  it("runs source-only discovery and converts Lever job URLs into board inventory", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+
+    const result = await runRecurringSourceDiscovery({
+      repository,
+      env: discoveryEnvDefaults,
+      now: new Date("2026-04-20T00:00:00.000Z"),
+      candidateUrls: [
+        "https://jobs.lever.co/figma/4d6f3f0b-1cdd-4d2e-a0a7-123456789abc",
+      ],
+    });
+
+    expect(result.inventory).toContainEqual(
+      expect.objectContaining({
+        _id: "lever:figma",
+        platform: "lever",
+        token: "figma",
+        sourceType: "ats_board",
+        url: "https://jobs.lever.co/figma",
+        health: "unknown",
+      }),
+    );
+  });
+
+  it("runs source-only discovery and converts Ashby job URLs into board inventory", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+
+    const result = await runRecurringSourceDiscovery({
+      repository,
+      env: discoveryEnvDefaults,
+      now: new Date("2026-04-20T00:00:00.000Z"),
+      candidateUrls: [
+        "https://jobs.ashbyhq.com/notion/497fcc20-d3fd-42f0-9b24-123456789abc/application",
+      ],
+    });
+
+    expect(result.inventory).toContainEqual(
+      expect.objectContaining({
+        _id: "ashby:notion",
+        platform: "ashby",
+        token: "notion",
+        sourceType: "ats_board",
+        url: "https://jobs.ashbyhq.com/notion",
+        health: "unknown",
+      }),
+    );
+  });
+
+  it("runs source-only discovery and converts Workday career and job URLs into inventory records", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+
+    const result = await runRecurringSourceDiscovery({
+      repository,
+      env: discoveryEnvDefaults,
+      now: new Date("2026-04-20T00:00:00.000Z"),
+      candidateUrls: [
+        "https://acme.wd1.myworkdayjobs.com/en-US/Careers/job/Seattle-WA/Data-Engineer_R12345",
+        "https://acme.wd1.myworkdayjobs.com/en-US/Careers",
+      ],
+    });
+
+    expect(result.stats.duplicateSourceCount).toBe(1);
+    expect(result.inventory).toContainEqual(
+      expect.objectContaining({
+        _id: "workday:acme-careers",
+        platform: "workday",
+        token: "acme:careers",
+        sourceType: "career_site",
+        careerSitePath: "Careers",
+        url: "https://acme.wd1.myworkdayjobs.com/en-US/Careers",
+        health: "unknown",
+      }),
+    );
+  });
+
+  it("dedupes discovered sources and updates lastSeenAt when rediscovered", async () => {
+    const repository = new JobCrawlerRepository(new FakeDb());
+    const first = await runRecurringSourceDiscovery({
+      repository,
+      env: discoveryEnvDefaults,
+      now: new Date("2026-04-20T00:00:00.000Z"),
+      candidateUrls: [
+        "https://jobs.lever.co/figma/role-1",
+        "https://jobs.lever.co/figma/role-2",
+      ],
+    });
+    const second = await runRecurringSourceDiscovery({
+      repository,
+      env: discoveryEnvDefaults,
+      now: new Date("2026-04-21T00:00:00.000Z"),
+      candidateUrls: ["https://jobs.lever.co/figma/role-3"],
+    });
+
+    expect(first.inventory).toHaveLength(1);
+    expect(first.stats).toMatchObject({
+      discoveredSourceCount: 1,
+      newSourceCount: 1,
+      duplicateSourceCount: 1,
+    });
+    expect(second.inventory).toHaveLength(1);
+    expect(second.stats).toMatchObject({
+      discoveredSourceCount: 1,
+      newSourceCount: 0,
+      updatedSourceCount: 1,
+    });
+    expect(second.inventory[0]).toMatchObject({
+      _id: "lever:figma",
+      firstSeenAt: "2026-04-20T00:00:00.000Z",
+      lastSeenAt: "2026-04-21T00:00:00.000Z",
+      health: "unknown",
     });
   });
 
@@ -3686,19 +3833,19 @@ describe("source capping with platform diversity", () => {
         expect.objectContaining({
           _id: "lever:novelleverco",
           platform: "lever",
-          sourceType: "job_detail",
+          sourceType: "ats_board",
           inventoryOrigin: "public_search",
         }),
         expect.objectContaining({
           _id: "ashby:novelashbyco",
           platform: "ashby",
-          sourceType: "job_detail",
+          sourceType: "ats_board",
           inventoryOrigin: "public_search",
         }),
         expect.objectContaining({
           _id: "workday:novel-external",
           platform: "workday",
-          sourceType: "job_detail",
+          sourceType: "career_site",
           inventoryOrigin: "public_search",
         }),
       ]),

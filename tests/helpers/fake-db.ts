@@ -38,6 +38,21 @@ export class FakeCollection<TDocument extends Record<string, unknown>>
     return { insertedId: document._id };
   }
 
+  async findOneAndUpdate(
+    filter: Record<string, unknown>,
+    update: Record<string, unknown>,
+    options?: Record<string, unknown>,
+  ): Promise<TDocument | null> {
+    const updateResult = this.updateOne(filter, update, {
+      ...options,
+      upsert: options?.upsert ?? false,
+    });
+    const document = this.filter(filter)[0] ?? null;
+    await updateResult;
+
+    return clone(document);
+  }
+
   async bulkWrite(
     operations: Array<
       | { insertOne: { document: TDocument } }
@@ -109,6 +124,7 @@ export class FakeCollection<TDocument extends Record<string, unknown>>
         ...clone((update.$setOnInsert as Record<string, unknown>) ?? {}),
         ...clone((update.$set as Record<string, unknown>) ?? {}),
       } as TDocument;
+      applyInc(inserted, update.$inc as Record<string, unknown> | undefined);
       const nextDocuments = [...this.documents, inserted];
       assertIndexesAllowDocuments(this.indexes, nextDocuments);
       this.documents = nextDocuments;
@@ -123,6 +139,7 @@ export class FakeCollection<TDocument extends Record<string, unknown>>
     const nextDocuments = clone(this.documents);
     const nextTarget = nextDocuments.find((document) => matches(document, filter));
     Object.assign(nextTarget as TDocument, clone(nextValues as Record<string, unknown>));
+    applyInc(nextTarget as TDocument, update.$inc as Record<string, unknown> | undefined);
     assertIndexesAllowDocuments(this.indexes, nextDocuments);
     this.documents = nextDocuments;
     return { matchedCount: 1, modifiedCount: 1 };
@@ -252,4 +269,15 @@ function getValueByPath(document: Record<string, unknown>, path: string): unknow
 
     return (value as Record<string, unknown>)[segment];
   }, document);
+}
+
+function applyInc(document: Record<string, unknown>, inc?: Record<string, unknown>) {
+  if (!inc) {
+    return;
+  }
+
+  for (const [key, value] of Object.entries(inc)) {
+    const current = typeof document[key] === "number" ? document[key] : 0;
+    document[key] = current + Number(value);
+  }
 }

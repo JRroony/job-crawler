@@ -11,6 +11,7 @@ export const collectionNames = {
   crawlRunJobEvents: "crawlRunJobEvents",
   searchSessionJobEvents: "searchSessionJobEvents",
   indexedJobEvents: "indexedJobEvents",
+  counters: "counters",
   linkValidations: "linkValidations",
   sourceInventory: "sourceInventory",
 } as const;

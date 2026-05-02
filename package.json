@@ -14,6 +14,7 @@
     "diagnose:persistence-gate": "tsx scripts/diagnose-persistence-gate.ts",
     "diagnose:live-ingestion": "tsx scripts/diagnose-live-ingestion.ts",
     "diagnose:search": "tsx scripts/diagnose-search-coverage.ts",
+    "discover:sources": "tsx scripts/discover-sources.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

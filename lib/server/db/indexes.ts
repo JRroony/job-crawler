@@ -326,6 +326,14 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
     },
   ]);
 
+  await createIndexesWithBootstrapLog(db, collectionNames.counters, "counter_indexes", [
+    {
+      key: { _id: 1 },
+      name: "counters_id",
+      unique: true,
+    },
+  ]);
+
   await createIndexesWithBootstrapLog(db, collectionNames.linkValidations, "link_validation_indexes", [
     {
       key: { jobId: 1, checkedAt: -1 },

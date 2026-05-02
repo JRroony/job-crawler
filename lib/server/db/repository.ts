@@ -86,7 +86,12 @@ export type CollectionAdapter<TDocument extends Record<string, unknown>> = {
   findOne(
     filter: Record<string, unknown>,
     options?: { sort?: SortSpec },
-  ): Promise<TDocument | null>;
+  ): Promise<TDocument | Record<string, unknown> | null>;
+  findOneAndUpdate?(
+    filter: Record<string, unknown>,
+    update: Record<string, unknown>,
+    options?: Record<string, unknown>,
+  ): Promise<unknown>;
   insertOne(document: TDocument): Promise<unknown>;
   bulkWrite?(
     operations: Array<
@@ -110,7 +115,7 @@ export type CollectionAdapter<TDocument extends Record<string, unknown>> = {
   find(
     filter?: Record<string, unknown>,
     options?: { sort?: SortSpec; limit?: number },
-  ): { toArray(): Promise<TDocument[]> };
+  ): { toArray(): Promise<Array<TDocument | Record<string, unknown>>> };
   listIndexes?(): { toArray(): Promise<Array<Record<string, unknown>>> };
   dropIndex?(name: string): Promise<unknown>;
 };
@@ -149,6 +154,12 @@ type CrawlRunJobEvent = {
   jobId: string;
   sequence: number;
   savedAt: string;
+};
+
+type CounterDocument = {
+  _id: string;
+  sequence: number;
+  updatedAt: string;
 };
 
 type IndexedJobDelta = {
@@ -1255,12 +1266,13 @@ export class JobCrawlerRepository {
       crawlRunId,
     );
     const existingJobs = await this.findExistingJobsForBatch(sanitizedJobs);
-    const nextIndexSequenceBase = await this.getIndexedJobDeliveryCursor();
     const newToRunJobIds = new Set<string>();
     const indexedJobIds: string[] = [];
     const upserts = new Map<string, JobListing>();
     const insertedJobIds = new Set<string>();
     const updatedJobIds = new Set<string>();
+    let indexedEventCount = 0;
+    let linkedToRunCount = 0;
 
     for (const job of sanitizedJobs) {
       const existing = resolveExistingJobForPersistable(existingJobs, job);
@@ -1297,11 +1309,14 @@ export class JobCrawlerRepository {
     });
 
     if (indexedJobIds.length > 0) {
-      await this.appendIndexedJobEvents(crawlRunId, indexedJobIds, nextIndexSequenceBase);
+      indexedEventCount = await this.appendIndexedJobEvents(crawlRunId, indexedJobIds);
     }
 
     if (newToRunJobIds.size > 0) {
-      await this.appendCrawlRunJobEvents(crawlRunId, Array.from(newToRunJobIds));
+      linkedToRunCount = await this.appendCrawlRunJobEvents(
+        crawlRunId,
+        Array.from(newToRunJobIds),
+      );
       if (options.searchSessionId) {
         await this.appendSearchSessionJobEvents(
           options.searchSessionId,
@@ -1311,25 +1326,27 @@ export class JobCrawlerRepository {
       }
     }
 
-    console.info("[repository:persist-jobs]", {
+    const result = {
+      jobs: dedupeStoredJobs(Array.from(savedJobsById.values())),
+      insertedCount: insertedJobIds.size,
+      updatedCount: updatedJobIds.size,
+      linkedToRunCount,
+      indexedEventCount,
+    };
+
+    console.info("[db:persist-jobs-result]", {
       crawlRunId,
       searchSessionId: options.searchSessionId,
       inputCount: jobs.length,
       sanitizedCount: sanitizedJobs.length,
       upsertCount: upserts.size,
-      insertedCount: insertedJobIds.size,
-      updatedCount: updatedJobIds.size,
-      linkedToRunCount: newToRunJobIds.size,
-      indexedEventCount: dedupeStrings(indexedJobIds).length,
+      insertedCount: result.insertedCount,
+      updatedCount: result.updatedCount,
+      linkedToRunCount: result.linkedToRunCount,
+      indexedEventCount: result.indexedEventCount,
     });
 
-    return {
-      jobs: dedupeStoredJobs(Array.from(savedJobsById.values())),
-      insertedCount: insertedJobIds.size,
-      updatedCount: updatedJobIds.size,
-      linkedToRunCount: newToRunJobIds.size,
-      indexedEventCount: dedupeStrings(indexedJobIds).length,
-    };
+    return result;
   }
 
   async saveLinkValidation(result: LinkValidationResult) {
@@ -1587,6 +1604,10 @@ export class JobCrawlerRepository {
     return this.db.collection<IndexedJobEvent>(collectionNames.indexedJobEvents);
   }
 
+  private counters() {
+    return this.db.collection<CounterDocument>(collectionNames.counters);
+  }
+
   private linkValidations() {
     return this.db.collection<LinkValidationResult>(collectionNames.linkValidations);
   }
@@ -1596,43 +1617,212 @@ export class JobCrawlerRepository {
   }
 
   private async appendCrawlRunJobEvents(crawlRunId: string, jobIds: string[]) {
-    const existingEvents = await this.crawlRunJobEvents().find({ crawlRunId }).toArray();
-    const latestSequence = existingEvents.length;
-    const savedAt = new Date().toISOString();
-
-    await persistBatchMutations(this.crawlRunJobEvents(), {
-      inserts: jobIds.map((jobId, index) => ({
-        _id: createId(),
-        crawlRunId,
-        jobId,
-        sequence: latestSequence + index + 1,
-        savedAt,
-      })),
-      updates: [],
-    });
-  }
-
-  private async appendIndexedJobEvents(
-    crawlRunId: string,
-    jobIds: string[],
-    latestSequence: number,
-  ) {
-    const createdAt = new Date().toISOString();
-    const uniqueJobIds = dedupeStrings(jobIds);
-    const inserts = uniqueJobIds.map((jobId, index) =>
-      indexedJobEventSchema.parse({
-        _id: createId(),
-        jobId,
-        crawlRunId,
-        sequence: latestSequence + index + 1,
-        createdAt,
-      }),
+    const uniqueJobIds = await this.filterExistingCrawlRunEventJobIds(
+      crawlRunId,
+      dedupeStrings(jobIds),
     );
 
-    await persistBatchMutations(this.indexedJobEvents(), {
-      inserts,
-      updates: [],
+    if (uniqueJobIds.length === 0) {
+      return 0;
+    }
+
+    const savedAt = new Date().toISOString();
+    return this.insertCrawlRunJobEventsWithSequenceRetry(crawlRunId, uniqueJobIds, savedAt);
+  }
+
+  private async filterExistingCrawlRunEventJobIds(crawlRunId: string, jobIds: string[]) {
+    if (jobIds.length === 0) {
+      return [];
+    }
+
+    const existingEvents = await this.crawlRunJobEvents()
+      .find({ crawlRunId, jobId: { $in: jobIds } })
+      .toArray();
+    const existingJobIds = new Set(
+      existingEvents.map((event) => parseStoredCrawlRunJobEvent(event).jobId),
+    );
+
+    return jobIds.filter((jobId) => !existingJobIds.has(jobId));
+  }
+
+  private async appendIndexedJobEvents(crawlRunId: string, jobIds: string[]) {
+    const createdAt = new Date().toISOString();
+    const uniqueJobIds = dedupeStrings(jobIds);
+
+    if (uniqueJobIds.length === 0) {
+      return 0;
+    }
+
+    return this.insertIndexedJobEventsWithSequenceRetry(crawlRunId, uniqueJobIds, createdAt);
+  }
+
+  private async insertCrawlRunJobEventsWithSequenceRetry(
+    crawlRunId: string,
+    jobIds: string[],
+    savedAt: string,
+  ) {
+    let pendingJobIds = jobIds;
+
+    for (let attempt = 1; attempt <= 3 && pendingJobIds.length > 0; attempt += 1) {
+      const sequenceRange = await this.allocateEventSequenceRange({
+        counterId: `crawlRunJobEvents:${crawlRunId}`,
+        eventCollection: "crawlRunJobEvents",
+        scope: crawlRunId,
+        count: pendingJobIds.length,
+      });
+      const inserts = pendingJobIds.map((jobId, index) => ({
+        _id: createId(),
+        crawlRunId,
+        jobId,
+        sequence: sequenceRange.start + index,
+        savedAt,
+      }));
+
+      try {
+        await persistBatchMutations(this.crawlRunJobEvents(), {
+          inserts,
+          updates: [],
+        });
+        return pendingJobIds.length;
+      } catch (error) {
+        if (!isDuplicateSequenceError(error)) {
+          throw error;
+        }
+
+        pendingJobIds = await this.filterExistingCrawlRunEventJobIds(crawlRunId, pendingJobIds);
+        console.warn("[db:event-sequence-duplicate-retry]", {
+          eventCollection: "crawlRunJobEvents",
+          crawlRunId,
+          attempt,
+          retryCount: pendingJobIds.length,
+          ...formatMongoErrorDiagnostics(error),
+        });
+      }
+    }
+
+    if (pendingJobIds.length > 0) {
+      throw new Error(
+        `Failed to persist crawlRunJobEvents after retrying duplicate sequence allocation for crawlRunId=${crawlRunId}.`,
+      );
+    }
+
+    return 0;
+  }
+
+  private async insertIndexedJobEventsWithSequenceRetry(
+    crawlRunId: string,
+    jobIds: string[],
+    createdAt: string,
+  ) {
+    let pendingJobIds = jobIds;
+
+    for (let attempt = 1; attempt <= 3 && pendingJobIds.length > 0; attempt += 1) {
+      const sequenceRange = await this.allocateEventSequenceRange({
+        counterId: "indexedJobEvents",
+        eventCollection: "indexedJobEvents",
+        scope: "global",
+        count: pendingJobIds.length,
+      });
+      const inserts = pendingJobIds.map((jobId, index) =>
+        indexedJobEventSchema.parse({
+          _id: createId(),
+          jobId,
+          crawlRunId,
+          sequence: sequenceRange.start + index,
+          createdAt,
+        }),
+      );
+
+      try {
+        await persistBatchMutations(this.indexedJobEvents(), {
+          inserts,
+          updates: [],
+        });
+        return pendingJobIds.length;
+      } catch (error) {
+        if (!isDuplicateSequenceError(error)) {
+          throw error;
+        }
+
+        pendingJobIds = await this.filterIndexedEventJobIdsWithoutRunEvent(
+          crawlRunId,
+          pendingJobIds,
+        );
+        console.warn("[db:event-sequence-duplicate-retry]", {
+          eventCollection: "indexedJobEvents",
+          crawlRunId,
+          attempt,
+          retryCount: pendingJobIds.length,
+          ...formatMongoErrorDiagnostics(error),
+        });
+      }
+    }
+
+    if (pendingJobIds.length > 0) {
+      throw new Error(
+        `Failed to persist indexedJobEvents after retrying duplicate sequence allocation for crawlRunId=${crawlRunId}.`,
+      );
+    }
+
+    return 0;
+  }
+
+  private async filterIndexedEventJobIdsWithoutRunEvent(crawlRunId: string, jobIds: string[]) {
+    if (jobIds.length === 0) {
+      return [];
+    }
+
+    const existingEvents = await this.indexedJobEvents()
+      .find({ crawlRunId, jobId: { $in: jobIds } })
+      .toArray();
+    const existingJobIds = new Set(
+      existingEvents.map((event) => parseStoredIndexedJobEvent(event).jobId),
+    );
+
+    return jobIds.filter((jobId) => !existingJobIds.has(jobId));
+  }
+
+  private async allocateEventSequenceRange(input: {
+    counterId: string;
+    eventCollection: "indexedJobEvents" | "crawlRunJobEvents";
+    scope: string;
+    count: number;
+  }) {
+    if (input.count <= 0) {
+      return { start: 0, end: 0 };
+    }
+
+    const now = new Date().toISOString();
+    const counters = this.counters();
+    const update = {
+      $inc: { sequence: input.count },
+      $set: { updatedAt: now },
+      $setOnInsert: {
+        _id: input.counterId,
+      },
+    };
+    const options = {
+      upsert: true,
+      returnDocument: "after",
+      returnNewDocument: true,
+    };
+    const updated = counters.findOneAndUpdate
+      ? await counters.findOneAndUpdate({ _id: input.counterId }, update, options)
+      : await findOneAndUpdateFallback(counters, { _id: input.counterId }, update, options);
+    const document = unwrapFindOneAndUpdateResult<CounterDocument>(updated);
+    const end = Number(document?.sequence ?? 0);
+    const start = end - input.count + 1;
+
+    console.info("[db:event-sequence-allocated]", {
+      eventCollection: input.eventCollection,
+      counterId: input.counterId,
+      scope: input.scope,
+      count: input.count,
+      start,
+      end,
     });
+
+    return { start, end };
   }
 
   private async appendSearchSessionJobEvents(
@@ -2353,6 +2543,61 @@ async function persistBatchMutations<TDocument extends { _id: string }>(
       operation.updateOne.update,
     );
   }
+}
+
+async function findOneAndUpdateFallback<TDocument extends Record<string, unknown>>(
+  collection: CollectionAdapter<TDocument>,
+  filter: Record<string, unknown>,
+  update: Record<string, unknown>,
+  options: Record<string, unknown>,
+) {
+  const existing = await collection.findOne(filter);
+  await collection.updateOne(filter, update, options);
+  return collection.findOne(filter) ?? existing;
+}
+
+function unwrapFindOneAndUpdateResult<TDocument extends Record<string, unknown>>(
+  result: unknown,
+) {
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+
+  if ("value" in result) {
+    return (result.value as TDocument | null | undefined) ?? null;
+  }
+
+  return result as TDocument;
+}
+
+function isDuplicateSequenceError(error: unknown) {
+  const diagnostics = formatMongoErrorDiagnostics(error);
+  const message = error instanceof Error ? error.message : String(error);
+
+  return (
+    (diagnostics.code === 11000 || /E11000 duplicate key error/i.test(message)) &&
+    /indexedJobEvents_sequence|crawlRunJobEvents_run_sequence|sequence/i.test(message)
+  );
+}
+
+function formatMongoErrorDiagnostics(error: unknown) {
+  const record =
+    error && typeof error === "object" ? (error as Record<string, unknown>) : {};
+
+  return {
+    name: error instanceof Error ? error.name : undefined,
+    message: error instanceof Error ? error.message : String(error),
+    code: typeof record.code === "number" ? record.code : undefined,
+    codeName: typeof record.codeName === "string" ? record.codeName : undefined,
+    keyPattern:
+      record.keyPattern && typeof record.keyPattern === "object"
+        ? record.keyPattern
+        : undefined,
+    keyValue:
+      record.keyValue && typeof record.keyValue === "object"
+        ? record.keyValue
+        : undefined,
+  };
 }
 
 function collectUniqueStrings(values: Array<string | undefined>) {

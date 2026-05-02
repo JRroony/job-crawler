@@ -245,6 +245,87 @@ describe("recurring background ingestion", () => {
     });
   });
 
+  it("does not mark source inventory failing when event sequence persistence retries succeed", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const db = new MongoLikeNullDb();
+    await ensureDatabaseIndexes(db);
+    const repository = new JobCrawlerRepository(db);
+    const now = new Date("2026-04-15T12:00:00.000Z");
+
+    await repository.upsertSourceInventory([
+      createInventoryRecord({
+        token: "retryco",
+        companyHint: "Retry Co",
+        nextEligibleAt: "2026-04-15T11:00:00.000Z",
+        health: "healthy",
+      }),
+    ]);
+    await db.collection(collectionNames.indexedJobEvents).insertOne({
+      _id: "existing-indexed-event",
+      jobId: "existing-job",
+      crawlRunId: "other-run",
+      sequence: 1,
+      createdAt: "2026-04-15T11:00:00.000Z",
+    });
+    await db.collection(collectionNames.counters).insertOne({
+      _id: "indexedJobEvents",
+      sequence: 0,
+      updatedAt: "2026-04-15T11:00:00.000Z",
+    });
+
+    const provider = createStubProvider("greenhouse", async () => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: 1,
+      fetchedCount: 1,
+      matchedCount: 1,
+      warningCount: 0,
+      jobs: [
+        createProviderJob({
+          title: "Software Engineer",
+          company: "Retry Co",
+          sourceJobId: "retry-sequence-job",
+        }),
+      ],
+    }));
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [provider],
+      now,
+      maxSources: 1,
+      schedulingIntervalMs: 60_000,
+      runTimeoutMs: 2_000,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected recurring ingestion to start.");
+    }
+
+    await waitForRunCompletion(repository, triggered.crawlRunId);
+    const [inventoryRecord] = await repository.listSourceInventory(["greenhouse"]);
+    const indexedEventSequences = db
+      .snapshot<Record<string, unknown>>(collectionNames.indexedJobEvents)
+      .map((event) => Number(event.sequence))
+      .sort((left, right) => left - right);
+
+    expect(indexedEventSequences).toEqual([1, 2]);
+    expect(inventoryRecord).toMatchObject({
+      health: "healthy",
+      consecutiveFailures: 0,
+    });
+    expect(inventoryRecord?.lastFailureReason).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[db:event-sequence-duplicate-retry]",
+      expect.objectContaining({
+        eventCollection: "indexedJobEvents",
+      }),
+    );
+    warnSpy.mockRestore();
+  });
+
   it("persists and logs structured Canada expansion filters from the recurring inventory path", async () => {
     const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const repository = new JobCrawlerRepository(new MongoLikeNullDb());
