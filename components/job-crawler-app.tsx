@@ -90,6 +90,8 @@ type ResultNotice = {
 
 type SearchRoutePayload = CrawlResponse & {
   queued?: boolean;
+  queuedBackgroundRefresh?: boolean;
+  providerCrawlMs?: number;
   aborted?: boolean;
   error?: string;
   details?: unknown;
@@ -100,7 +102,10 @@ type SearchDeltaRoutePayload = CrawlDeltaResponse & {
   error?: string;
 };
 
-type ProgressiveSearchSnapshot = Pick<CrawlResponse, "crawlRun" | "jobs">;
+type ProgressiveSearchSnapshot = Pick<CrawlResponse, "crawlRun" | "jobs"> & {
+  queuedBackgroundRefresh?: boolean;
+  providerCrawlMs?: number;
+};
 
 type SearchIdentity = {
   searchId?: string;
@@ -1125,6 +1130,10 @@ export function resolveViewState(result: CrawlResponse): ViewState {
     return "success";
   }
 
+  if (isDbFirstBackgroundRefresh(result)) {
+    return "empty";
+  }
+
   if (result.crawlRun.status === "running") {
     return "loading";
   }
@@ -1240,7 +1249,11 @@ export function resolveVisibleJobSelection(
 }
 
 export function shouldApplyQueuedResultImmediately(result: ProgressiveSearchSnapshot) {
-  return result.crawlRun.status !== "running" || result.jobs.length > 0;
+  return (
+    result.crawlRun.status !== "running" ||
+    result.jobs.length > 0 ||
+    isDbFirstBackgroundRefresh(result)
+  );
 }
 
 export function resolveQueuedSearchPollIntervalMs(visibleJobCount: number) {
@@ -1259,6 +1272,20 @@ function createClientRequestOwnerKey() {
 
 function isAbortLikeClientError(error: unknown) {
   return error instanceof Error && error.name === "AbortError";
+}
+
+function isDbFirstBackgroundRefresh(
+  result: Pick<CrawlResponse, "crawlRun" | "jobs"> & {
+    queuedBackgroundRefresh?: boolean;
+    providerCrawlMs?: number;
+  },
+) {
+  return (
+    result.crawlRun.status === "running" &&
+    result.jobs.length === 0 &&
+    result.queuedBackgroundRefresh === true &&
+    (typeof result.providerCrawlMs === "undefined" || result.providerCrawlMs === 0)
+  );
 }
 
 export function describeResultNotice(result: CrawlResponse): ResultNotice | null {

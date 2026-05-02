@@ -54,6 +54,7 @@ export async function queueSearchRun(
     crawlRunId?: string;
     searchSessionId?: string;
     queuedAt?: string;
+    deferStart?: boolean;
   } = {},
 ) {
   const crawlRunId = options.crawlRunId;
@@ -98,6 +99,10 @@ export async function queueSearchRun(
   const startedAt = new Date().toISOString();
   const workerId = `worker:${createId()}`;
   const promise = (async () => {
+    if (options.deferStart) {
+      await deferBackgroundRunStart();
+    }
+
     await repository.markCrawlRunStarted(crawlRunId, {
       startedAt,
       workerId,
@@ -147,6 +152,12 @@ export async function queueSearchRun(
   }
 
   return true;
+}
+
+function deferBackgroundRunStart() {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
 }
 
 export async function abortSearchRun(

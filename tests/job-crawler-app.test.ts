@@ -272,6 +272,20 @@ describe("job crawler app result state", () => {
     expect(resolveViewState(result)).toBe("loading");
   });
 
+  it("shows DB-first low-coverage searches as empty while refresh continues in the background", () => {
+    const result = {
+      ...createResult("running"),
+      queuedBackgroundRefresh: true,
+      providerCrawlMs: 0,
+    } satisfies CrawlResponse & {
+      queuedBackgroundRefresh: boolean;
+      providerCrawlMs: number;
+    };
+
+    expect(resolveViewState(result)).toBe("empty");
+    expect(shouldShowBlockingSearchLoad("empty", result)).toBe(false);
+  });
+
   it("keeps the visible surface in success state when supplemental work is running", () => {
     const result = {
       ...createResult("running"),
@@ -312,6 +326,15 @@ describe("job crawler app result state", () => {
       shouldApplyQueuedResultImmediately({
         crawlRun: createResult("completed").crawlRun,
         jobs: [],
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldApplyQueuedResultImmediately({
+        crawlRun: createResult("running").crawlRun,
+        jobs: [],
+        queuedBackgroundRefresh: true,
+        providerCrawlMs: 0,
       }),
     ).toBe(true);
 

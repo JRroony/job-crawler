@@ -264,6 +264,13 @@ describe("JobCrawlerRepository", () => {
 
   it("allocates indexed job event sequences safely across concurrent persistence batches", async () => {
     const db = new FakeDb();
+    db.collection(collectionNames.counters).indexes = [
+      {
+        key: { _id: 1 },
+        name: "_id_",
+        unique: true,
+      },
+    ];
     await ensureDatabaseIndexes(db);
     const repository = new JobCrawlerRepository(db);
     const search = await repository.createSearch(
@@ -296,6 +303,13 @@ describe("JobCrawlerRepository", () => {
     expect(events).toHaveLength(8);
     expect(new Set(sequences).size).toBe(8);
     expect([...sequences].sort((left, right) => left - right)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(db.collection(collectionNames.counters).indexes).toEqual([
+      {
+        key: { _id: 1 },
+        name: "_id_",
+        unique: true,
+      },
+    ]);
   });
 
   it("allocates strictly unique indexed event sequences for concurrent multi-job batches", async () => {
@@ -1641,6 +1655,14 @@ describe("JobCrawlerRepository", () => {
     expect(
       db.collection(collectionNames.indexedJobEvents).indexes.map((index) => index.name),
     ).toContain("indexedJobEvents_sequence");
+    expect(
+      db.collection(collectionNames.counters).indexes.map((index) => index.name),
+    ).not.toContain("counters_id");
+    expect(
+      db.collection(collectionNames.counters).indexes.some(
+        (index) => JSON.stringify(index.key) === JSON.stringify({ _id: 1 }),
+      ),
+    ).toBe(false);
   });
 
   it("groups duplicate updates into a single bulk write instead of issuing per-job mutations", async () => {
