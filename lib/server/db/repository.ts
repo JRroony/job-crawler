@@ -2077,6 +2077,7 @@ export class JobCrawlerRepository {
 
     const now = new Date().toISOString();
     const counters = this.counters();
+    await this.repairStaleEventSequenceCounter(input);
     const update = {
       $inc: { sequence: input.count },
       $set: { updatedAt: now },
@@ -2106,6 +2107,77 @@ export class JobCrawlerRepository {
     });
 
     return { start, end };
+  }
+
+  private async repairStaleEventSequenceCounter(input: {
+    counterId: string;
+    eventCollection: "indexedJobEvents" | "crawlRunJobEvents";
+    scope: string;
+  }) {
+    const latestSequence = await this.getLatestPersistedEventSequence(input);
+    if (latestSequence <= 0) {
+      return;
+    }
+
+    const counters = this.counters();
+    const existing = await counters.findOne({ _id: input.counterId });
+    const currentSequence = Number(existing?.sequence ?? 0);
+    if (currentSequence >= latestSequence) {
+      return;
+    }
+
+    const repairedAt = new Date().toISOString();
+    if (existing) {
+      await counters.updateOne(
+        {
+          _id: input.counterId,
+          sequence: { $lt: latestSequence },
+        },
+        {
+          $set: {
+            sequence: latestSequence,
+            updatedAt: repairedAt,
+          },
+        },
+      );
+    } else {
+      await counters.updateOne(
+        { _id: input.counterId },
+        {
+          $setOnInsert: {
+            _id: input.counterId,
+            sequence: latestSequence,
+            updatedAt: repairedAt,
+          },
+        },
+        { upsert: true },
+      );
+    }
+
+    console.warn("[db:event-sequence-counter-repaired]", {
+      eventCollection: input.eventCollection,
+      counterId: input.counterId,
+      scope: input.scope,
+      previousSequence: currentSequence,
+      repairedSequence: latestSequence,
+    });
+  }
+
+  private async getLatestPersistedEventSequence(input: {
+    eventCollection: "indexedJobEvents" | "crawlRunJobEvents";
+    scope: string;
+  }) {
+    const collection =
+      input.eventCollection === "indexedJobEvents"
+        ? this.indexedJobEvents()
+        : this.crawlRunJobEvents();
+    const filter =
+      input.eventCollection === "indexedJobEvents"
+        ? {}
+        : { crawlRunId: input.scope };
+    const latest = await collection.findOne(filter, { sort: { sequence: -1 } });
+
+    return latest ? Number(latest.sequence ?? 0) : 0;
   }
 
   private async appendSearchSessionJobEvents(

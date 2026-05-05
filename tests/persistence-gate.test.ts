@@ -77,6 +77,19 @@ describe("deterministic fake-provider persistence gate", () => {
     ]);
   });
 
+  it("persisted fake-provider job is emitted to indexedJobEvents", async () => {
+    const { crawlRunId, db, persistedJobs } = await runFakeProviderIngestion();
+    const events = db.snapshot<Record<string, unknown>>(collectionNames.indexedJobEvents);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        crawlRunId,
+        jobId: persistedJobs[0]?._id,
+        sequence: 1,
+      }),
+    ]);
+  });
+
   it("fake-provider crawlSourceResult final status is success or partial, not running", async () => {
     const { sourceResults } = await runFakeProviderIngestion();
 

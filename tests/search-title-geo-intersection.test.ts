@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { startSearchFromFilters } from "@/lib/server/crawler/service";
+import { abortSearchRun } from "@/lib/server/crawler/background-runs";
 import { JobCrawlerRepository } from "@/lib/server/db/repository";
 import { classifySourceCandidate } from "@/lib/server/discovery/classify-source";
 import type { DiscoveredSource, DiscoveryService } from "@/lib/server/discovery/types";
@@ -288,7 +289,7 @@ describe("indexed title and geo intent intersection", () => {
     }
   });
 
-  it("returns indexed DB results without waiting for hanging request-time providers", async () => {
+  it("returns indexed DB results without waiting for hanging background replenishment providers", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     await seed(repository, [
       locationJob("Product Manager", "us", "United States", "Remote - United States", {
@@ -296,7 +297,18 @@ describe("indexed title and geo intent intersection", () => {
       }),
     ]);
     const crawlSources: CrawlProvider["crawlSources"] = vi.fn(
-      () => new Promise<never>(() => undefined),
+      (context) =>
+        new Promise<never>((_resolve, reject) => {
+          const abortError = new Error("test cleanup aborted hanging provider");
+          abortError.name = "AbortError";
+          if (context.signal?.aborted) {
+            reject(abortError);
+            return;
+          }
+          context.signal?.addEventListener("abort", () => reject(abortError), {
+            once: true,
+          });
+        }),
     );
     const provider: CrawlProvider = {
       provider: "greenhouse",
@@ -322,12 +334,15 @@ describe("indexed title and geo intent intersection", () => {
 
     expect(started).not.toBe("timeout");
     if (started !== "timeout") {
-      expect(started.queued).toBe(false);
+      expect(started.queued).toBe(true);
       expect(started.result.jobs.map((job) => job.sourceJobId)).toEqual([
         sourceId("Product Manager", "us"),
       ]);
-      expect(started.result.diagnostics.session?.supplementalQueued).toBe(false);
+      expect(started.result.diagnostics.session?.supplementalQueued).toBe(true);
+      await abortSearchRun(started.result.search._id, repository, {
+        reason: "test cleanup",
+        awaitCompletion: true,
+      });
     }
-    expect(crawlSources).not.toHaveBeenCalled();
   });
 });

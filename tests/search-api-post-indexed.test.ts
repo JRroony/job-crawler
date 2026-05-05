@@ -75,7 +75,7 @@ describe("search POST indexed retrieval", () => {
     expect(payload.candidateCount).toBeGreaterThanOrEqual(payload.totalMatchedCount ?? 0);
     expect(payload.totalMatchedCount).toBe(2);
     expect(payload.returnedCount).toBe(2);
-    expect(payload.queued).toBe(false);
+    expect(payload.queued).toBe(true);
     expect(payload.providerCrawlMs).toBe(0);
     expect(payload.jobs?.map((job) => job.title)).toEqual([
       "Product Manager",

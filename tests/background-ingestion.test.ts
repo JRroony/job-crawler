@@ -245,7 +245,7 @@ describe("recurring background ingestion", () => {
     });
   });
 
-  it("does not mark source inventory failing when event sequence persistence retries succeed", async () => {
+  it("does not mark source inventory failing when stale event sequence counters are repaired", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const db = new MongoLikeNullDb();
     await ensureDatabaseIndexes(db);
@@ -318,10 +318,16 @@ describe("recurring background ingestion", () => {
     });
     expect(inventoryRecord?.lastFailureReason).toBeUndefined();
     expect(warnSpy).toHaveBeenCalledWith(
-      "[db:event-sequence-duplicate-retry]",
+      "[db:event-sequence-counter-repaired]",
       expect.objectContaining({
         eventCollection: "indexedJobEvents",
+        previousSequence: 0,
+        repairedSequence: 1,
       }),
+    );
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      "[db:event-sequence-duplicate-retry]",
+      expect.anything(),
     );
     warnSpy.mockRestore();
   });
@@ -2662,7 +2668,7 @@ describe("recurring background ingestion", () => {
           companyHint: `Company ${index}`,
           pageType: "html_page",
           confidence: "medium",
-          discoveryMethod: "public_search",
+          discoveryMethod: "future_search",
         }),
         {
           now: "2026-04-10T00:00:00.000Z",
@@ -2863,7 +2869,10 @@ function createProviderJob(overrides: {
   title: string;
   sourceJobId: string;
   company?: string;
-  sourcePlatform?: "greenhouse" | "lever" | "ashby" | "workday";
+  sourcePlatform?: CrawlProvider["provider"];
+  sourceUrl?: string;
+  applyUrl?: string;
+  canonicalUrl?: string;
   country?: string;
   locationText?: string;
   normalizedTitle?: string;
@@ -2873,7 +2882,9 @@ function createProviderJob(overrides: {
   const sourcePlatform = overrides.sourcePlatform ?? "greenhouse";
   const country = overrides.country ?? "United States";
   const locationText = overrides.locationText ?? "Remote - United States";
-  const sourceUrl = `https://example.com/${sourcePlatform}/jobs/${overrides.sourceJobId}`;
+  const sourceUrl =
+    overrides.sourceUrl ??
+    `https://example.com/${sourcePlatform}/jobs/${overrides.sourceJobId}`;
 
   return {
     title: overrides.title,
@@ -2898,8 +2909,8 @@ function createProviderJob(overrides: {
     sourceCompanySlug: "openai",
     sourceJobId: overrides.sourceJobId,
     sourceUrl,
-    applyUrl: `${sourceUrl}/apply`,
-    canonicalUrl: sourceUrl,
+    applyUrl: overrides.applyUrl ?? `${sourceUrl}/apply`,
+    canonicalUrl: overrides.canonicalUrl ?? sourceUrl,
     discoveredAt: "2026-04-15T12:00:00.000Z",
     rawSourceMetadata: {
       source: "background-ingestion-test",

@@ -34,6 +34,23 @@ export async function migrateLegacyJobsForCanonicalKey(
   db: DatabaseAdapter,
 ): Promise<JobsCanonicalKeyMigrationResult> {
   const collection = db.collection<Record<string, unknown>>(collectionNames.jobs);
+
+  const emptyResult: JobsCanonicalKeyMigrationResult = {
+    scannedCount: 0,
+    canonicalBackfillCount: 0,
+    lifecycleBackfillCount: 0,
+    rewrittenCount: 0,
+    mergedDocumentCount: 0,
+    duplicateGroupCount: 0,
+    duplicateCanonicalKeyCount: 0,
+    deletedCount: 0,
+  };
+
+  const migrationNeeded = await isLegacyCanonicalKeyMigrationNeeded(db);
+  if (!migrationNeeded) {
+    return emptyResult;
+  }
+
   const storedDocuments = await collection.find({}).toArray();
   const diagnostics: JobsCanonicalKeyMigrationResult = {
     scannedCount: storedDocuments.length,
@@ -148,6 +165,25 @@ export async function migrateLegacyJobsForCanonicalKey(
       { cause: error },
     );
   }
+}
+
+async function isLegacyCanonicalKeyMigrationNeeded(
+  db: DatabaseAdapter,
+): Promise<boolean> {
+  const collection = db.collection<Record<string, unknown>>(collectionNames.jobs);
+
+  if (collection.listIndexes) {
+    const indexes = await collection.listIndexes().toArray();
+    const hasCanonicalKeyIndex = indexes.some(
+      (index) => index.name === "jobs_canonical_job_key" && index.unique === true,
+    );
+    if (hasCanonicalKeyIndex) {
+      return false;
+    }
+  }
+
+  const totalSample = await collection.find({}).toArray();
+  return totalSample.length > 0;
 }
 
 function countCanonicalKeys(documents: Record<string, unknown>[]) {

@@ -10,6 +10,7 @@
     "benchmark:crawler": "tsx scripts/benchmark-crawler.ts",
     "diagnose:provider-lifecycle": "tsx scripts/diagnose-provider-lifecycle.ts",
     "diagnose:source-inventory": "tsx scripts/diagnose-source-inventory.ts",
+    "diagnose:ingestion-root-cause": "tsx scripts/diagnose-ingestion-root-cause.ts",
     "diagnose:ingestion-persistence": "tsx scripts/diagnose-ingestion-persistence.ts",
     "diagnose:persistence-gate": "tsx scripts/diagnose-persistence-gate.ts",
     "diagnose:live-ingestion": "tsx scripts/diagnose-live-ingestion.ts",

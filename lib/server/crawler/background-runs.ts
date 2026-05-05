@@ -109,9 +109,11 @@ export async function queueSearchRun(
       ownerKey: options.ownerKey,
     });
 
+    let taskError: unknown;
     try {
       await task(controller.signal);
     } catch (error) {
+      taskError = error;
       if (!isAbortLikeError(error)) {
         console.error("[crawl:background-run]", {
           searchId,
@@ -123,11 +125,24 @@ export async function queueSearchRun(
         });
       }
     } finally {
+      const taskFailed = Boolean(taskError) && !isAbortLikeError(taskError);
+      if (taskFailed) {
+        await finalizeFailedBackgroundTaskRun({
+          repository,
+          searchId,
+          searchSessionId: options.searchSessionId,
+          crawlRunId,
+          error: taskError,
+        });
+      }
+
       const controlState = await repository.getCrawlRunControlState(crawlRunId);
       const finalizedStatus =
         controlState && controlState.status !== "running"
           ? controlState.status
-          : controller.signal.aborted || controlState?.cancelRequestedAt
+          : taskFailed
+            ? "failed"
+            : controller.signal.aborted || controlState?.cancelRequestedAt
             ? "aborted"
             : "completed";
       await repository.finalizeCrawlQueueEntry(crawlRunId, {
@@ -152,6 +167,82 @@ export async function queueSearchRun(
   }
 
   return true;
+}
+
+async function finalizeFailedBackgroundTaskRun(input: {
+  repository: JobCrawlerRepository;
+  searchId: string;
+  searchSessionId?: string;
+  crawlRunId: string;
+  error: unknown;
+}) {
+  const crawlRun = await input.repository.getCrawlRun(input.crawlRunId);
+  if (!crawlRun || crawlRun.finishedAt || crawlRun.status !== "running") {
+    return;
+  }
+
+  const finishedAt = new Date().toISOString();
+  const errorMessage =
+    input.error instanceof Error
+      ? input.error.message
+      : "Background crawl failed unexpectedly.";
+  const existingPersistence = crawlRun.diagnostics.backgroundPersistence ?? {
+    jobsInserted: 0,
+    jobsUpdated: 0,
+    jobsLinkedToRun: 0,
+    indexedEventsEmitted: 0,
+    failedBatches: 0,
+    failureSamples: [],
+    providerStats: [],
+  };
+  const diagnostics = {
+    ...crawlRun.diagnostics,
+    backgroundPersistence: {
+      ...existingPersistence,
+      failedBatches: existingPersistence.failedBatches + 1,
+      failureSamples: [
+        `background-task: ${errorMessage}`,
+        ...existingPersistence.failureSamples,
+      ].slice(0, 8),
+    },
+  };
+
+  await Promise.all([
+    input.repository.finalizeCrawlRun(input.crawlRunId, {
+      status: "failed",
+      stage: "finalizing",
+      totalFetchedJobs: crawlRun.totalFetchedJobs,
+      totalMatchedJobs: crawlRun.totalMatchedJobs,
+      dedupedJobs: crawlRun.dedupedJobs,
+      diagnostics,
+      validationMode: crawlRun.validationMode,
+      providerSummary: crawlRun.providerSummary,
+      errorMessage,
+      finishedAt,
+    }),
+    input.repository.updateSearchLatestRun(
+      input.searchId,
+      input.crawlRunId,
+      "failed",
+      finishedAt,
+    ),
+    ...(input.searchSessionId
+      ? [
+          input.repository.updateSearchLatestSession(
+            input.searchId,
+            input.searchSessionId,
+            "failed",
+            finishedAt,
+          ),
+          input.repository.updateSearchSession(input.searchSessionId, {
+            latestCrawlRunId: input.crawlRunId,
+            status: "failed",
+            finishedAt,
+            updatedAt: finishedAt,
+          }),
+        ]
+      : []),
+  ]);
 }
 
 function deferBackgroundRunStart() {

@@ -490,7 +490,7 @@ describe("JobCrawlerRepository", () => {
     expect(sequences).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
-  it("retries stale indexed event counter duplicate errors and persists valid jobs", async () => {
+  it("repairs stale indexed event counters before allocating sequences", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const db = new FakeDb();
     await ensureDatabaseIndexes(db);
@@ -537,11 +537,16 @@ describe("JobCrawlerRepository", () => {
     });
     expect(indexedEvents.map((event) => Number(event.sequence)).sort()).toEqual([1, 2]);
     expect(warnSpy).toHaveBeenCalledWith(
-      "[db:event-sequence-duplicate-retry]",
+      "[db:event-sequence-counter-repaired]",
       expect.objectContaining({
         eventCollection: "indexedJobEvents",
-        retryCount: 1,
+        previousSequence: 0,
+        repairedSequence: 1,
       }),
+    );
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      "[db:event-sequence-duplicate-retry]",
+      expect.anything(),
     );
     warnSpy.mockRestore();
   });
