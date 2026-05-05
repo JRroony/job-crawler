@@ -22,6 +22,7 @@ import {
   monitorSearchRequestAbort,
   abortSupersededSearch,
   listRecentSearches,
+  type InitialSearchResultSnapshot,
 } from "@/lib/server/search/session-service";
 import { getIndexedJobsForSearch } from "@/lib/server/search/indexed-jobs";
 import { InputValidationError, isInputValidationError } from "@/lib/server/search/errors";
@@ -45,6 +46,10 @@ export async function runSearchFromFilters(
 ) {
   const { result } = await startSearchFromFilters(rawFilters, runtime);
   return result;
+}
+
+export function validateSearchFiltersInput(rawFilters: unknown) {
+  parseSearchFilters(rawFilters);
 }
 
 export async function rerunSearch(searchId: string, runtime: JobCrawlerRuntime = {}) {
@@ -80,13 +85,13 @@ export async function startSearchFromFilters(
     searchSessionId: session.searchSession._id,
     timestamp: session.now.toISOString(),
   });
-  const queued = await primeSearchSessionAndMaybeQueueSupplemental(
+  const primed = await primeSearchSessionAndMaybeQueueSupplemental(
     session,
     runtime,
     searchTrace,
   );
 
-  if (queued) {
+  if (primed.queued) {
     await monitorSearchRequestAbort(session.search._id, {
       repository: session.repository,
       signal: runtime.signal,
@@ -100,10 +105,11 @@ export async function startSearchFromFilters(
     earlyVisibleTarget: runtime.earlyVisibleTarget,
     initialVisibleWaitMs: runtime.initialVisibleWaitMs,
     signal: runtime.signal,
+    initialSnapshot: primed.initialSnapshot,
   });
 
   return {
-    queued,
+    queued: primed.queued,
     result: attachSearchTraceResponse(result, traceId, Date.now() - startedAt),
   };
 }
@@ -125,7 +131,7 @@ export async function startSearchRerun(searchId: string, runtime: JobCrawlerRunt
     searchSessionId: session.searchSession._id,
     timestamp: session.now.toISOString(),
   });
-  const queued = await primeSearchSessionAndMaybeQueueSupplemental(
+  const primed = await primeSearchSessionAndMaybeQueueSupplemental(
     session,
     runtime,
     searchTrace,
@@ -137,10 +143,11 @@ export async function startSearchRerun(searchId: string, runtime: JobCrawlerRunt
     earlyVisibleTarget: runtime.earlyVisibleTarget,
     initialVisibleWaitMs: runtime.initialVisibleWaitMs,
     signal: runtime.signal,
+    initialSnapshot: primed.initialSnapshot,
   });
 
   return {
-    queued,
+    queued: primed.queued,
     result: attachSearchTraceResponse(result, traceId, Date.now() - startedAt),
   };
 }
@@ -333,11 +340,25 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
   );
   const indexedJobs = indexedSearch.matches.map(({ job }) => job);
 
-  await session.repository.appendExistingJobsToSearchSession(
+  const updatedSearchSession = await session.repository.appendExistingJobsToSearchSession(
     session.searchSession._id,
     session.crawlRun._id,
     indexedJobs.map((job) => job._id),
   );
+  if (updatedSearchSession) {
+    session.searchSession = updatedSearchSession;
+  }
+  const [indexedCursor, deliveryCursor] = await Promise.all([
+    session.repository.getIndexedJobDeliveryCursor(),
+    session.repository.getSearchSessionDeliveryCursor(session.searchSession._id),
+  ]);
+  const initialSnapshot: InitialSearchResultSnapshot = {
+    jobs: indexedJobs,
+    totalMatchedCount: indexedJobs.length,
+    candidateCount: indexedSearch.candidateCount,
+    indexedCursor,
+    deliveryCursor,
+  };
 
   const allowRequestTimeSupplementalCrawl =
     runtime.allowRequestTimeSupplementalCrawl === true;
@@ -386,7 +407,8 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
   );
   const shouldQueueCurrentRun =
     supplementalDecision.shouldQueue && !activeQueueAlreadyExists;
-  const shouldRequestGenericBackgroundIngestion = false;
+  const shouldRequestGenericBackgroundIngestion =
+    supplementalDecision.requestBackgroundIngestion && !shouldQueueCurrentRun;
   const backgroundRefreshSuggested =
     supplementalDecision.requestBackgroundIngestion ||
     supplementalDecision.shouldQueueTargetedReplenishment ||
@@ -409,7 +431,13 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
       activeQueueAlreadyExists,
     });
   }
-  const backgroundIngestion = { status: "not_requested" as const };
+  const backgroundIngestion = shouldRequestGenericBackgroundIngestion
+    ? await requestBackgroundIngestionForIndexGap(runtime, session.now)
+    : { status: "not_requested" as const };
+  const backgroundRefreshQueued =
+    shouldQueueCurrentRun ||
+    backgroundIngestion.status === "started" ||
+    backgroundIngestion.status === "already_active";
   const ingestionDecisionLog = {
     searchId: session.search._id,
     searchSessionId: session.searchSession._id,
@@ -427,7 +455,7 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
       supplementalDecision.shouldQueueTargetedReplenishment && !activeQueueAlreadyExists,
     shouldRequestGenericBackgroundIngestion,
     backgroundRefreshSuggested,
-    backgroundRefreshQueued: shouldQueueCurrentRun,
+    backgroundRefreshQueued,
     shouldRunRequestTimeCrawl: supplementalDecision.shouldRunRequestTimeCrawl,
     activeQueueAlreadyExists,
     shouldQueue: shouldQueueCurrentRun,
@@ -453,7 +481,7 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
     backgroundIngestionStatus: backgroundIngestion.status,
     backgroundIngestion,
     backgroundRefreshSuggested,
-    backgroundRefreshQueued: shouldQueueCurrentRun,
+    backgroundRefreshQueued,
     activeQueueAlreadyExists,
     crawlMode: session.search.filters.crawlMode ?? "balanced",
   });
@@ -486,20 +514,20 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
   const primedDiagnostics = buildPrimedSessionDiagnostics(
     supplementalDecision,
     indexedJobs.length,
-    backgroundIngestion,
-    completedSearchTrace,
-    {
-      shouldQueueCurrentRun,
+      backgroundIngestion,
+      completedSearchTrace,
+      {
+        shouldQueueCurrentRun,
       targetedReplenishmentQueued:
         supplementalDecision.shouldQueueTargetedReplenishment && !activeQueueAlreadyExists,
       targetedReplenishmentActive:
         supplementalDecision.shouldQueueTargetedReplenishment &&
         (activeQueueAlreadyExists || shouldQueueCurrentRun),
-      activeQueueAlreadyExists,
-      backgroundRefreshSuggested,
-      backgroundRefreshQueued: shouldQueueCurrentRun,
-    },
-  );
+        activeQueueAlreadyExists,
+        backgroundRefreshSuggested,
+        backgroundRefreshQueued,
+      },
+    );
   session.crawlRun = {
     ...session.crawlRun,
     diagnostics: primedDiagnostics,
@@ -570,10 +598,13 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
       }),
     ]);
 
-    return false;
+    return {
+      queued: false,
+      initialSnapshot,
+    };
   }
 
-  return queueSearchIngestion(
+  const queued = await queueSearchIngestion(
     {
       search: session.search,
       searchSession: session.searchSession,
@@ -589,6 +620,11 @@ async function primeSearchSessionAndMaybeQueueSupplemental(
       ingestionQueueReason: supplementalDecision.triggerReason,
     },
   );
+
+  return {
+    queued,
+    initialSnapshot,
+  };
 }
 
 type SupplementalDecision = {
@@ -716,12 +752,12 @@ function resolveSupplementalCrawlDecision(
   ) {
     return {
       ...baseDecision,
-      shouldQueue: false,
-      shouldQueueTargetedReplenishment: false,
+      shouldQueue: true,
+      shouldQueueTargetedReplenishment: true,
       shouldRunRequestTimeCrawl: false,
-      requestBackgroundIngestion: true,
-      triggerReason: "incomplete_previous_run_background_requested",
-      triggerExplanation: "The previous identical session did not complete cleanly and indexed coverage is still below target, so generic background ingestion was requested because targeted providers are unavailable.",
+      requestBackgroundIngestion: false,
+      triggerReason: "retry_incomplete_previous_run",
+      triggerExplanation: "The previous identical session did not complete cleanly and indexed coverage is still below target, so a targeted replenishment run was queued for the current search filters.",
     };
   }
 
@@ -752,17 +788,12 @@ function resolveSupplementalCrawlDecision(
   if (!options.allowRequestTimeFreshnessRecovery) {
     return {
       ...baseDecision,
-      shouldQueue: false,
-      shouldQueueTargetedReplenishment: false,
+      shouldQueue: true,
+      shouldQueueTargetedReplenishment: true,
       shouldRunRequestTimeCrawl: false,
-      requestBackgroundIngestion: true,
-      triggerReason:
-        indexedJobCount === 0
-          ? "indexed_empty_background_requested"
-          : freshnessRecoveryEligible
-            ? "stale_indexed_coverage_background_requested"
-            : "insufficient_indexed_coverage_background_requested",
-      triggerExplanation: `Indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${coveragePolicy.reason} target, but targeted providers are unavailable so generic background ingestion was requested.`,
+      requestBackgroundIngestion: false,
+      triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
+      triggerExplanation: `Indexed coverage returned ${indexedJobCount} visible jobs, below the ${minimumIndexedCoverage}-job ${coveragePolicy.reason} target, so a targeted replenishment run was queued for the current search filters.`,
     };
   }
 

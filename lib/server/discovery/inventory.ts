@@ -89,6 +89,9 @@ export const sourceInventoryRecordSchema = z.object({
   lastSucceededAt: z.string().datetime().optional(),
   lastFailedAt: z.string().datetime().optional(),
   nextEligibleAt: z.string().datetime().optional(),
+  crawlLeaseOwnerKey: z.string().min(1).optional(),
+  crawlLeaseAcquiredAt: z.string().datetime().optional(),
+  crawlLeaseExpiresAt: z.string().datetime().optional(),
 });
 
 export type SourceInventoryRecord = z.infer<typeof sourceInventoryRecordSchema>;

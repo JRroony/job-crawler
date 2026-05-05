@@ -356,6 +356,11 @@ export async function ensureDatabaseIndexes(db: DatabaseLike) {
       name: "sourceInventory_lastCrawledAt_desc_platform_health",
       sparse: true,
     },
+    {
+      key: { crawlLeaseOwnerKey: 1, crawlLeaseExpiresAt: 1 },
+      name: "sourceInventory_crawlLease_owner_expires",
+      sparse: true,
+    },
   ]);
 
   indexesEnsured = true;

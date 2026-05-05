@@ -464,6 +464,26 @@ export const crawlDiagnosticsSchema = z.object({
       runTimeoutMs: z.number().int().nonnegative().default(0),
     })
     .optional(),
+  backgroundHealth: z
+    .object({
+      activeQueueEntries: z.number().int().nonnegative().default(0),
+      staleActiveQueueEntries: z.number().int().nonnegative().default(0),
+      runningCrawlRuns: z.number().int().nonnegative().default(0),
+      staleRunningCrawlRuns: z.number().int().nonnegative().default(0),
+      latestQueueHeartbeatAt: nullableOptional(z.string().datetime()),
+      latestRunHeartbeatAt: nullableOptional(z.string().datetime()),
+      inventorySources: z.number().int().nonnegative().default(0),
+      eligibleInventorySources: z.number().int().nonnegative().default(0),
+      inventoryByPlatform: z.record(z.string(), z.number().int().nonnegative()).default({}),
+      eligibleInventoryByPlatform: z.record(z.string(), z.number().int().nonnegative()).default({}),
+      providerSavedCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
+      providerFetchedCounts: z.record(z.string(), z.number().int().nonnegative()).default({}),
+      jobsUpdatedInLast24Hours: z.number().int().nonnegative().default(0),
+      indexedEventsInLast24Hours: z.number().int().nonnegative().default(0),
+      recoveredStaleQueueEntries: z.number().int().nonnegative().default(0),
+      recoveredStaleCrawlRuns: z.number().int().nonnegative().default(0),
+    })
+    .optional(),
   inventoryScheduling: z
     .object({
       inventorySources: z.number().int().nonnegative().default(0),

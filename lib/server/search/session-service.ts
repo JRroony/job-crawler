@@ -8,7 +8,7 @@ import {
 import { evaluateSearchFilters } from "@/lib/server/crawler/helpers";
 import { abortOwnerSearchRun, abortSearchRun, isSearchRunPending } from "@/lib/server/crawler/background-runs";
 import { createId } from "@/lib/server/crawler/helpers";
-import { sortJobsWithDiagnostics } from "@/lib/server/crawler/sort";
+import { explainJobRanking, sortJobsWithDiagnostics } from "@/lib/server/crawler/sort";
 import {
   getIndexedJobDeltasForSearch,
   getIndexedJobsForSearch,
@@ -24,6 +24,7 @@ import {
   type CrawlDiagnostics,
   type JobListing,
   type SearchDocument,
+  type SearchSessionDocument,
 } from "@/lib/types";
 
 import { ResourceNotFoundError } from "@/lib/server/search/errors";
@@ -55,6 +56,14 @@ type SearchPage = {
   nextCursor: number | null;
   hasMore: boolean;
   jobs: JobListing[];
+};
+
+export type InitialSearchResultSnapshot = {
+  jobs: JobListing[];
+  totalMatchedCount: number;
+  candidateCount: number;
+  indexedCursor: number;
+  deliveryCursor: number;
 };
 
 export async function createSearchSession(
@@ -199,19 +208,34 @@ export async function getInitialSearchResult(
     JobCrawlerRuntime,
     "repository" | "fetchImpl" | "now" | "earlyVisibleTarget" | "initialVisibleWaitMs" | "signal"
   > &
-    SearchPaginationOptions = {},
+    SearchPaginationOptions & {
+      initialSnapshot?: InitialSearchResultSnapshot;
+    } = {},
 ) {
   const repository = await resolveRepository(runtime.repository, {
     ensureIndexes: false,
   });
-  const initialResult = await getSearchDetails(searchId, {
-    repository,
-    fetchImpl: runtime.fetchImpl ?? fetch,
-    now: runtime.now,
-    cursor: runtime.cursor,
-    pageSize: runtime.pageSize,
-    searchSessionId: runtime.searchSessionId,
-  });
+  const initialResult = runtime.initialSnapshot
+    ? await getSearchDetailsFromInitialSnapshot(
+        searchId,
+        searchSessionId,
+        runtime.initialSnapshot,
+        {
+          repository,
+          now: runtime.now,
+          cursor: runtime.cursor,
+          pageSize: runtime.pageSize,
+          searchSessionId: runtime.searchSessionId,
+        },
+      )
+    : await getSearchDetails(searchId, {
+        repository,
+        fetchImpl: runtime.fetchImpl ?? fetch,
+        now: runtime.now,
+        cursor: runtime.cursor,
+        pageSize: runtime.pageSize,
+        searchSessionId: runtime.searchSessionId,
+      });
 
   if (
     initialResult.jobs.length > 0 ||
@@ -290,6 +314,19 @@ export async function getSearchDetails(searchId: string, runtime: SearchDetailsR
       resolved.search,
       await loadIndexedSearchJobs(resolved.search, repository),
       (await isSearchRunPending(searchId, repository)) ? "running" : undefined,
+      indexedCursor,
+      runtime,
+    );
+  }
+
+  if (resolved.searchSession && shouldUseSearchSessionEventResults(resolved)) {
+    return getSearchDetailsFromSessionEvents(
+      {
+        search: resolved.search,
+        searchSession: resolved.searchSession,
+        crawlRun: resolved.crawlRun,
+      },
+      repository,
       indexedCursor,
       runtime,
     );
@@ -377,6 +414,245 @@ export async function getSearchDetails(searchId: string, runtime: SearchDetailsR
       indexedCursor,
     },
   });
+}
+
+async function getSearchDetailsFromInitialSnapshot(
+  searchId: string,
+  searchSessionId: string,
+  snapshot: InitialSearchResultSnapshot,
+  runtime: Pick<SearchDetailsRuntime, "repository" | "now" | "cursor" | "pageSize" | "searchSessionId"> = {},
+) {
+  const repository = await resolveRepository(runtime.repository, {
+    ensureIndexes: false,
+  });
+  const resolved = await loadSearchState(searchId, repository);
+
+  if (!resolved.crawlRun) {
+    return buildSyntheticCrawlResponse(
+      resolved.search,
+      snapshot.jobs,
+      (await isSearchRunPending(searchId, repository)) ? "running" : undefined,
+      snapshot.indexedCursor,
+      runtime,
+    );
+  }
+
+  const searchSession =
+    resolved.searchSession ?? (await repository.getSearchSession(searchSessionId));
+  const rankedJobs = attachRankingDiagnosticsToJobs(
+    snapshot.jobs,
+    resolved.search.filters.title,
+    runtime.now ?? new Date(),
+  );
+  const page = paginateSearchResults(rankedJobs, runtime);
+  const diagnostics = attachSessionDiagnostics(
+    resolved.crawlRun.diagnostics,
+    snapshot.totalMatchedCount,
+    snapshot.totalMatchedCount,
+    snapshot.deliveryCursor,
+    resolved.crawlRun,
+    resolved.search,
+    {
+      candidateCount: snapshot.candidateCount,
+      matchedCount: page.totalMatchedCount,
+      returnedCount: page.returnedCount,
+      pageSize: page.pageSize,
+      nextCursor: page.nextCursor,
+      hasMore: page.hasMore,
+      excludedByTitleCount: resolved.crawlRun.diagnostics.excludedByTitle,
+      excludedByLocationCount: resolved.crawlRun.diagnostics.excludedByLocation,
+      excludedByExperienceCount: resolved.crawlRun.diagnostics.excludedByExperience,
+    },
+  );
+
+  logSearchPagination({
+    searchId: resolved.search._id,
+    searchSessionId: searchSession?._id ?? searchSessionId,
+    totalMatchedCount: page.totalMatchedCount,
+    returnedCount: page.returnedCount,
+    pageSize: page.pageSize,
+    nextCursor: page.nextCursor,
+    hasMore: page.hasMore,
+  });
+
+  return crawlResponseSchema.parse({
+    searchId: resolved.search._id,
+    searchSessionId: searchSession?._id ?? searchSessionId,
+    candidateCount: snapshot.candidateCount,
+    finalMatchedCount: page.totalMatchedCount,
+    totalMatchedCount: page.totalMatchedCount,
+    returnedCount: page.returnedCount,
+    pageSize: page.pageSize,
+    nextCursor: page.nextCursor,
+    hasMore: page.hasMore,
+    search: resolved.search,
+    ...(searchSession ? { searchSession } : {}),
+    crawlRun: resolved.crawlRun,
+    sourceResults: [],
+    jobs: page.jobs,
+    diagnostics,
+    delivery: {
+      mode: "full",
+      cursor: snapshot.deliveryCursor,
+      indexedCursor: snapshot.indexedCursor,
+    },
+  });
+}
+
+async function getSearchDetailsFromSessionEvents(
+  resolved: {
+    search: SearchDocument;
+    searchSession: SearchSessionDocument;
+    crawlRun: CrawlRun;
+  },
+  repository: Awaited<ReturnType<typeof resolveRepository>>,
+  indexedCursor: number,
+  runtime: SearchDetailsRuntime = {},
+) {
+  const pagination = normalizeSearchPaginationOptions(runtime);
+  const [sourceResults, sessionPage] = await Promise.all([
+    repository.getCrawlSourceResults(resolved.crawlRun._id),
+    repository.getSearchSessionJobPage(
+      resolved.searchSession._id,
+      pagination.cursor,
+      pagination.pageSize,
+    ),
+  ]);
+  let pageJobs = sessionPage.jobs.map(applyResolvedExperienceLevel);
+
+  if (runtime.refreshStaleJobLinks === true && resolved.crawlRun.status !== "running") {
+    pageJobs = await refreshStaleJobs(
+      pageJobs,
+      repository,
+      runtime.fetchImpl ?? fetch,
+      runtime.now ?? new Date(),
+    );
+  }
+
+  const rankedPageJobs = attachRankingDiagnosticsToJobs(
+    pageJobs,
+    resolved.search.filters.title,
+    runtime.now ?? new Date(),
+  );
+  const filteredPageJobs = filterAndDecorateSearchJobs(
+    rankedPageJobs,
+    resolved.search.filters,
+    "response_guard",
+  );
+  const eventPage = buildSearchSessionEventPage(
+    filteredPageJobs,
+    sessionPage,
+    pagination,
+  );
+  const initialIndexedResultsCount =
+    resolved.crawlRun.diagnostics.session?.initialIndexedResultsCount ??
+    resolved.crawlRun.diagnostics.session?.indexedResultsCount ??
+    sessionPage.totalCount;
+  const candidateCount =
+    resolved.crawlRun.diagnostics.session?.indexedCandidateCount ??
+    initialIndexedResultsCount;
+  const diagnostics = attachSessionDiagnostics(
+    resolved.crawlRun.diagnostics,
+    initialIndexedResultsCount,
+    sessionPage.totalCount,
+    sessionPage.totalCount,
+    resolved.crawlRun,
+    resolved.search,
+    {
+      candidateCount,
+      matchedCount: eventPage.totalMatchedCount,
+      returnedCount: eventPage.returnedCount,
+      pageSize: eventPage.pageSize,
+      nextCursor: eventPage.nextCursor,
+      hasMore: eventPage.hasMore,
+      excludedByTitleCount: resolved.crawlRun.diagnostics.excludedByTitle,
+      excludedByLocationCount:
+        resolved.crawlRun.diagnostics.excludedByLocation +
+        Math.max(0, rankedPageJobs.length - filteredPageJobs.length),
+      excludedByExperienceCount: resolved.crawlRun.diagnostics.excludedByExperience,
+    },
+  );
+
+  logSearchPagination({
+    searchId: resolved.search._id,
+    searchSessionId: resolved.searchSession._id,
+    totalMatchedCount: eventPage.totalMatchedCount,
+    returnedCount: eventPage.returnedCount,
+    pageSize: eventPage.pageSize,
+    nextCursor: eventPage.nextCursor,
+    hasMore: eventPage.hasMore,
+  });
+
+  return crawlResponseSchema.parse({
+    searchId: resolved.search._id,
+    searchSessionId: resolved.searchSession._id,
+    candidateCount,
+    finalMatchedCount: eventPage.totalMatchedCount,
+    totalMatchedCount: eventPage.totalMatchedCount,
+    returnedCount: eventPage.returnedCount,
+    pageSize: eventPage.pageSize,
+    nextCursor: eventPage.nextCursor,
+    hasMore: eventPage.hasMore,
+    search: resolved.search,
+    searchSession: resolved.searchSession,
+    crawlRun: resolved.crawlRun,
+    sourceResults,
+    jobs: eventPage.jobs,
+    diagnostics,
+    delivery: {
+      mode: "full",
+      cursor: sessionPage.totalCount,
+      indexedCursor,
+    },
+  });
+}
+
+function shouldUseSearchSessionEventResults(resolved: {
+  searchSession: SearchSessionDocument | null;
+  crawlRun: CrawlRun;
+}) {
+  const session = resolved.crawlRun.diagnostics.session;
+
+  return Boolean(
+    resolved.searchSession &&
+      (typeof session?.initialIndexedResultsCount === "number" ||
+        typeof session?.totalVisibleResultsCount === "number"),
+  );
+}
+
+function attachRankingDiagnosticsToJobs(
+  jobs: JobListing[],
+  titleQuery: string,
+  now: Date,
+) {
+  return jobs.map((job) => ({
+    ...job,
+    rawSourceMetadata: {
+      ...(job.rawSourceMetadata ?? {}),
+      crawlRanking: explainJobRanking(job, titleQuery, now),
+    },
+  }));
+}
+
+function buildSearchSessionEventPage(
+  jobs: JobListing[],
+  sessionPage: {
+    cursor: number;
+    totalCount: number;
+  },
+  pagination: ReturnType<typeof normalizeSearchPaginationOptions>,
+): SearchPage {
+  const hasMore = sessionPage.cursor < sessionPage.totalCount;
+
+  return {
+    cursor: pagination.cursor,
+    pageSize: pagination.pageSize,
+    totalMatchedCount: sessionPage.totalCount,
+    returnedCount: jobs.length,
+    nextCursor: hasMore ? sessionPage.cursor : null,
+    hasMore,
+    jobs,
+  };
 }
 
 export async function getSearchJobDeltas(

@@ -13,6 +13,8 @@ export type InventorySchedulingSkipReason =
   | "status_paused"
   | "freshness_cooldown"
   | "health_backoff"
+  | "active_lease"
+  | "unknown_company_page_cap"
   | "capacity_deprioritized";
 
 type InventoryFreshnessBucket =
@@ -99,6 +101,13 @@ export function planRecurringInventorySourceSelection(input: {
       continue;
     }
 
+    if (hasActiveCrawlLease(record, nowMs)) {
+      incrementCount(skippedByReason, "active_lease");
+      incrementPlatformReason(skippedByPlatformReason, record.platform, "active_lease");
+      pushSample(skippedSourceSamples, `${record._id}:active_lease`);
+      continue;
+    }
+
     const nextEligibleAt = resolveSourceNextEligibleAt(record, {
       intervalMs: input.intervalMs,
     });
@@ -140,6 +149,17 @@ export function planRecurringInventorySourceSelection(input: {
   const selectedIds = new Set(selectedCandidates.map((candidate) => candidate.record._id));
   const selectedRecords = selectedCandidates.map((candidate) => candidate.record);
   for (const candidate of eligible.filter((entry) => !selectedIds.has(entry.record._id))) {
+    if (isUnknownCompanyPage(candidate.record) && selectedIds.size < input.maxSources) {
+      incrementCount(skippedByReason, "unknown_company_page_cap");
+      incrementPlatformReason(
+        skippedByPlatformReason,
+        candidate.record.platform,
+        "unknown_company_page_cap",
+      );
+      pushSample(skippedSourceSamples, `${candidate.record._id}:unknown_company_page_cap`);
+      continue;
+    }
+
     incrementCount(skippedByReason, "capacity_deprioritized");
     incrementPlatformReason(
       skippedByPlatformReason,
@@ -215,6 +235,7 @@ function selectRecurringInventoryCandidates(
     neverCrawledCandidates.length,
     Math.max(1, Math.ceil(limit * 0.25)),
   );
+  const unknownCompanyPageBudget = resolveUnknownCompanyPageBudget(eligible, limit);
 
   for (const candidate of priorityCandidates.slice(0, priorityReserve)) {
     selected.push(candidate);
@@ -228,6 +249,16 @@ function selectRecurringInventoryCandidates(
     }
 
     if (selectedIds.has(candidate.record._id)) {
+      continue;
+    }
+
+    if (
+      !canSelectWithinUnknownCompanyPageBudget(
+        candidate.record,
+        selected,
+        unknownCompanyPageBudget,
+      )
+    ) {
       continue;
     }
 
@@ -255,6 +286,16 @@ function selectRecurringInventoryCandidates(
       continue;
     }
 
+    if (
+      !canSelectWithinUnknownCompanyPageBudget(
+        candidate.record,
+        selected,
+        unknownCompanyPageBudget,
+      )
+    ) {
+      continue;
+    }
+
     selected.push(candidate);
     selectedIds.add(candidate.record._id);
     incrementCount(selectedPlatformCounts, candidate.record.platform);
@@ -266,6 +307,16 @@ function selectRecurringInventoryCandidates(
     }
 
     if (selectedIds.has(candidate.record._id)) {
+      continue;
+    }
+
+    if (
+      !canSelectWithinUnknownCompanyPageBudget(
+        candidate.record,
+        selected,
+        unknownCompanyPageBudget,
+      )
+    ) {
       continue;
     }
 
@@ -293,6 +344,16 @@ function selectRecurringInventoryCandidates(
       continue;
     }
 
+    if (
+      !canSelectWithinUnknownCompanyPageBudget(
+        candidate.record,
+        selected,
+        unknownCompanyPageBudget,
+      )
+    ) {
+      continue;
+    }
+
     selected.push(candidate);
     selectedIds.add(candidate.record._id);
     incrementCount(selectedPlatformCounts, candidate.record.platform);
@@ -310,6 +371,49 @@ function canSelectWithinPlatformBudget(
   return (
     typeof platformBudget !== "number" ||
     (selectedPlatformCounts[platform] ?? 0) < platformBudget
+  );
+}
+
+function canSelectWithinUnknownCompanyPageBudget<TCandidate extends { record: SourceInventoryRecord }>(
+  record: SourceInventoryRecord,
+  selected: TCandidate[],
+  unknownCompanyPageBudget: number,
+) {
+  if (!isUnknownCompanyPage(record)) {
+    return true;
+  }
+
+  return selected.filter((candidate) => isUnknownCompanyPage(candidate.record)).length <
+    unknownCompanyPageBudget;
+}
+
+function resolveUnknownCompanyPageBudget(
+  eligible: Array<{ record: SourceInventoryRecord }>,
+  maxSources: number,
+) {
+  const unknownCompanyPageCount = eligible.filter((candidate) =>
+    isUnknownCompanyPage(candidate.record),
+  ).length;
+  if (unknownCompanyPageCount === 0) {
+    return 0;
+  }
+
+  const nonUnknownCompanyPageCount = eligible.length - unknownCompanyPageCount;
+  if (nonUnknownCompanyPageCount === 0) {
+    return Math.max(1, Math.floor(maxSources));
+  }
+
+  return Math.min(
+    unknownCompanyPageCount,
+    Math.max(1, Math.floor(Math.max(1, maxSources) * 0.15)),
+  );
+}
+
+function isUnknownCompanyPage(record: SourceInventoryRecord) {
+  return (
+    record.platform === "company_page" &&
+    record.sourceType === "company_page" &&
+    record.health === "unknown"
   );
 }
 
@@ -384,6 +488,15 @@ function selectFirstCandidatePerPlatform<TCandidate extends { record: SourceInve
   return selected;
 }
 
+function hasActiveCrawlLease(record: SourceInventoryRecord, nowMs: number) {
+  if (!record.crawlLeaseExpiresAt) {
+    return false;
+  }
+
+  const expiresAtMs = safeParseTime(record.crawlLeaseExpiresAt);
+  return typeof expiresAtMs === "number" && expiresAtMs > nowMs;
+}
+
 export function resolveSourceNextEligibleAt(
   record: SourceInventoryRecord,
   input: {
@@ -446,8 +559,10 @@ function compareCandidates(
   left: { record: SourceInventoryRecord; overdueMs: number; nextEligibleAt: string },
   right: { record: SourceInventoryRecord; overdueMs: number; nextEligibleAt: string },
 ) {
-  if (left.overdueMs !== right.overdueMs) {
-    return right.overdueMs - left.overdueMs;
+  const leftYieldRank = sourceYieldRank(left.record);
+  const rightYieldRank = sourceYieldRank(right.record);
+  if (leftYieldRank !== rightYieldRank) {
+    return leftYieldRank - rightYieldRank;
   }
 
   const leftHealthRank = healthRank(left.record.health);
@@ -458,6 +573,10 @@ function compareCandidates(
 
   if (left.record.consecutiveFailures !== right.record.consecutiveFailures) {
     return left.record.consecutiveFailures - right.record.consecutiveFailures;
+  }
+
+  if (left.overdueMs !== right.overdueMs) {
+    return right.overdueMs - left.overdueMs;
   }
 
   if (left.record.crawlPriority !== right.record.crawlPriority) {
@@ -493,6 +612,26 @@ function shouldBackOffSource(record: SourceInventoryRecord) {
     record.health === "degraded" ||
     record.health === "failing"
   );
+}
+
+function sourceYieldRank(record: SourceInventoryRecord) {
+  if (record.sourceType === "ats_board" || record.sourceType === "feed") {
+    return record.health === "degraded" || record.health === "failing" ? 1 : 0;
+  }
+
+  if (record.sourceType === "job_detail") {
+    return 2;
+  }
+
+  if (record.sourceType === "career_site") {
+    return 3;
+  }
+
+  if (record.sourceType === "company_page") {
+    return record.health === "unknown" ? 6 : 4;
+  }
+
+  return 5;
 }
 
 function resolveSuccessRefreshMs(record: SourceInventoryRecord, intervalMs: number) {

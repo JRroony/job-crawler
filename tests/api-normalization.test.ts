@@ -8,10 +8,10 @@ const {
   isInputValidationErrorMock,
   listRecentSearchesMock,
   listRecentSearchesForApiMock,
-  queueSearchRunMock,
   resourceNotFoundErrorClass,
   startSearchFromFiltersMock,
   startSearchRerunMock,
+  validateSearchFiltersInputMock,
 } = vi.hoisted(() => ({
   abortSearchMock: vi.fn(),
   getSearchDetailsMock: vi.fn(),
@@ -20,10 +20,10 @@ const {
   isInputValidationErrorMock: vi.fn(() => false),
   listRecentSearchesMock: vi.fn(),
   listRecentSearchesForApiMock: vi.fn(),
-  queueSearchRunMock: vi.fn(),
   resourceNotFoundErrorClass: class ResourceNotFoundError extends Error {},
   startSearchFromFiltersMock: vi.fn(),
   startSearchRerunMock: vi.fn(),
+  validateSearchFiltersInputMock: vi.fn(),
 }));
 
 vi.mock("@/lib/server/search/recent-searches", () => ({
@@ -34,15 +34,12 @@ vi.mock("@/lib/server/mongodb", () => ({
   getMongoDb: getMongoDbMock,
 }));
 
-vi.mock("@/lib/server/crawler/background-runs", () => ({
-  queueSearchRun: queueSearchRunMock,
-}));
-
 vi.mock("@/lib/server/search/service", () => ({
   isInputValidationError: isInputValidationErrorMock,
   listRecentSearches: listRecentSearchesMock,
   startSearchFromFilters: startSearchFromFiltersMock,
   startSearchRerun: startSearchRerunMock,
+  validateSearchFiltersInput: validateSearchFiltersInputMock,
 }));
 
 vi.mock("@/lib/server/search/session-service", () => ({
@@ -69,83 +66,76 @@ vi.mock("@/lib/server/search/errors", () => ({
 
 import { DELETE, GET as GET_SEARCH } from "@/app/api/searches/[id]/route";
 import { GET as LIST_SEARCHES, POST } from "@/app/api/searches/route";
-import { JobCrawlerRepository, type PersistableJob } from "@/lib/server/db/repository";
 import { FakeDb } from "@/tests/helpers/fake-db";
 
 let currentDb: FakeDb;
 
-async function seedIndexedJobs(count: number) {
-  const repository = new JobCrawlerRepository(currentDb);
-  const search = await repository.createSearch(
-    {
-      title: "Software Engineer",
-      country: "United States",
-    },
-    "2026-04-15T12:00:00.000Z",
-  );
-  const crawlRun = await repository.createCrawlRun(search._id, "2026-04-15T12:00:00.000Z");
-
-  await repository.persistJobsWithStats(
-    crawlRun._id,
-    Array.from({ length: count }, (_, index) =>
-      createPersistableJob(`db-first-${index}`),
-    ),
-  );
-}
-
-function createPersistableJob(sourceJobId: string): PersistableJob {
-  const canonicalUrl = `https://example.com/jobs/${sourceJobId}`;
-
+function createSearchRouteResult(input: {
+  filters: Record<string, unknown>;
+  jobCount: number;
+  queued?: boolean;
+  queuedBackgroundRefresh?: boolean;
+}) {
+  const status = input.queued ? "running" : "completed";
+  const updatedAt = "2026-04-15T12:00:00.000Z";
   return {
-    canonicalJobKey: `platform:greenhouse:acme:${sourceJobId}`,
-    title: "Software Engineer",
-    company: "Acme",
-    normalizedCompany: "acme",
-    normalizedTitle: "software engineer",
-    country: "United States",
-    state: "Washington",
-    city: "Seattle",
-    locationRaw: "Seattle, WA, United States",
-    normalizedLocation: "seattle wa united states",
-    locationText: "Seattle, WA, United States",
-    remoteType: "unknown",
-    sourcePlatform: "greenhouse",
-    sourceCompanySlug: "acme",
-    sourceJobId,
-    sourceUrl: canonicalUrl,
-    applyUrl: `${canonicalUrl}/apply`,
-    resolvedUrl: `${canonicalUrl}/apply`,
-    canonicalUrl,
-    postingDate: "2026-04-14T00:00:00.000Z",
-    postedAt: "2026-04-14T00:00:00.000Z",
-    discoveredAt: "2026-04-15T12:00:00.000Z",
-    crawledAt: "2026-04-15T12:00:00.000Z",
-    sponsorshipHint: "unknown",
-    linkStatus: "unknown",
-    rawSourceMetadata: {},
-    sourceProvenance: [
-      {
-        sourcePlatform: "greenhouse",
-        sourceJobId,
-        sourceUrl: canonicalUrl,
-        applyUrl: `${canonicalUrl}/apply`,
-        resolvedUrl: `${canonicalUrl}/apply`,
-        canonicalUrl,
-        discoveredAt: "2026-04-15T12:00:00.000Z",
-        rawSourceMetadata: {},
+    searchId: "search-1",
+    searchSessionId: "session-1",
+    candidateCount: input.jobCount,
+    finalMatchedCount: input.jobCount,
+    totalMatchedCount: input.jobCount,
+    returnedCount: input.jobCount,
+    pageSize: 50,
+    nextCursor: null,
+    hasMore: false,
+    search: {
+      _id: "search-1",
+      filters: input.filters,
+      latestSearchSessionId: "session-1",
+      latestCrawlRunId: "run-1",
+      lastStatus: status,
+      createdAt: updatedAt,
+      updatedAt,
+    },
+    searchSession: {
+      _id: "session-1",
+      searchId: "search-1",
+      latestCrawlRunId: "run-1",
+      status,
+      createdAt: updatedAt,
+      updatedAt,
+      lastEventSequence: input.jobCount,
+    },
+    crawlRun: {
+      _id: "run-1",
+      searchId: "search-1",
+      searchSessionId: "session-1",
+      status,
+      startedAt: updatedAt,
+      diagnostics: {},
+    },
+    sourceResults: [],
+    jobs: Array.from({ length: input.jobCount }, (_, index) => ({
+      _id: `job-${index + 1}`,
+      title: "Software Engineer",
+    })),
+    diagnostics: {
+      session: {
+        backgroundRefreshQueued: input.queuedBackgroundRefresh === true,
+        targetedReplenishmentQueued: false,
+        targetedReplenishmentActive: false,
+        indexedSearchTimingsMs: {
+          candidateQuery: 7,
+          requestTimeRefinement: 2,
+          total: 9,
+        },
       },
-    ],
-    sourceLookupKeys: [`greenhouse:acme:${sourceJobId}`],
-    firstSeenAt: "2026-04-15T12:00:00.000Z",
-    lastSeenAt: "2026-04-15T12:00:00.000Z",
-    indexedAt: "2026-04-15T12:00:00.000Z",
-    isActive: true,
-    dedupeFingerprint: sourceJobId,
-    companyNormalized: "acme",
-    titleNormalized: "software engineer",
-    locationNormalized: "seattle wa united states",
-    contentFingerprint: sourceJobId,
-    contentHash: `content-hash:${sourceJobId}`,
+      performance: {
+        stageTimingsMs: {
+          providerExecution: 0,
+        },
+      },
+    },
   };
 }
 
@@ -158,12 +148,11 @@ describe("search API normalization", () => {
     listRecentSearchesMock.mockReset();
     listRecentSearchesForApiMock.mockReset();
     getMongoDbMock.mockReset();
-    queueSearchRunMock.mockReset();
     startSearchFromFiltersMock.mockReset();
     startSearchRerunMock.mockReset();
+    validateSearchFiltersInputMock.mockReset();
     currentDb = new FakeDb();
     getMongoDbMock.mockResolvedValue(currentDb);
-    queueSearchRunMock.mockResolvedValue(false);
   });
 
   it("loads recent searches from the lightweight recent-search service", async () => {
@@ -188,8 +177,19 @@ describe("search API normalization", () => {
     expect(listRecentSearchesMock).not.toHaveBeenCalled();
   });
 
-  it("strips null optional filters and returns DB-backed results without executing providers", async () => {
-    await seedIndexedJobs(31);
+  it("strips null optional filters and delegates to indexed search service without executing route-level providers", async () => {
+    const sanitizedFilters = {
+      title: "Software Engineer",
+      country: "United States",
+      platforms: ["greenhouse"],
+    };
+    startSearchFromFiltersMock.mockResolvedValue({
+      queued: false,
+      result: createSearchRouteResult({
+        filters: sanitizedFilters,
+        jobCount: 31,
+      }),
+    });
 
     const request = new Request("http://localhost/api/searches", {
       method: "POST",
@@ -229,13 +229,30 @@ describe("search API normalization", () => {
     expect(responsePayload.providerCrawlMs).toBe(0);
     expect(responsePayload.timing?.providerCrawlMs).toBe(0);
     expect(responsePayload.queuedBackgroundRefresh).toBe(false);
-    expect(queueSearchRunMock).not.toHaveBeenCalled();
-    expect(startSearchFromFiltersMock).not.toHaveBeenCalled();
+    expect(validateSearchFiltersInputMock).toHaveBeenCalledWith(sanitizedFilters);
+    expect(startSearchFromFiltersMock).toHaveBeenCalledWith(
+      sanitizedFilters,
+      expect.objectContaining({
+        requestOwnerKey: "client-1",
+        ensureIndexes: false,
+      }),
+    );
   });
 
-  it("enqueues low-coverage background refresh without blocking the search response", async () => {
-    await seedIndexedJobs(1);
-    queueSearchRunMock.mockResolvedValue(true);
+  it("preserves queued background refresh response fields from the indexed search service", async () => {
+    const sanitizedFilters = {
+      title: "Software Engineer",
+      country: "United States",
+    };
+    startSearchFromFiltersMock.mockResolvedValue({
+      queued: true,
+      result: createSearchRouteResult({
+        filters: sanitizedFilters,
+        jobCount: 1,
+        queued: true,
+        queuedBackgroundRefresh: true,
+      }),
+    });
 
     const request = new Request("http://localhost/api/searches", {
       method: "POST",
@@ -268,12 +285,13 @@ describe("search API normalization", () => {
     expect(typeof responsePayload.dbSearchMs).toBe("number");
     expect(responsePayload.providerCrawlMs).toBe(0);
     expect(typeof responsePayload.totalSearchMs).toBe("number");
-    expect(queueSearchRunMock).toHaveBeenCalledTimes(1);
-    expect(queueSearchRunMock.mock.calls[0]?.[3]).toMatchObject({
-      ownerKey: "client-1",
-      deferStart: true,
-    });
-    expect(startSearchFromFiltersMock).not.toHaveBeenCalled();
+    expect(validateSearchFiltersInputMock).toHaveBeenCalledWith(sanitizedFilters);
+    expect(startSearchFromFiltersMock).toHaveBeenCalledWith(
+      sanitizedFilters,
+      expect.objectContaining({
+        requestOwnerKey: "client-1",
+      }),
+    );
   });
 
   it("stops a running search through the delete route", async () => {

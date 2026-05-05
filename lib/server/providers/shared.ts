@@ -89,7 +89,31 @@ const placeholderProviderTitleComparables = new Set([
   "n a",
   "na",
   "job opening",
+  "dont see what youre looking for",
+  "do not see what you are looking for",
+  "cant find what youre looking for",
+  "general application",
+  "open application",
+  "spontaneous application",
+  "join our talent community",
+  "talent community",
+  "future opportunities",
+  "future opportunity",
+  "future openings",
+  "expression of interest",
 ]);
+
+const placeholderProviderTitlePatterns = [
+  /\bdo(?:n['’]?t| not) see what (?:you['’]?re|you are) looking for\b/i,
+  /\bcan['’]?t find what (?:you['’]?re|you are) looking for\b/i,
+  /\bgeneral application\b/i,
+  /\bopen application\b/i,
+  /\bspontaneous application\b/i,
+  /\bjoin (?:our )?talent (?:community|network)\b/i,
+  /\btalent (?:community|network|pool)\b/i,
+  /\bfuture opportunit(?:y|ies)\b/i,
+  /\bexpression of interest\b/i,
+];
 
 const placeholderCompanyComparables = new Set([
   "unknown",
@@ -659,7 +683,11 @@ function isPlaceholderProviderTitle(value: unknown) {
     return false;
   }
 
-  return placeholderProviderTitleComparables.has(normalizeComparableText(value));
+  const trimmed = value.trim();
+  return (
+    placeholderProviderTitleComparables.has(normalizeComparableText(trimmed)) ||
+    placeholderProviderTitlePatterns.some((pattern) => pattern.test(trimmed))
+  );
 }
 
 function isPlaceholderCompany(value: unknown) {

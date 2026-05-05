@@ -127,7 +127,7 @@ export type DatabaseAdapter = {
 export type PersistableJob = PersistableJobDocument;
 export type CrawlRunControlState = Pick<
   CrawlControlDocument,
-  "_id" | "crawlRunId" | "searchId" | "status" | "cancelRequestedAt" | "cancelReason" | "lastHeartbeatAt" | "finishedAt"
+  "_id" | "crawlRunId" | "searchId" | "ownerKey" | "status" | "cancelRequestedAt" | "cancelReason" | "lastHeartbeatAt" | "finishedAt"
 >;
 
 export type CrawlQueueState = Pick<
@@ -167,6 +167,12 @@ type IndexedJobDelta = {
   jobs: JobListing[];
 };
 
+type SearchSessionJobPage = {
+  cursor: number;
+  totalCount: number;
+  jobs: JobListing[];
+};
+
 export type PersistJobsWithStatsResult = {
   jobs: JobListing[];
   insertedCount: number;
@@ -195,6 +201,23 @@ export type SourceInventoryObservation = {
   status?: SourceInventoryRecord["status"];
   health?: SourceInventoryRecord["health"];
   nextEligibleAt?: string;
+};
+
+export type BackgroundIngestionHealthSnapshot = {
+  activeQueueEntries: number;
+  staleActiveQueueEntries: number;
+  runningCrawlRuns: number;
+  staleRunningCrawlRuns: number;
+  latestQueueHeartbeatAt?: string;
+  latestRunHeartbeatAt?: string;
+  inventorySources: number;
+  eligibleInventorySources: number;
+  inventoryByPlatform: Record<string, number>;
+  eligibleInventoryByPlatform: Record<string, number>;
+  providerSavedCounts: Record<string, number>;
+  providerFetchedCounts: Record<string, number>;
+  jobsUpdatedInLast24Hours: number;
+  indexedEventsInLast24Hours: number;
 };
 
 let hasWarnedMemoryFallback = false;
@@ -721,8 +744,110 @@ export class JobCrawlerRepository {
     return document ? parseStoredCrawlQueue(document) : null;
   }
 
+  async listActiveCrawlQueueEntries() {
+    const documents = await this.crawlQueue()
+      .find(
+        { status: { $in: ["queued", "running"] } },
+        { sort: { updatedAt: -1 } },
+      )
+      .toArray();
+
+    return documents.map((document) => parseStoredCrawlQueue(document));
+  }
+
+  async listStaleActiveCrawlQueueEntries(now: Date, staleAfterMs: number) {
+    return (await this.listActiveCrawlQueueEntries()).filter((entry) =>
+      isStaleCrawlQueueEntry(entry, now, staleAfterMs),
+    );
+  }
+
+  async listStaleRunningCrawlRuns(now: Date, staleAfterMs: number) {
+    const documents = await this.crawlRuns()
+      .find({ status: "running" }, { sort: { startedAt: -1 } })
+      .toArray();
+
+    return documents
+      .map((document) => parseStoredCrawlRun(document))
+      .filter((run) => isStaleCrawlRun(run, now, staleAfterMs));
+  }
+
   async hasActiveCrawlQueueEntryForSearch(searchId: string) {
     return Boolean(await this.getActiveCrawlQueueEntryForSearch(searchId));
+  }
+
+  async getBackgroundIngestionHealthSnapshot(
+    now: Date,
+    staleAfterMs: number,
+  ): Promise<BackgroundIngestionHealthSnapshot> {
+    const [
+      activeQueueEntries,
+      runningCrawlRuns,
+      inventory,
+      sourceResults,
+      recentJobs,
+      recentIndexedEvents,
+    ] = await Promise.all([
+      this.listActiveCrawlQueueEntries(),
+      this.crawlRuns()
+        .find({ status: "running" }, { sort: { startedAt: -1 } })
+        .toArray()
+        .then((documents) => documents.map((document) => parseStoredCrawlRun(document))),
+      this.listSourceInventory(),
+      this.crawlSourceResults().find({}).toArray(),
+      this.jobs()
+        .find({
+          $or: [
+            { firstSeenAt: { $gte: isoHoursAgo(now, 24) } },
+            { lastSeenAt: { $gte: isoHoursAgo(now, 24) } },
+            { updatedAt: { $gte: isoHoursAgo(now, 24) } },
+          ],
+        })
+        .toArray(),
+      this.indexedJobEvents()
+        .find({ createdAt: { $gte: isoHoursAgo(now, 24) } })
+        .toArray(),
+    ]);
+    const inventoryByPlatform: Record<string, number> = {};
+    const eligibleInventoryByPlatform: Record<string, number> = {};
+    let eligibleInventorySources = 0;
+
+    for (const record of inventory) {
+      incrementRecordCount(inventoryByPlatform, record.platform);
+      if (isInventoryRecordEligibleForHealthSnapshot(record, now)) {
+        eligibleInventorySources += 1;
+        incrementRecordCount(eligibleInventoryByPlatform, record.platform);
+      }
+    }
+
+    const providerSavedCounts: Record<string, number> = {};
+    const providerFetchedCounts: Record<string, number> = {};
+    for (const sourceResult of sourceResults.map((document) =>
+      parseStoredCrawlSourceResult(document),
+    )) {
+      incrementRecordCount(providerSavedCounts, sourceResult.provider, sourceResult.savedCount);
+      incrementRecordCount(providerFetchedCounts, sourceResult.provider, sourceResult.fetchedCount);
+    }
+
+    return {
+      activeQueueEntries: activeQueueEntries.length,
+      staleActiveQueueEntries: activeQueueEntries.filter((entry) =>
+        isStaleCrawlQueueEntry(entry, now, staleAfterMs),
+      ).length,
+      runningCrawlRuns: runningCrawlRuns.length,
+      staleRunningCrawlRuns: runningCrawlRuns.filter((run) =>
+        isStaleCrawlRun(run, now, staleAfterMs),
+      ).length,
+      latestQueueHeartbeatAt: latestHeartbeat(activeQueueEntries),
+      latestRunHeartbeatAt: latestHeartbeat(runningCrawlRuns),
+      inventorySources: inventory.length,
+      eligibleInventorySources,
+      inventoryByPlatform,
+      eligibleInventoryByPlatform,
+      providerSavedCounts,
+      providerFetchedCounts,
+      jobsUpdatedInLast24Hours: recentJobs.length,
+      indexedEventsInLast24Hours: recentIndexedEvents.length,
+    };
   }
 
   async finalizeCrawlRun(
@@ -1011,6 +1136,44 @@ export class JobCrawlerRepository {
     return searchSession?.lastEventSequence ?? 0;
   }
 
+  async getSearchSessionJobCount(searchSessionId: string) {
+    return this.getSearchSessionDeliveryCursor(searchSessionId);
+  }
+
+  async getSearchSessionJobPage(
+    searchSessionId: string,
+    afterSequence = 0,
+    limit = 50,
+  ): Promise<SearchSessionJobPage> {
+    const safeAfterSequence = Math.max(0, Math.floor(afterSequence));
+    const safeLimit = Math.max(1, Math.floor(limit));
+    const [totalCount, events] = await Promise.all([
+      this.getSearchSessionJobCount(searchSessionId),
+      this.searchSessionJobEvents()
+        .find(
+          {
+            searchSessionId,
+            sequence: { $gt: safeAfterSequence },
+          },
+          {
+            sort: { sequence: 1 },
+            limit: safeLimit,
+          },
+        )
+        .toArray(),
+    ]);
+    const parsedEvents = events.map((document) => parseStoredSearchSessionJobEvent(document));
+    const cursor =
+      parsedEvents[parsedEvents.length - 1]?.sequence ??
+      Math.min(safeAfterSequence, totalCount);
+
+    return {
+      cursor,
+      totalCount,
+      jobs: await this.loadJobsForOrderedJobIds(parsedEvents.map((event) => event.jobId)),
+    };
+  }
+
   async getIndexedJobDeliveryCursor() {
     const latestEvent = await this.indexedJobEvents().findOne(
       {},
@@ -1041,69 +1204,51 @@ export class JobCrawlerRepository {
       .toArray())
       .map((document) => parseStoredSearchSessionJobEvent(document));
 
-    if (events.length === 0) {
-      return [] as JobListing[];
-    }
-
-    const jobDocuments = await this.jobs()
-      .find({ _id: { $in: events.map((event) => event.jobId) } })
-      .toArray();
-    const jobsById = new Map(
-      jobDocuments.map((document) => {
-        const job = parseStoredJob(document);
-        return [job._id, job] as const;
-      }),
-    );
-
-    return dedupeStoredJobs(
-      events
-        .map((event) => jobsById.get(event.jobId))
-        .filter((job): job is JobListing => Boolean(job)),
-    );
+    return this.loadJobsForOrderedJobIds(events.map((event) => event.jobId));
   }
 
   async getJobsBySearchSessionAfterSequence(searchSessionId: string, afterSequence = 0) {
-    const allEvents = (await this.searchSessionJobEvents()
-      .find({ searchSessionId }, { sort: { sequence: 1 } })
-      .toArray())
-      .map((document) => parseStoredSearchSessionJobEvent(document));
-    const nextEvents = allEvents.filter((event) => event.sequence > afterSequence);
-    const cursor = allEvents[allEvents.length - 1]?.sequence ?? 0;
+    const [cursor, nextEvents] = await Promise.all([
+      this.getSearchSessionDeliveryCursor(searchSessionId),
+      this.searchSessionJobEvents()
+        .find(
+          {
+            searchSessionId,
+            sequence: { $gt: Math.max(0, Math.floor(afterSequence)) },
+          },
+          { sort: { sequence: 1 } },
+        )
+        .toArray(),
+    ]);
+    const parsedEvents = nextEvents.map((document) => parseStoredSearchSessionJobEvent(document));
 
-    if (nextEvents.length === 0) {
+    if (parsedEvents.length === 0) {
       return {
         cursor,
         jobs: [] as JobListing[],
       };
     }
 
-    const jobDocuments = await this.jobs()
-      .find({ _id: { $in: nextEvents.map((event) => event.jobId) } })
-      .toArray();
-    const jobsById = new Map(
-      jobDocuments.map((document) => {
-        const job = parseStoredJob(document);
-        return [job._id, job] as const;
-      }),
-    );
-
     return {
       cursor,
-      jobs: dedupeStoredJobs(
-        nextEvents
-          .map((event) => jobsById.get(event.jobId))
-          .filter((job): job is JobListing => Boolean(job)),
-      ),
+      jobs: await this.loadJobsForOrderedJobIds(parsedEvents.map((event) => event.jobId)),
     };
   }
 
   async getIndexedJobsAfterSequence(afterSequence = 0): Promise<IndexedJobDelta> {
-    const allEvents = (await this.indexedJobEvents()
-      .find({}, { sort: { sequence: 1 } })
-      .toArray())
-      .map((document) => parseStoredIndexedJobEvent(document));
-    const cursor = allEvents[allEvents.length - 1]?.sequence ?? 0;
-    const nextEvents = allEvents.filter((event) => event.sequence > afterSequence);
+    const [latestEvent, nextEventDocuments] = await Promise.all([
+      this.indexedJobEvents().findOne({}, { sort: { sequence: -1 } }),
+      this.indexedJobEvents()
+        .find(
+          {
+            sequence: { $gt: Math.max(0, Math.floor(afterSequence)) },
+          },
+          { sort: { sequence: 1 } },
+        )
+        .toArray(),
+    ]);
+    const cursor = latestEvent ? parseStoredIndexedJobEvent(latestEvent).sequence : 0;
+    const nextEvents = nextEventDocuments.map((document) => parseStoredIndexedJobEvent(document));
 
     if (nextEvents.length === 0) {
       return {
@@ -1119,8 +1264,23 @@ export class JobCrawlerRepository {
     const orderedEvents = Array.from(latestEventByJobId.values()).sort(
       (left, right) => left.sequence - right.sequence,
     );
+    const jobs = await this.loadJobsForOrderedJobIds(orderedEvents.map((event) => event.jobId));
+
+    return {
+      cursor,
+      jobs,
+    };
+  }
+
+  private async loadJobsForOrderedJobIds(jobIds: string[]) {
+    const uniqueJobIds = dedupeStrings(jobIds);
+
+    if (uniqueJobIds.length === 0) {
+      return [] as JobListing[];
+    }
+
     const jobDocuments = await this.jobs()
-      .find({ _id: { $in: orderedEvents.map((event) => event.jobId) } })
+      .find({ _id: { $in: uniqueJobIds } })
       .toArray();
     const jobsById = new Map(
       jobDocuments.map((document) => {
@@ -1129,14 +1289,11 @@ export class JobCrawlerRepository {
       }),
     );
 
-    return {
-      cursor,
-      jobs: dedupeStoredJobs(
-        orderedEvents
-          .map((event) => jobsById.get(event.jobId))
-          .filter((job): job is JobListing => Boolean(job)),
-      ),
-    };
+    return dedupeStoredJobs(
+      jobIds
+        .map((jobId) => jobsById.get(jobId))
+        .filter((job): job is JobListing => Boolean(job)),
+    );
   }
 
   async getJob(jobId: string) {
@@ -1383,6 +1540,9 @@ export class JobCrawlerRepository {
           lastSucceededAt: parsedExisting.lastSucceededAt,
           lastFailedAt: parsedExisting.lastFailedAt,
           nextEligibleAt: parsedExisting.nextEligibleAt ?? record.nextEligibleAt,
+          crawlLeaseOwnerKey: parsedExisting.crawlLeaseOwnerKey,
+          crawlLeaseAcquiredAt: parsedExisting.crawlLeaseAcquiredAt,
+          crawlLeaseExpiresAt: parsedExisting.crawlLeaseExpiresAt,
         });
         const { _id, ...updateFields } = merged;
         await this.sourceInventory().updateOne({ _id }, { $set: updateFields });
@@ -1430,14 +1590,99 @@ export class JobCrawlerRepository {
     return documents.map((document) => parseStoredSourceInventory(document));
   }
 
-  async recordSourceInventoryObservations(observations: SourceInventoryObservation[]) {
-    for (const observation of observations) {
-      const existing = await this.sourceInventory().findOne({ _id: observation.sourceId });
-      if (!existing) {
+  async claimSourceInventoryLeases(
+    sourceIds: string[],
+    input: {
+      ownerKey: string;
+      acquiredAt: string;
+      expiresAt: string;
+    },
+  ) {
+    const claimed: SourceInventoryRecord[] = [];
+
+    for (const sourceId of dedupeStrings(sourceIds)) {
+      const updateResult = (await this.sourceInventory().updateOne(
+        {
+          _id: sourceId,
+          $or: [
+            { crawlLeaseExpiresAt: { $exists: false } },
+            { crawlLeaseExpiresAt: null },
+            { crawlLeaseExpiresAt: { $lte: input.acquiredAt } },
+            { crawlLeaseOwnerKey: input.ownerKey },
+          ],
+        },
+        {
+          $set: {
+            crawlLeaseOwnerKey: input.ownerKey,
+            crawlLeaseAcquiredAt: input.acquiredAt,
+            crawlLeaseExpiresAt: input.expiresAt,
+          },
+        },
+      )) as { matchedCount?: number };
+      if ((updateResult.matchedCount ?? 0) === 0) {
         continue;
       }
 
-      const parsedExisting = parseStoredSourceInventory(existing);
+      const document = await this.sourceInventory().findOne({ _id: sourceId });
+      if (document) {
+        claimed.push(parseStoredSourceInventory(document));
+      }
+    }
+
+    return claimed;
+  }
+
+  async releaseSourceInventoryLeasesForOwner(ownerKey: string) {
+    const documents = await this.sourceInventory()
+      .find({ crawlLeaseOwnerKey: ownerKey })
+      .toArray();
+    const releasedAt = new Date().toISOString();
+
+    for (const document of documents) {
+      const parsed = parseStoredSourceInventory(document);
+      await this.sourceInventory().updateOne(
+        { _id: parsed._id, crawlLeaseOwnerKey: ownerKey },
+        {
+          $set: {
+            crawlLeaseOwnerKey: null,
+            crawlLeaseAcquiredAt: null,
+            crawlLeaseExpiresAt: null,
+            lastRefreshedAt: parsed.lastRefreshedAt ?? releasedAt,
+          },
+        },
+      );
+    }
+
+    return documents.length;
+  }
+
+  async recordSourceInventoryObservations(observations: SourceInventoryObservation[]) {
+    if (observations.length === 0) {
+      return this.listSourceInventory();
+    }
+
+    const sourceIds = observations.map((obs) => obs.sourceId);
+    const existingDocuments = await this.sourceInventory()
+      .find({ _id: { $in: sourceIds } })
+      .toArray();
+    const existingById = new Map<string, SourceInventoryRecord>();
+    for (const doc of existingDocuments) {
+      const parsed = parseStoredSourceInventory(doc as Record<string, unknown>);
+      existingById.set(parsed._id, parsed);
+    }
+
+    const intervalMs = getEnv().BACKGROUND_INGESTION_INTERVAL_MS;
+    const bulkOps: Array<
+      | { insertOne: { document: SourceInventoryRecord } }
+      | { updateOne: { filter: Record<string, unknown>; update: Record<string, unknown> } }
+    > = [];
+
+    for (const observation of observations) {
+      const parsedExisting = existingById.get(observation.sourceId);
+      if (!parsedExisting) {
+        continue;
+      }
+
       const succeeded = observation.succeeded;
       const nextFailureCount = succeeded
           ? parsedExisting.failureCount
@@ -1458,51 +1703,72 @@ export class JobCrawlerRepository {
         resolveObservedSourceNextEligibleAt({
               record: parsedExisting,
               observedAt: observation.observedAt,
-              intervalMs: getEnv().BACKGROUND_INGESTION_INTERVAL_MS,
+              intervalMs,
               health,
               consecutiveFailures: nextConsecutiveFailures,
               succeeded,
             });
-      const merged = sourceInventoryRecordSchema.parse({
-        ...parsedExisting,
+      const { _id, ...updateFields } = parsedExisting;
+      const mergedUpdate: Record<string, unknown> = {
+        ...updateFields,
         status,
         health,
         failureCount: nextFailureCount,
         consecutiveFailures: nextConsecutiveFailures,
         lastFailureReason: succeeded
-          ? undefined
-          : observation.failureReason ?? parsedExisting.lastFailureReason,
+          ? null
+          : observation.failureReason ?? parsedExisting.lastFailureReason ?? null,
         lastSeenAt: observation.observedAt,
         lastCrawledAt: observation.observedAt,
-        lastSucceededAt: succeeded ? observation.observedAt : parsedExisting.lastSucceededAt,
-        lastFailedAt:
-          !succeeded ? observation.observedAt : parsedExisting.lastFailedAt,
+        lastSucceededAt: succeeded ? observation.observedAt : parsedExisting.lastSucceededAt ?? null,
+        lastFailedAt: !succeeded ? observation.observedAt : parsedExisting.lastFailedAt ?? null,
         nextEligibleAt,
+        crawlLeaseOwnerKey: null,
+        crawlLeaseAcquiredAt: null,
+        crawlLeaseExpiresAt: null,
+      };
+
+      bulkOps.push({
+        updateOne: {
+          filter: { _id },
+          update: { $set: mergedUpdate },
+        },
       });
-      const { _id, ...updateFields } = merged;
-      if (succeeded) {
-        (updateFields as Record<string, unknown>).lastFailureReason = null;
-      }
-      await this.sourceInventory().updateOne({ _id }, { $set: updateFields });
+
       console.info("[inventory:observation]", {
         sourceId: observation.sourceId,
-        provider: merged.platform,
+        provider: parsedExisting.platform,
         succeeded: observation.succeeded,
         errorType: observation.errorType,
-        status: merged.status,
-        health: merged.health,
-        lastFailureReason: merged.lastFailureReason,
-        nextEligibleAt: merged.nextEligibleAt,
+        status,
+        health,
+        lastFailureReason: mergedUpdate.lastFailureReason,
+        nextEligibleAt,
       });
       if (!succeeded) {
         console.warn("[inventory:timeout-observation]", {
           sourceId: observation.sourceId,
-          provider: merged.platform,
+          provider: parsedExisting.platform,
           errorType: observation.errorType,
-          health: merged.health,
-          lastFailureReason: merged.lastFailureReason,
-          nextEligibleAt: merged.nextEligibleAt,
+          health,
+          lastFailureReason: mergedUpdate.lastFailureReason,
+          nextEligibleAt,
         });
+      }
+    }
+
+    if (bulkOps.length > 0) {
+      const collection = this.sourceInventory();
+      if (collection.bulkWrite) {
+        await collection.bulkWrite(bulkOps as Array<
+          { updateOne: { filter: Record<string, unknown>; update: Record<string, unknown>; upsert?: boolean } }
+        >);
+      } else {
+        for (const op of bulkOps) {
+          if ("updateOne" in op) {
+            await collection.updateOne(op.updateOne.filter, op.updateOne.update);
+          }
+        }
       }
     }
 
@@ -1535,6 +1801,8 @@ export class JobCrawlerRepository {
       return lookup;
     }
 
+    // Build a single $or query across all dedupe fields to reduce round-trips.
+    const orClauses: Array<Record<string, unknown>> = [];
     const canonicalUrls = collectUniqueStrings(unresolvedJobs.map((job) => job.canonicalUrl));
     const resolvedUrls = collectUniqueStrings(unresolvedJobs.map((job) => job.resolvedUrl));
     const applyUrls = collectUniqueStrings(unresolvedJobs.map((job) => job.applyUrl));
@@ -1547,19 +1815,34 @@ export class JobCrawlerRepository {
         .filter((job) => !buildCanonicalJobIdentity(job).hasStrongIdentity)
         .map((job) => job.contentFingerprint),
     );
-    const legacyMatches = await Promise.all([
-      fetchJobsByField(this.jobs(), "canonicalUrl", canonicalUrls),
-      fetchJobsByField(this.jobs(), "resolvedUrl", resolvedUrls),
-      fetchJobsByField(this.jobs(), "applyUrl", applyUrls),
-      fetchJobsByField(this.jobs(), "sourceUrl", sourceUrls),
-      fetchJobsByField(this.jobs(), "sourceLookupKeys", sourceLookupKeys),
-      fetchJobsByField(this.jobs(), "contentFingerprint", contentFingerprints),
-    ]);
 
-    legacyMatches
-      .flat()
-      .map((document) => parseStoredJob(document))
-      .forEach((job) => indexJobForBatchLookup(lookup, job));
+    if (canonicalUrls.length > 0) {
+      orClauses.push({ canonicalUrl: { $in: canonicalUrls } });
+    }
+    if (resolvedUrls.length > 0) {
+      orClauses.push({ resolvedUrl: { $in: resolvedUrls } });
+    }
+    if (applyUrls.length > 0) {
+      orClauses.push({ applyUrl: { $in: applyUrls } });
+    }
+    if (sourceUrls.length > 0) {
+      orClauses.push({ sourceUrl: { $in: sourceUrls } });
+    }
+    if (sourceLookupKeys.length > 0) {
+      orClauses.push({ sourceLookupKeys: { $in: sourceLookupKeys } });
+    }
+    if (contentFingerprints.length > 0) {
+      orClauses.push({ contentFingerprint: { $in: contentFingerprints } });
+    }
+
+    if (orClauses.length > 0) {
+      const legacyMatches = await this.jobs()
+        .find({ $or: orClauses })
+        .toArray();
+      legacyMatches
+        .map((document) => parseStoredJob(document as Record<string, unknown>))
+        .forEach((job) => indexJobForBatchLookup(lookup, job));
+    }
 
     return lookup;
   }
@@ -2127,6 +2410,91 @@ function latestDate(left?: string, right?: string) {
 
 function dedupeStrings(values: string[]) {
   return Array.from(new Set(values));
+}
+
+function isoHoursAgo(now: Date, hours: number) {
+  return new Date(now.getTime() - hours * 60 * 60 * 1000).toISOString();
+}
+
+function incrementRecordCount(
+  counts: Record<string, number>,
+  key: string | undefined,
+  amount = 1,
+) {
+  const normalizedKey = key && key.trim() ? key : "unknown";
+  counts[normalizedKey] = (counts[normalizedKey] ?? 0) + amount;
+}
+
+function activeQueueTimestamp(entry: CrawlQueueDocument) {
+  return entry.lastHeartbeatAt ?? entry.updatedAt ?? entry.startedAt ?? entry.queuedAt;
+}
+
+function activeRunTimestamp(run: CrawlRun) {
+  return run.lastHeartbeatAt ?? run.finishedAt ?? run.startedAt;
+}
+
+function isStaleTimestamp(value: string | undefined, now: Date, staleAfterMs: number) {
+  if (!value) {
+    return true;
+  }
+
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    return true;
+  }
+
+  return now.getTime() - parsed > staleAfterMs;
+}
+
+function isStaleCrawlQueueEntry(
+  entry: CrawlQueueDocument,
+  now: Date,
+  staleAfterMs: number,
+) {
+  if (entry.status !== "queued" && entry.status !== "running") {
+    return false;
+  }
+
+  return isStaleTimestamp(activeQueueTimestamp(entry), now, staleAfterMs);
+}
+
+function isStaleCrawlRun(run: CrawlRun, now: Date, staleAfterMs: number) {
+  if (run.status !== "running") {
+    return false;
+  }
+
+  return isStaleTimestamp(activeRunTimestamp(run), now, staleAfterMs);
+}
+
+function latestHeartbeat(
+  entries: Array<CrawlQueueDocument | CrawlRun>,
+) {
+  const timestamps = entries
+    .map((entry) =>
+      "queuedAt" in entry
+        ? activeQueueTimestamp(entry)
+        : activeRunTimestamp(entry),
+    )
+    .filter((value): value is string => Boolean(value))
+    .sort();
+
+  return timestamps[timestamps.length - 1];
+}
+
+function isInventoryRecordEligibleForHealthSnapshot(
+  record: SourceInventoryRecord,
+  now: Date,
+) {
+  if (record.status === "disabled" || record.status === "paused") {
+    return false;
+  }
+
+  if (!record.nextEligibleAt) {
+    return true;
+  }
+
+  const parsed = Date.parse(record.nextEligibleAt);
+  return !Number.isFinite(parsed) || parsed <= now.getTime();
 }
 
 function pickPreferredValue<T>(preferred: T | undefined, alternate: T | undefined) {
@@ -3243,6 +3611,9 @@ function normalizeStoredSourceInventoryFields(document: Record<string, unknown>)
     lastSucceededAt: normalizeOptionalDocumentString(normalizedDocument.lastSucceededAt),
     lastFailedAt: normalizeOptionalDocumentString(normalizedDocument.lastFailedAt),
     nextEligibleAt: normalizeOptionalDocumentString(normalizedDocument.nextEligibleAt),
+    crawlLeaseOwnerKey: normalizeOptionalDocumentString(normalizedDocument.crawlLeaseOwnerKey),
+    crawlLeaseAcquiredAt: normalizeOptionalDocumentString(normalizedDocument.crawlLeaseAcquiredAt),
+    crawlLeaseExpiresAt: normalizeOptionalDocumentString(normalizedDocument.crawlLeaseExpiresAt),
   };
 }
 

@@ -552,14 +552,16 @@ describe("recurring background ingestion", () => {
     );
     expect(indexedResult.diagnostics.session).toMatchObject({
       indexedResultsCount: indexedResult.jobs.length,
-      supplementalQueued: false,
+      supplementalQueued: true,
+      targetedReplenishmentQueued: true,
       backgroundRefreshSuggested: true,
-      backgroundRefreshQueued: false,
-      triggerReason: "insufficient_indexed_coverage_background_requested",
+      backgroundRefreshQueued: true,
+      triggerReason: "insufficient_indexed_coverage_targeted_replenishment",
       backgroundIngestion: expect.objectContaining({
         status: "not_requested",
       }),
     });
+    await waitForRunCompletion(repository, indexedResult.crawlRun._id);
   });
 
   it("starts immediately and repeats on the configured interval", async () => {
@@ -2539,6 +2541,202 @@ describe("recurring background ingestion", () => {
     expect(recoveredQueueEntry?.status).toBe("aborted");
     expect(newRun?.status).toBe("completed");
     expect(triggered.crawlRunId).not.toBe(staleRun._id);
+  });
+
+  it("recovers stale active background queue entries before selecting the next profile", async () => {
+    const repository = new JobCrawlerRepository(new MongoLikeNullDb());
+    const now = new Date("2026-04-15T12:00:00.000Z");
+    const staleStartedAt = "2026-04-15T09:00:00.000Z";
+    const staleHeartbeatAt = "2026-04-15T09:10:00.000Z";
+    const [systemProfile] = selectBackgroundSystemSearchProfiles({
+      now,
+      intervalMs: 60_000,
+      maxProfiles: 1,
+    });
+    if (!systemProfile) {
+      throw new Error("Expected a recurring ingestion system profile.");
+    }
+
+    const staleSearch = await repository.createSearch(
+      { title: "stale blocked profile", country: "United States", crawlMode: "balanced" },
+      staleStartedAt,
+      {
+        systemProfileId: "stale-blocking-profile",
+        systemProfileLabel: "Stale Blocking Profile",
+      },
+    );
+    const staleSession = await repository.createSearchSession(staleSearch._id, staleStartedAt, {
+      status: "running",
+    });
+    const staleRun = await repository.createCrawlRun(staleSearch._id, staleStartedAt, {
+      stage: "discovering",
+      validationMode: "deferred",
+      searchSessionId: staleSession._id,
+    });
+    await repository.enqueueCrawlRun({
+      crawlRunId: staleRun._id,
+      searchId: staleSearch._id,
+      searchSessionId: staleSession._id,
+      ownerKey: backgroundIngestionOwnerKey,
+      queuedAt: staleStartedAt,
+    });
+    await repository.markCrawlRunStarted(staleRun._id, {
+      startedAt: staleStartedAt,
+      ownerKey: backgroundIngestionOwnerKey,
+      workerId: "worker:globally-stale",
+    });
+    await repository.heartbeatCrawlRun(staleRun._id, staleHeartbeatAt);
+
+    await repository.upsertSourceInventory([
+      createInventoryRecord({
+        token: "globalrecoveryco",
+        companyHint: "Global Recovery Co",
+        nextEligibleAt: "2026-04-15T11:00:00.000Z",
+      }),
+    ]);
+
+    const provider = createStubProvider("greenhouse", async () => ({
+      provider: "greenhouse",
+      status: "success",
+      sourceCount: 1,
+      fetchedCount: 1,
+      matchedCount: 1,
+      warningCount: 0,
+      jobs: [
+        createProviderJob({
+          title: systemProfile.filters.title,
+          sourceJobId: "global-recovery-job",
+        }),
+      ],
+    }));
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers: [provider],
+      now,
+      staleAfterMs: 30 * 60_000,
+      maxSources: 1,
+      schedulingIntervalMs: 60_000,
+      runTimeoutMs: 2_000,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse"]),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected global stale recovery to unblock the cycle.");
+    }
+
+    const completedRun = await waitForRunCompletion(repository, triggered.crawlRunId);
+    const recoveredRun = await repository.getCrawlRun(staleRun._id);
+    const recoveredQueueEntry = await repository.getCrawlQueueEntryByRunId(staleRun._id);
+
+    expect(recoveredRun?.status).toBe("aborted");
+    expect(recoveredQueueEntry?.status).toBe("aborted");
+    expect(completedRun.diagnostics.backgroundHealth).toMatchObject({
+      recoveredStaleQueueEntries: 1,
+      recoveredStaleCrawlRuns: 1,
+      staleActiveQueueEntries: 0,
+    });
+    expect(triggered.crawlRunId).not.toBe(staleRun._id);
+  });
+
+  it("skips actively leased inventory sources and caps unknown company pages behind ATS sources", async () => {
+    const repository = new JobCrawlerRepository(new MongoLikeNullDb());
+    const now = new Date("2026-04-15T12:00:00.000Z");
+    const greenhouse = createInventoryRecord({
+      token: "efficientats",
+      companyHint: "Efficient ATS",
+      inventoryRank: 0,
+      nextEligibleAt: "2026-04-15T11:00:00.000Z",
+    });
+    const leased = createInventoryRecord({
+      token: "leasedats",
+      companyHint: "Leased ATS",
+      inventoryRank: 1,
+      nextEligibleAt: "2026-04-15T11:00:00.000Z",
+    });
+    const companyPages = Array.from({ length: 6 }, (_, index) =>
+      toSourceInventoryRecord(
+        classifySourceCandidate({
+          url: `https://company-${index}.example/careers`,
+          companyHint: `Company ${index}`,
+          pageType: "html_page",
+          confidence: "medium",
+          discoveryMethod: "public_search",
+        }),
+        {
+          now: "2026-04-10T00:00:00.000Z",
+          inventoryOrigin: "public_search",
+          inventoryRank: 50_000 + index,
+        },
+      ),
+    );
+
+    await repository.upsertSourceInventory([greenhouse, leased, ...companyPages]);
+    await repository.claimSourceInventoryLeases([leased._id], {
+      ownerKey: "other-worker",
+      acquiredAt: now.toISOString(),
+      expiresAt: "2026-04-15T12:30:00.000Z",
+    });
+
+    const seenSources: string[] = [];
+    const providers = (["greenhouse", "company_page"] as const).map((platform) =>
+      createStubProvider(platform, async (_context, sources) => {
+        seenSources.push(...sources.map((source) => source.id));
+        return {
+          provider: platform,
+          status: "success",
+          sourceCount: sources.length,
+          fetchedCount: sources.length,
+          matchedCount: sources.length,
+          warningCount: 0,
+          jobs: sources.map((source, index) =>
+            createProviderJob({
+              title: platform === "greenhouse" ? "Software Engineer" : "Product Manager",
+              company: source.companyHint ?? platform,
+              sourcePlatform: platform,
+              sourceJobId: `${platform}-${index}`,
+              sourceUrl: `${source.url.replace(/\/$/, "")}/jobs/${index}`,
+              applyUrl: `${source.url.replace(/\/$/, "")}/jobs/${index}/apply`,
+              canonicalUrl: `${source.url.replace(/\/$/, "")}/jobs/${index}`,
+            }),
+          ),
+        };
+      }),
+    );
+
+    const triggered = await triggerRecurringBackgroundIngestion({
+      repository,
+      providers,
+      now,
+      maxSources: 4,
+      schedulingIntervalMs: 60_000,
+      runTimeoutMs: 2_000,
+      refreshInventory: () => repository.listSourceInventory(["greenhouse", "company_page"]),
+    });
+
+    expect(triggered.status).toBe("started");
+    if (triggered.status !== "started") {
+      throw new Error("Expected recurring ingestion to start.");
+    }
+
+    const crawlRun = await waitForRunCompletion(repository, triggered.crawlRunId);
+    const selectedIds = crawlRun.diagnostics.inventoryScheduling?.selectedSourceIds ?? [];
+
+    expect(selectedIds).toContain(greenhouse._id);
+    expect(selectedIds).not.toContain(leased._id);
+    expect(selectedIds.filter((sourceId) => sourceId.startsWith("company_page:"))).toHaveLength(1);
+    expect(crawlRun.diagnostics.inventoryScheduling).toMatchObject({
+      skippedByReason: expect.objectContaining({
+        active_lease: 1,
+        unknown_company_page_cap: expect.any(Number),
+      }),
+      selectedByPlatform: {
+        greenhouse: 1,
+        company_page: 1,
+      },
+    });
+    expect(seenSources).toEqual(expect.arrayContaining([greenhouse._id]));
   });
 
   it(

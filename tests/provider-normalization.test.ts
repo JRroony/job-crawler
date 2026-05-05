@@ -103,6 +103,22 @@ describe("provider normalization", () => {
       ok: false,
       drop: { reason: "seed_invalid_placeholder_title" },
     });
+    expect(
+      validateProviderSeedCandidate(
+        providerSeed({ title: "Don’t see what you’re looking for?" }),
+      ),
+    ).toMatchObject({
+      ok: false,
+      drop: { reason: "seed_invalid_placeholder_title" },
+    });
+    expect(validateProviderSeedCandidate(providerSeed({ title: "Join our Talent Community" }))).toMatchObject({
+      ok: false,
+      drop: { reason: "seed_invalid_placeholder_title" },
+    });
+    expect(validateProviderSeedCandidate(providerSeed({ title: "General Application" }))).toMatchObject({
+      ok: false,
+      drop: { reason: "seed_invalid_placeholder_title" },
+    });
     expect(validateProviderSeedCandidate(providerSeed({ company: "" }))).toMatchObject({
       ok: false,
       drop: { reason: "seed_invalid_missing_company" },

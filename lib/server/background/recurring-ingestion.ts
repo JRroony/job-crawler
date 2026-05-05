@@ -34,6 +34,7 @@ import type {
   ProviderSourceObservation,
 } from "@/lib/server/providers/types";
 import type {
+  BackgroundIngestionHealthSnapshot,
   JobCrawlerRepository,
   PersistableJob,
   PersistJobsWithStatsResult,
@@ -41,6 +42,8 @@ import type {
 } from "@/lib/server/db/repository";
 import type {
   CrawlDiagnostics,
+  CrawlQueueDocument,
+  CrawlRun,
   CrawlRunStatus,
   CrawlSourceResult,
   SearchDocument,
@@ -267,6 +270,33 @@ export async function triggerRecurringBackgroundIngestion(
   const repository = repositoryResolution.repository;
 
   const now = runtime.now ?? new Date();
+  const staleAfterMs = Math.max(
+    1,
+    Math.floor(runtime.staleAfterMs ?? getEnv().BACKGROUND_INGESTION_STALE_AFTER_MS),
+  );
+  const healthBeforeRecovery = await repository.getBackgroundIngestionHealthSnapshot(
+    now,
+    staleAfterMs,
+  );
+  const staleRecovery = await recoverStaleBackgroundRunsBeforeCycle(
+    repository,
+    now,
+    staleAfterMs,
+  );
+  const healthAfterRecovery = await repository.getBackgroundIngestionHealthSnapshot(
+    now,
+    staleAfterMs,
+  );
+  const backgroundHealth = {
+    ...healthAfterRecovery,
+    recoveredStaleQueueEntries: staleRecovery.queueEntriesRecovered,
+    recoveredStaleCrawlRuns: staleRecovery.crawlRunsRecovered,
+  };
+  console.info("[background-ingestion:health]", {
+    before: healthBeforeRecovery,
+    after: backgroundHealth,
+    staleAfterMs,
+  });
   const schedulingIntervalMs = Math.max(
     1,
     Math.floor(runtime.schedulingIntervalMs ?? env.BACKGROUND_INGESTION_INTERVAL_MS),
@@ -343,16 +373,14 @@ export async function triggerRecurringBackgroundIngestion(
       now,
       systemProfile,
       schedulingIntervalMs,
-      staleAfterMs: Math.max(
-        1,
-        Math.floor(runtime.staleAfterMs ?? env.BACKGROUND_INGESTION_STALE_AFTER_MS),
-      ),
+      staleAfterMs,
       runTimeoutMs,
       maxSources: sourceBudgetPerProfile,
       maxSourcesPerProvider,
       providerTimeoutMs,
       sourceTimeoutMs,
       providerConcurrency,
+      backgroundHealth,
       cycleDiagnostics: {
         selectedProfiles: systemProfiles.length,
         selectedProfileIds: systemProfiles.map((profile) => profile.id),
@@ -436,6 +464,10 @@ async function startRecurringBackgroundProfileIngestion(input: {
   providerTimeoutMs: number;
   sourceTimeoutMs: number;
   providerConcurrency: number;
+  backgroundHealth?: BackgroundIngestionHealthSnapshot & {
+    recoveredStaleQueueEntries: number;
+    recoveredStaleCrawlRuns: number;
+  };
   cycleDiagnostics: NonNullable<CrawlDiagnostics["backgroundCycle"]>;
 }): Promise<
   | { status: "started"; searchId: string; crawlRunId: string; systemProfileId: string }
@@ -454,6 +486,7 @@ async function startRecurringBackgroundProfileIngestion(input: {
     providerTimeoutMs,
     sourceTimeoutMs,
     providerConcurrency,
+    backgroundHealth,
     cycleDiagnostics,
   } = input;
   const search = await ensureBackgroundSearch(
@@ -517,6 +550,7 @@ async function startRecurringBackgroundProfileIngestion(input: {
           searchSession,
           crawlRunId: crawlRun._id,
           systemProfile,
+          ownerKey,
         },
         {
           repository,
@@ -531,6 +565,7 @@ async function startRecurringBackgroundProfileIngestion(input: {
           sourceTimeoutMs,
           providerConcurrency,
           schedulingIntervalMs,
+          backgroundHealth,
           cycleDiagnostics: {
             ...cycleDiagnostics,
             startedRuns: 1,
@@ -619,6 +654,7 @@ async function executeRecurringInventoryIngestion(
     searchSession: SearchSessionDocument;
     crawlRunId: string;
     systemProfile: SystemSearchProfile;
+    ownerKey: string;
   },
   runtime: {
     repository: JobCrawlerRepository;
@@ -633,6 +669,10 @@ async function executeRecurringInventoryIngestion(
     sourceTimeoutMs: number;
     providerConcurrency: number;
     schedulingIntervalMs: number;
+    backgroundHealth?: BackgroundIngestionHealthSnapshot & {
+      recoveredStaleQueueEntries: number;
+      recoveredStaleCrawlRuns: number;
+    };
     cycleDiagnostics?: NonNullable<CrawlDiagnostics["backgroundCycle"]>;
     refreshInventory?: (runtime: {
       repository: JobCrawlerRepository;
@@ -857,6 +897,7 @@ async function executeRecurringInventoryIngestion(
 
   try {
     diagnostics.backgroundCycle = runtime.cycleDiagnostics;
+    diagnostics.backgroundHealth = runtime.backgroundHealth;
     diagnostics.systemProfile = {
       id: target.systemProfile.id,
       label: target.systemProfile.label,
@@ -932,9 +973,25 @@ async function executeRecurringInventoryIngestion(
       intervalMs: runtime.schedulingIntervalMs,
       prioritySourceIds: inventoryExpansion.diagnostics.newSourceIds,
     });
-    diagnostics.inventoryScheduling = selectionPlan.diagnostics;
-    const selectionSkippedReason = resolveBackgroundSelectionSkippedReason(
+    const leaseExpiresAt = new Date(
+      runtime.now.getTime() + runtime.runTimeoutMs + getEnv().BACKGROUND_INGESTION_STALE_AFTER_MS,
+    ).toISOString();
+    const claimedSelectedRecords = await repository.claimSourceInventoryLeases(
+      selectionPlan.selectedRecords.map((record) => record._id),
+      {
+        ownerKey: target.ownerKey,
+        acquiredAt: runtime.now.toISOString(),
+        expiresAt: leaseExpiresAt,
+      },
+    );
+    const selectionDiagnostics = withClaimedInventorySelectionDiagnostics(
       selectionPlan.diagnostics,
+      claimedSelectedRecords,
+      selectionPlan.selectedRecords.length - claimedSelectedRecords.length,
+    );
+    diagnostics.inventoryScheduling = selectionDiagnostics;
+    const selectionSkippedReason = resolveBackgroundSelectionSkippedReason(
+      selectionDiagnostics,
       inventoryExpansion.diagnostics.skippedReason,
     );
     if (selectionSkippedReason) {
@@ -946,9 +1003,9 @@ async function executeRecurringInventoryIngestion(
       );
     }
     const selectedRecordById = new Map(
-      selectionPlan.selectedRecords.map((record) => [record._id, record] as const),
+      claimedSelectedRecords.map((record) => [record._id, record] as const),
     );
-    const inventorySources = selectionPlan.selectedRecords.map(toDiscoveredSourceFromInventory);
+    const inventorySources = claimedSelectedRecords.map(toDiscoveredSourceFromInventory);
     const selectedByProvider = providers.reduce<Record<string, number>>((counts, provider) => {
       counts[provider.provider] = inventorySources.filter((source) =>
         provider.supportsSource(source),
@@ -956,7 +1013,7 @@ async function executeRecurringInventoryIngestion(
       return counts;
     }, {});
     diagnostics.inventoryScheduling = {
-      ...selectionPlan.diagnostics,
+      ...selectionDiagnostics,
       selectedByProvider,
     };
 
@@ -986,22 +1043,24 @@ async function executeRecurringInventoryIngestion(
 
     console.info("[background-ingestion:source-selection]", {
       systemProfileId: target.systemProfile.id,
-      inventorySources: selectionPlan.diagnostics.inventorySources,
-      crawlableSources: selectionPlan.diagnostics.crawlableSources,
-      eligibleSources: selectionPlan.diagnostics.eligibleSources,
-      selectedSources: selectionPlan.diagnostics.selectedSources,
-      inventoryByPlatform: selectionPlan.diagnostics.inventoryByPlatform,
-      eligibleByPlatform: selectionPlan.diagnostics.eligibleByPlatform,
-      skippedByReason: selectionPlan.diagnostics.skippedByReason,
-      skippedByPlatformReason: selectionPlan.diagnostics.skippedByPlatformReason,
-      freshnessBuckets: selectionPlan.diagnostics.freshnessBuckets,
-      selectedByPlatform: selectionPlan.diagnostics.selectedByPlatform,
-      platformSelectionBudgets: selectionPlan.diagnostics.platformSelectionBudgets,
+      inventorySources: selectionDiagnostics.inventorySources,
+      crawlableSources: selectionDiagnostics.crawlableSources,
+      eligibleSources: selectionDiagnostics.eligibleSources,
+      selectedSources: selectionDiagnostics.selectedSources,
+      inventoryByPlatform: selectionDiagnostics.inventoryByPlatform,
+      eligibleByPlatform: selectionDiagnostics.eligibleByPlatform,
+      skippedByReason: selectionDiagnostics.skippedByReason,
+      skippedByPlatformReason: selectionDiagnostics.skippedByPlatformReason,
+      freshnessBuckets: selectionDiagnostics.freshnessBuckets,
+      selectedByPlatform: selectionDiagnostics.selectedByPlatform,
+      platformSelectionBudgets: selectionDiagnostics.platformSelectionBudgets,
       selectedByProvider,
-      selectedByHealth: selectionPlan.diagnostics.selectedByHealth,
-      selectedSourceIds: selectionPlan.diagnostics.selectedSourceIds,
-      skippedSourceSamples: selectionPlan.diagnostics.skippedSourceSamples,
+      selectedByHealth: selectionDiagnostics.selectedByHealth,
+      selectedSourceIds: selectionDiagnostics.selectedSourceIds,
+      skippedSourceSamples: selectionDiagnostics.skippedSourceSamples,
       skippedReason: selectionSkippedReason,
+      leaseOwnerKey: target.ownerKey,
+      leaseExpiresAt,
     });
 
     await repository.updateCrawlRunProgress(target.crawlRunId, {
@@ -1411,6 +1470,7 @@ async function executeRecurringInventoryIngestion(
   } finally {
     clearTimeout(timeoutHandle);
     runController.cleanup();
+    await repository.releaseSourceInventoryLeasesForOwner(target.ownerKey);
   }
 }
 
@@ -1745,11 +1805,51 @@ function resolveBackgroundSelectionSkippedReason(
     return "no_eligible_sources";
   }
 
+  if ((diagnostics.skippedByReason.active_lease ?? 0) > 0) {
+    return "active_lease";
+  }
+
   if ((diagnostics.skippedByReason.capacity_deprioritized ?? 0) > 0) {
     return "capacity_deprioritized";
   }
 
   return expansionSkippedReason ?? "no_eligible_sources";
+}
+
+function withClaimedInventorySelectionDiagnostics(
+  diagnostics: NonNullable<CrawlDiagnostics["inventoryScheduling"]>,
+  claimedRecords: SourceInventoryRecord[],
+  leaseContentionCount: number,
+): NonNullable<CrawlDiagnostics["inventoryScheduling"]> {
+  const selectedByPlatform: Record<string, number> = {};
+  const selectedByHealth: Record<string, number> = {};
+
+  for (const record of claimedRecords) {
+    incrementLocalCount(selectedByPlatform, record.platform);
+    incrementLocalCount(selectedByHealth, record.health);
+  }
+
+  const skippedByReason = { ...diagnostics.skippedByReason };
+  if (leaseContentionCount > 0) {
+    skippedByReason.active_lease = (skippedByReason.active_lease ?? 0) + leaseContentionCount;
+  }
+
+  return {
+    ...diagnostics,
+    selectedSources: claimedRecords.length,
+    selectedByPlatform,
+    selectedByHealth,
+    selectedSourceIds: claimedRecords.slice(0, 12).map((record) => record._id),
+    skippedByReason,
+    skippedSourceSamples:
+      leaseContentionCount > 0
+        ? [...diagnostics.skippedSourceSamples, "source_inventory:active_lease"].slice(0, 12)
+        : diagnostics.skippedSourceSamples,
+  };
+}
+
+function incrementLocalCount(counts: Record<string, number>, key: string) {
+  counts[key] = (counts[key] ?? 0) + 1;
 }
 
 async function resolveDurableBackgroundRepository(runtime: BackgroundIngestionRuntime): Promise<
@@ -1937,6 +2037,166 @@ async function recoverStaleBackgroundRunIfNeeded(
     status: "aborted",
     finishedAt: now.toISOString(),
   });
+  if (activeQueueEntry.ownerKey) {
+    await repository.releaseSourceInventoryLeasesForOwner(activeQueueEntry.ownerKey);
+  }
+}
+
+async function recoverStaleBackgroundRunsBeforeCycle(
+  repository: JobCrawlerRepository,
+  now: Date,
+  staleAfterMs: number,
+) {
+  const staleQueueEntries = await repository.listStaleActiveCrawlQueueEntries(
+    now,
+    staleAfterMs,
+  );
+  const recoveredRunIds = new Set<string>();
+  let queueEntriesRecovered = 0;
+  let crawlRunsRecovered = 0;
+
+  for (const queueEntry of staleQueueEntries) {
+    const recovered = await recoverStaleCrawlQueueEntry(queueEntry, repository, now);
+    queueEntriesRecovered += 1;
+    if (recovered) {
+      recoveredRunIds.add(queueEntry.crawlRunId);
+      crawlRunsRecovered += 1;
+    }
+  }
+
+  const staleRunningRuns = await repository.listStaleRunningCrawlRuns(now, staleAfterMs);
+  for (const run of staleRunningRuns) {
+    if (recoveredRunIds.has(run._id)) {
+      continue;
+    }
+
+    const recovered = await recoverStaleCrawlRun(run, repository, now);
+    if (recovered) {
+      recoveredRunIds.add(run._id);
+      crawlRunsRecovered += 1;
+    }
+  }
+
+  if (queueEntriesRecovered > 0 || crawlRunsRecovered > 0) {
+    console.warn("[background-ingestion:stale-recovery]", {
+      queueEntriesRecovered,
+      crawlRunsRecovered,
+      staleAfterMs,
+      recoveredAt: now.toISOString(),
+    });
+  }
+
+  return {
+    queueEntriesRecovered,
+    crawlRunsRecovered,
+  };
+}
+
+async function recoverStaleCrawlQueueEntry(
+  queueEntry: CrawlQueueDocument,
+  repository: JobCrawlerRepository,
+  now: Date,
+) {
+  const crawlRun = await repository.getCrawlRun(queueEntry.crawlRunId);
+  if (queueEntry.ownerKey) {
+    await repository.releaseSourceInventoryLeasesForOwner(queueEntry.ownerKey);
+  }
+
+  if (!crawlRun) {
+    await repository.finalizeCrawlQueueEntry(queueEntry.crawlRunId, {
+      status: "aborted",
+      finishedAt: now.toISOString(),
+    });
+    return false;
+  }
+
+  await recoverStaleCrawlRun(crawlRun, repository, now, {
+    queueEntry,
+  });
+  await repository.finalizeCrawlQueueEntry(queueEntry.crawlRunId, {
+    status: "aborted",
+    finishedAt: now.toISOString(),
+  });
+  return true;
+}
+
+async function recoverStaleCrawlRun(
+  crawlRun: CrawlRun,
+  repository: JobCrawlerRepository,
+  now: Date,
+  options: {
+    queueEntry?: CrawlQueueDocument;
+  } = {},
+) {
+  if (crawlRun.status !== "running") {
+    return false;
+  }
+
+  const ownerKey =
+    options.queueEntry?.ownerKey ??
+    (await repository.getCrawlRunControlState(crawlRun._id))?.ownerKey;
+  if (ownerKey) {
+    await repository.releaseSourceInventoryLeasesForOwner(ownerKey);
+  }
+
+  const search = await repository.getSearch(crawlRun.searchId);
+  const searchSessionId = crawlRun.searchSessionId ?? options.queueEntry?.searchSessionId;
+  const sourceResults = await repository.getCrawlSourceResults(crawlRun._id);
+  const finishedAt = now.toISOString();
+  const errorMessage = "Recovered stale recurring/background crawl run after missed heartbeats.";
+  const diagnostics = withStaleRecoveryDiagnostics(crawlRun.diagnostics);
+
+  if (search && searchSessionId) {
+    await finalizeBackgroundRun({
+      repository,
+      search,
+      searchSessionId,
+      crawlRunId: crawlRun._id,
+      status: "aborted",
+      finishedAt,
+      totalFetchedJobs: crawlRun.totalFetchedJobs,
+      totalMatchedJobs: crawlRun.totalMatchedJobs,
+      totalSavedJobs: crawlRun.dedupedJobs,
+      diagnostics,
+      sourceResults,
+      errorMessage,
+    });
+    return true;
+  }
+
+  await repository.finalizeCrawlRun(crawlRun._id, {
+    status: "aborted",
+    stage: "finalizing",
+    totalFetchedJobs: crawlRun.totalFetchedJobs,
+    totalMatchedJobs: crawlRun.totalMatchedJobs,
+    dedupedJobs: crawlRun.dedupedJobs,
+    diagnostics,
+    validationMode: crawlRun.validationMode,
+    providerSummary: crawlRun.providerSummary,
+    errorMessage,
+    finishedAt,
+  });
+  if (search) {
+    await repository.updateSearchLatestRun(search._id, crawlRun._id, "aborted", finishedAt);
+  }
+
+  return true;
+}
+
+function withStaleRecoveryDiagnostics(diagnostics: CrawlDiagnostics): CrawlDiagnostics {
+  return {
+    ...diagnostics,
+    backgroundPersistence: {
+      jobsInserted: diagnostics.backgroundPersistence?.jobsInserted ?? 0,
+      jobsUpdated: diagnostics.backgroundPersistence?.jobsUpdated ?? 0,
+      jobsLinkedToRun: diagnostics.backgroundPersistence?.jobsLinkedToRun ?? 0,
+      indexedEventsEmitted: diagnostics.backgroundPersistence?.indexedEventsEmitted ?? 0,
+      failedBatches: diagnostics.backgroundPersistence?.failedBatches ?? 0,
+      failureSamples: diagnostics.backgroundPersistence?.failureSamples ?? [],
+      providerStats: diagnostics.backgroundPersistence?.providerStats ?? [],
+      skippedReason: "recovered_stale_background_run",
+    },
+  };
 }
 
 async function createBackgroundRunController(input: {
