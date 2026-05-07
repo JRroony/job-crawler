@@ -1,10 +1,18 @@
 import { pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 
 import { MongoClient, type Collection, type Document, type Filter } from "mongodb";
+
+type SearchDiagnosticScenario = {
+  title: string;
+  location: string;
+};
 
 type CliOptions = {
   title: string;
   location: string;
+  scenarios: SearchDiagnosticScenario[];
+  usedDefaultScenarios: boolean;
 };
 
 type CoverageFilters = {
@@ -30,6 +38,12 @@ const prefix = "[search:coverage]";
 
 const defaultMongoUri = "mongodb://127.0.0.1:27017/job_crawler";
 const jobsCollectionName = "jobs";
+const defaultSearchScenarios: SearchDiagnosticScenario[] = [
+  { title: "software engineer", location: "United States" },
+  { title: "data analyst", location: "United States" },
+  { title: "business analyst", location: "United States" },
+  { title: "product manager", location: "United States" },
+];
 
 const usStates = [
   ["AL", "Alabama"],
@@ -185,6 +199,16 @@ export function parseDiagnoseSearchArgs(argv: string[]): CliOptions {
     }
   }
 
+  if (!options.title && !options.location) {
+    const firstScenario = defaultSearchScenarios[0]!;
+    return {
+      title: firstScenario.title,
+      location: firstScenario.location,
+      scenarios: defaultSearchScenarios,
+      usedDefaultScenarios: true,
+    };
+  }
+
   if (!options.title || !options.location) {
     throw new Error(
       'Usage: npm run diagnose:search -- --title "machine learning engineer" --location "United States"',
@@ -194,6 +218,13 @@ export function parseDiagnoseSearchArgs(argv: string[]): CliOptions {
   return {
     title: options.title,
     location: options.location,
+    scenarios: [
+      {
+        title: options.title,
+        location: options.location,
+      },
+    ],
+    usedDefaultScenarios: false,
   };
 }
 
@@ -330,6 +361,7 @@ export function buildCoverageFilters(): CoverageFilters {
 }
 
 async function main() {
+  installServerOnlyShim();
   const options = parseDiagnoseSearchArgs(process.argv.slice(2));
   const mongoUri = process.env.MONGODB_URI ?? defaultMongoUri;
   const serverSelectionTimeoutMS = Number(
@@ -343,45 +375,146 @@ async function main() {
     const db = client.db(dbName);
     const jobs = db.collection(jobsCollectionName);
     const filters = buildCoverageFilters();
+    const [{ JobCrawlerRepository }, { getIndexedJobsForSearch }] = await Promise.all([
+      import("@/lib/server/db/repository"),
+      import("@/lib/server/search/indexed-jobs"),
+    ]);
+    const repository = new JobCrawlerRepository(db as never);
 
     const [
+      indexedSearchScenarios,
       databaseCoverage,
       rawLocationCoverage,
       rawTitleCoverage,
       combinedCoverage,
       samples,
     ] = await Promise.all([
+      buildIndexedSearchScenarioDiagnostics(
+        repository,
+        getIndexedJobsForSearch,
+        options.scenarios,
+      ),
       buildDatabaseCoverage(jobs, filters),
       buildRawLocationCoverage(jobs, filters),
       buildRawTitleCoverage(jobs, filters),
       buildCombinedCoverage(jobs, filters),
       buildSamples(jobs, filters),
     ]);
+    const failures = indexedSearchScenarios
+      .filter((scenario) => scenario.returnedCount <= 0)
+      .map(
+        (scenario) =>
+          `No indexed jobs returned for ${scenario.title} / ${scenario.location}.`,
+      );
 
     const report = {
       query: {
         title: options.title,
         location: options.location,
+        usedDefaultScenarios: options.usedDefaultScenarios,
+        scenarios: options.scenarios,
       },
       connection: {
         databaseName: dbName,
         collectionName: jobsCollectionName,
       },
+      indexedSearchScenarios,
       databaseCoverage,
       rawLocationCoverage,
       rawTitleCoverage,
       combinedCoverage,
       samples,
+      failures,
+      pass: failures.length === 0,
       notes: [
+        "Indexed search scenarios call the DB-backed search index directly and do not run providers.",
         "Counts are direct MongoDB diagnostics and do not call the application search pipeline.",
         "Raw fallback counts are explainability probes; they are intentionally not search behavior changes.",
       ],
     };
 
-    console.log(`${prefix} ${JSON.stringify(report, null, 2)}`);
+    const output = `${prefix} ${JSON.stringify(report, null, 2)}`;
+    if (failures.length > 0) {
+      console.error(output);
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log(output);
   } finally {
     await client.close();
   }
+}
+
+async function buildIndexedSearchScenarioDiagnostics(
+  repository: unknown,
+  getIndexedJobsForSearch: (
+    repository: never,
+    filters: { title: string; country: string },
+  ) => Promise<{
+    candidateCount: number;
+    matchedCount: number;
+    timingsMs: {
+      candidateQuery: number;
+      requestTimeRefinement: number;
+      total: number;
+    };
+    matches: Array<{
+      job: {
+        _id: string;
+        title: string;
+        company: string;
+        locationText?: string;
+        country?: string;
+        sourcePlatform?: string;
+      };
+    }>;
+  }>,
+  scenarios: SearchDiagnosticScenario[],
+) {
+  return Promise.all(
+    scenarios.map(async (scenario) => {
+      const indexedSearch = await getIndexedJobsForSearch(repository as never, {
+        title: scenario.title,
+        country: scenario.location,
+      });
+
+      return {
+        title: scenario.title,
+        location: scenario.location,
+        dbSearchMs: indexedSearch.timingsMs.total,
+        providerCrawlMs: 0,
+        returnedCount: indexedSearch.matches.length,
+        candidateCount: indexedSearch.candidateCount,
+        matchedCount: indexedSearch.matchedCount,
+        timing: {
+          dbSearchMs: indexedSearch.timingsMs.total,
+          candidateQueryMs: indexedSearch.timingsMs.candidateQuery,
+          requestTimeRefinementMs: indexedSearch.timingsMs.requestTimeRefinement,
+          providerCrawlMs: 0,
+        },
+        sampleJobs: indexedSearch.matches.slice(0, 5).map(({ job }) => ({
+          id: job._id,
+          title: job.title,
+          company: job.company,
+          locationText: job.locationText,
+          country: job.country,
+          sourcePlatform: job.sourcePlatform,
+        })),
+      };
+    }),
+  );
+}
+
+function installServerOnlyShim() {
+  const require = createRequire(import.meta.url);
+  const id = require.resolve("server-only");
+  require.cache[id] = {
+    id,
+    filename: id,
+    loaded: true,
+    exports: {},
+  } as NodeJS.Module;
 }
 
 async function buildDatabaseCoverage(

@@ -14,7 +14,9 @@
     "diagnose:ingestion-persistence": "tsx scripts/diagnose-ingestion-persistence.ts",
     "diagnose:persistence-gate": "tsx scripts/diagnose-persistence-gate.ts",
     "diagnose:live-ingestion": "tsx scripts/diagnose-live-ingestion.ts",
+    "diagnose:sponsorship": "tsx scripts/diagnose-sponsorship.ts",
     "diagnose:search": "tsx scripts/diagnose-search-coverage.ts",
+    "import:sponsorship-companies": "tsx scripts/import-sponsorship-companies.ts",
     "discover:sources": "tsx scripts/discover-sources.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

@@ -19,6 +19,27 @@ describe("search coverage diagnostic script helpers", () => {
     ).toEqual({
       title: "machine learning engineer",
       location: "United States",
+      scenarios: [
+        {
+          title: "machine learning engineer",
+          location: "United States",
+        },
+      ],
+      usedDefaultScenarios: false,
+    });
+  });
+
+  it("uses representative DB-first scenarios when no CLI arguments are provided", () => {
+    expect(parseDiagnoseSearchArgs([])).toEqual({
+      title: "software engineer",
+      location: "United States",
+      scenarios: [
+        { title: "software engineer", location: "United States" },
+        { title: "data analyst", location: "United States" },
+        { title: "business analyst", location: "United States" },
+        { title: "product manager", location: "United States" },
+      ],
+      usedDefaultScenarios: true,
     });
   });
 

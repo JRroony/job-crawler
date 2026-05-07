@@ -40,6 +40,13 @@ const ignoredTerms = new Set([
   "technologies",
   "technology",
   "the",
+  "ashby",
+  "company page",
+  "companypage",
+  "greenhouse",
+  "lever",
+  "smartrecruiters",
+  "workday",
 ]);
 
 async function main() {
@@ -141,7 +148,7 @@ async function main() {
   }
 }
 
-function findFailureReasonContamination(
+export function findFailureReasonContamination(
   records: SourceInventoryDiagnosticRecord[],
   knownTerms: KnownSourceTerm[],
 ) {
@@ -165,7 +172,7 @@ function findFailureReasonContamination(
   });
 }
 
-function collectKnownSourceTerms(record: SourceInventoryDiagnosticRecord): KnownSourceTerm[] {
+export function collectKnownSourceTerms(record: SourceInventoryDiagnosticRecord): KnownSourceTerm[] {
   const ownerId = readString(record._id);
   if (!ownerId) {
     return [];
@@ -201,7 +208,7 @@ function pushTerm(
   terms.push({ ownerId, field, term });
 }
 
-function dedupeKnownSourceTerms(terms: KnownSourceTerm[]) {
+export function dedupeKnownSourceTerms(terms: KnownSourceTerm[]) {
   const deduped = new Map<string, KnownSourceTerm>();
   for (const term of terms) {
     deduped.set(`${term.ownerId}:${term.field}:${term.term}`, term);

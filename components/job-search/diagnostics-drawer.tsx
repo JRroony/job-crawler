@@ -7,9 +7,11 @@ import type { SearchFilters } from "@/lib/types";
 import { crawlModeOptions, experienceModeOptions, labelForProviderPlatform, labelForProviderStatus } from "@/components/job-crawler/ui-config";
 import { describeSelectedPlatforms } from "@/components/job-search/helpers";
 import { cn, formatRelativeMoment } from "@/lib/utils";
+import type { AgentDiagnostics } from "@/lib/server/agent/types";
 
 type DiagnosticsDrawerProps = {
   activeResult: CrawlResponse | null;
+  agentDiagnostics?: AgentDiagnostics | null;
   recentSearches: SearchDocument[];
   filters: SearchFilters;
   onLoadSearch: (searchId: string) => void;
@@ -143,6 +145,10 @@ export function DiagnosticsDrawer(props: DiagnosticsDrawerProps) {
             </div>
           </div>
         </section>
+
+        {props.agentDiagnostics?.agentEnabled ? (
+          <AgentDiagnosticsSection agentDiagnostics={props.agentDiagnostics} />
+        ) : null}
 
         {props.activeResult ? (
           <section className="space-y-4">
@@ -309,4 +315,120 @@ function describeSupplementalReason(
   }
 
   return "n/a";
+}
+
+function AgentDiagnosticsSection(props: { agentDiagnostics: AgentDiagnostics }) {
+  const d = props.agentDiagnostics;
+
+  return (
+    <section className="space-y-3 rounded-[20px] border border-tide/12 bg-tide/3 px-5 py-5">
+      <div>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-tide/75">
+            Agent Diagnostics
+          </span>
+          <span className="rounded-full bg-tide/10 px-2 py-0.5 text-[10px] font-semibold text-tide">
+            {d.agentMode}
+          </span>
+          {d.crawlTriggered ? (
+            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+              crawl triggered
+            </span>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+        <StatCard label="DB candidates" value={`${d.dbCandidateCount}`} />
+        <StatCard label="DB fresh" value={`${d.dbFreshCount}`} />
+        <StatCard
+          label="Quality score"
+          value={`${(d.qualityScore * 100).toFixed(0)}%`}
+        />
+        <StatCard
+          label="Duplicates"
+          value={`${(d.duplicateRate * 100).toFixed(0)}%`}
+        />
+        <StatCard label="Title variants" value={`${d.titleVariantsUsed.length}`} />
+        <StatCard
+          label="Location clauses"
+          value={`${d.locationClausesUsed.length}`}
+        />
+        <StatCard
+          label="Filtered: title"
+          value={`${d.filteredByTitle}`}
+        />
+        <StatCard
+          label="Filtered: location"
+          value={`${d.filteredByLocation}`}
+        />
+        <StatCard
+          label="Filtered: seniority"
+          value={`${d.filteredBySeniority}`}
+        />
+      </div>
+
+      {d.crawlReason ? (
+        <div className="rounded-[16px] border border-ink/8 bg-white px-4 py-3">
+          <div className="text-xs font-semibold text-ink">Crawl reason</div>
+          <p className="mt-1 text-xs leading-5 text-slate">{d.crawlReason}</p>
+        </div>
+      ) : null}
+
+      {d.plannedPlatforms.length > 0 ? (
+        <div className="rounded-[16px] border border-ink/8 bg-white px-4 py-3">
+          <div className="text-xs font-semibold text-ink">Planned platforms</div>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {d.plannedPlatforms.map((p) => (
+              <span
+                key={p}
+                className="rounded-full border border-ink/10 px-2 py-0.5 text-[10px] font-medium text-slate"
+              >
+                {p}{" "}
+                {d.platformSupportStatuses[p] ? `(${d.platformSupportStatuses[p]})` : ""}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {d.decisionChain.length > 0 ? (
+        <details className="rounded-[16px] border border-ink/8 bg-white px-4 py-3">
+          <summary className="cursor-pointer text-xs font-semibold text-ink">
+            Decision chain ({d.decisionChain.length} steps)
+          </summary>
+          <ul className="mt-2 space-y-1">
+            {d.decisionChain.map((step, i) => (
+              <li key={i} className="text-[11px] leading-5 text-slate">
+                {i + 1}. {step}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+
+      {d.warnings.length > 0 ? (
+        <div className="rounded-[16px] border border-amber-200 bg-amber-50 px-4 py-3">
+          <div className="text-xs font-semibold text-amber-800">
+            Warnings ({d.warnings.length})
+          </div>
+          <ul className="mt-1 space-y-0.5">
+            {d.warnings.map((w, i) => (
+              <li key={i} className="text-[11px] leading-5 text-amber-700">
+                {w}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      <div className="text-[10px] text-slate/60">
+        Stage timings: intent={d.stageTimingsMs.intentParsing}ms,
+        expansion={d.stageTimingsMs.queryExpansion}ms,
+        db={d.stageTimingsMs.dbQuery}ms,
+        quality={d.stageTimingsMs.qualityEvaluation}ms,
+        total={d.stageTimingsMs.total}ms
+      </div>
+    </section>
+  );
 }

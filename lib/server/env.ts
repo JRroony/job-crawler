@@ -66,6 +66,24 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("true")
     .transform((value) => value === "true"),
+  JOB_AGENT_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  JOB_AGENT_LLM_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  JOB_AGENT_MODE: z.enum(["fast", "balanced", "deep"]).default("fast"),
+  JOB_AGENT_MIN_RESULTS: z.coerce.number().int().positive().default(50),
+  JOB_AGENT_FRESHNESS_DAYS: z.coerce.number().int().positive().default(14),
+  JOB_AGENT_MAX_CRAWL_QUERIES: z.coerce.number().int().positive().default(12),
+  JOB_AGENT_MAX_LOCATION_CLAUSES: z.coerce.number().int().positive().default(8),
+  JOB_AGENT_SOURCE_COOLDOWN_MINUTES: z.coerce.number().int().positive().default(30),
+  JOB_AGENT_DEBUG: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
 });
 
 type ParsedEnv = z.infer<typeof envSchema>;

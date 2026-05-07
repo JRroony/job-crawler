@@ -7,7 +7,12 @@ import {
   startSearchFromFilters,
   validateSearchFiltersInput,
 } from "@/lib/server/search/service";
-import { sanitizeSearchFiltersInput } from "@/lib/types";
+import { sanitizeSearchFiltersInput, searchFiltersSchema } from "@/lib/types";
+import {
+  runJobRetrievalAgent,
+  resolveAgentConfig,
+  type AgentDiagnostics,
+} from "@/lib/server/agent/job-retrieval-agent";
 
 const searchRequestLogPrefix = "[searches:request]";
 const searchValidationLogPrefix = "[searches:validation]";
@@ -74,6 +79,35 @@ export async function POST(request: Request) {
       ...timing,
     });
 
+    // Run the agent for diagnostics and decision trace
+    let agentDiagnostics: AgentDiagnostics | null = null;
+    try {
+      const agentConfig = resolveAgentConfig();
+      if (agentConfig.enabled) {
+        const agentResult = await runJobRetrievalAgent(
+          searchFiltersSchema.parse(payload),
+          {
+            dbQueryFn: async () => {
+              // Reuse the already-retrieved job IDs from the search session
+              const sessionJobs = result.jobs.slice(0, 500);
+              return sessionJobs.map((j) => ({
+                _id: j._id,
+                title: j.title,
+                indexedAt: j.indexedAt,
+                crawledAt: j.crawledAt,
+                discoveredAt: j.discoveredAt,
+                sourcePlatform: j.sourcePlatform,
+              }));
+            },
+            config: agentConfig,
+          },
+        );
+        agentDiagnostics = agentResult.agentDiagnostics;
+      }
+    } catch (agentError) {
+      console.warn("[searches:agent-error]", agentError);
+    }
+
     return NextResponse.json(
       {
         ...result,
@@ -83,6 +117,7 @@ export async function POST(request: Request) {
         providerCrawlMs,
         totalSearchMs,
         timing,
+        ...(agentDiagnostics ? { agentDiagnostics } : {}),
       },
       { status: 201 },
     );

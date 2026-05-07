@@ -27,6 +27,7 @@ import type {
   SearchDocument,
   SearchFilters,
 } from "@/lib/types";
+import type { AgentDiagnostics } from "@/lib/server/agent/types";
 import {
   crawlModes,
   crawlerPlatforms,
@@ -148,6 +149,7 @@ export function JobCrawlerApp({
   const [isFilterDrawerOpen, setIsFilterDrawerOpen] = useState(false);
   const [debugAvailable, setDebugAvailable] = useState(false);
   const [debugEnabled, setDebugEnabled] = useState(false);
+  const [agentDiagnostics, setAgentDiagnostics] = useState<AgentDiagnostics | null>(null);
   const hydratedUrlSearchRef = useRef(false);
   const pollSequenceRef = useRef(0);
   const loadMoreSequenceRef = useRef(0);
@@ -418,7 +420,7 @@ export function JobCrawlerApp({
         body: JSON.stringify(payloadResult.payload),
       });
 
-      const payload = (await response.json()) as SearchRoutePayload;
+      const payload = (await response.json()) as SearchRoutePayload & { agentDiagnostics?: AgentDiagnostics };
       if (!isLatestClientRequest(pollToken, pollSequenceRef.current)) {
         logStaleSearchPayloadIgnored(payload, activeSearchIdentityRef.current);
         return;
@@ -441,6 +443,10 @@ export function JobCrawlerApp({
           "runtime",
           payload.error ?? "The search request failed.",
         );
+      }
+
+      if (payload.agentDiagnostics) {
+        setAgentDiagnostics(payload.agentDiagnostics);
       }
 
       if (payload.queued) {
@@ -1045,6 +1051,7 @@ export function JobCrawlerApp({
           {debugEnabled && (activeResult || recentSearches.length > 0) ? (
             <DiagnosticsDrawer
               activeResult={activeResult}
+              agentDiagnostics={agentDiagnostics}
               recentSearches={recentSearches}
               filters={filters}
               onLoadSearch={(searchId) => void loadSearch(searchId)}

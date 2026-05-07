@@ -858,11 +858,17 @@ describe("pipeline title retrieval", () => {
   it("persists supplemental Greenhouse results without waiting for a slower baseline Greenhouse batch", async () => {
     const repository = new JobCrawlerRepository(new FakeDb());
     const now = new Date("2026-04-10T15:05:00.000Z");
+    let releaseBaselineProvider: () => void = () => undefined;
+    let baselineProviderStarted = false;
+    const baselineProviderBlock = new Promise<void>((resolve) => {
+      releaseBaselineProvider = resolve;
+    });
 
     const provider = createStubProvider("greenhouse", async (_context, sources) => {
       const source = sources[0];
       if (source?.token === "acme") {
-        await new Promise((resolve) => setTimeout(resolve, 80));
+        baselineProviderStarted = true;
+        await baselineProviderBlock;
       }
 
       return {
@@ -941,14 +947,29 @@ describe("pipeline title retrieval", () => {
       },
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 35));
-    const [search] = await repository.listRecentSearches(1);
-    const crawlRun = await repository.getCrawlRun(search.latestCrawlRunId as string);
-    const midJobs = await repository.getJobsByCrawlRun(crawlRun?._id as string);
+    let midRunError: unknown;
+    try {
+      await vi.waitFor(async () => {
+        const [search] = await repository.listRecentSearches(1);
+        expect(search).toBeDefined();
+        const crawlRun = await repository.getCrawlRun(search.latestCrawlRunId as string);
+        const midJobs = await repository.getJobsByCrawlRun(crawlRun?._id as string);
+        const midTitles = midJobs.map((job) => job.title);
 
-    expect(midJobs.map((job) => job.title)).toContain("Supplemental Software Engineer");
+        expect(baselineProviderStarted).toBe(true);
+        expect(midTitles).toContain("Supplemental Software Engineer");
+        expect(midTitles).not.toContain("Baseline Software Engineer");
+      });
+    } catch (error) {
+      midRunError = error;
+    } finally {
+      releaseBaselineProvider();
+    }
 
     const result = await runPromise;
+    if (midRunError) {
+      throw midRunError;
+    }
 
     expect(result.jobs.map((job) => job.title)).toEqual(
       expect.arrayContaining([
